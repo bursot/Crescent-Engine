@@ -35,12 +35,12 @@ mkdir -p "$DEPS_DIR"
 clone_repo "https://github.com/jrouwe/JoltPhysics.git" "$DEPS_DIR/JoltPhysics" "$JOLT_TAG"
 clone_repo "https://github.com/assimp/assimp.git" "$DEPS_DIR/assimp" "$ASSIMP_TAG"
 
-build_cmake "$DEPS_DIR/JoltPhysics" "$DEPS_DIR/jolt-build-debug" Debug \
+build_cmake "$DEPS_DIR/JoltPhysics/Build" "$DEPS_DIR/jolt-build-debug" Debug \
   -DJPH_BUILD_SHARED_LIBRARY=OFF \
   -DJPH_BUILD_EXAMPLES=OFF \
   -DJPH_BUILD_TESTS=OFF
 
-build_cmake "$DEPS_DIR/JoltPhysics" "$DEPS_DIR/jolt-build-release" Release \
+build_cmake "$DEPS_DIR/JoltPhysics/Build" "$DEPS_DIR/jolt-build-release" Release \
   -DJPH_BUILD_SHARED_LIBRARY=OFF \
   -DJPH_BUILD_EXAMPLES=OFF \
   -DJPH_BUILD_TESTS=OFF
@@ -48,13 +48,21 @@ build_cmake "$DEPS_DIR/JoltPhysics" "$DEPS_DIR/jolt-build-release" Release \
 build_cmake "$DEPS_DIR/assimp" "$DEPS_DIR/assimp-build-debug" Debug \
   -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
   -DASSIMP_BUILD_TESTS=OFF \
-  -DASSIMP_BUILD_ZLIB=ON \
+  -DASSIMP_BUILD_ZLIB=OFF \
+  -DASSIMP_INJECT_DEBUG_POSTFIX=OFF \
   -DBUILD_SHARED_LIBS=OFF
 
 build_cmake "$DEPS_DIR/assimp" "$DEPS_DIR/assimp-build-release" Release \
   -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
   -DASSIMP_BUILD_TESTS=OFF \
-  -DASSIMP_BUILD_ZLIB=ON \
+  -DASSIMP_BUILD_ZLIB=OFF \
+  -DASSIMP_INJECT_DEBUG_POSTFIX=OFF \
   -DBUILD_SHARED_LIBS=OFF
+
+ASSIMP_CONFIG_SRC="$DEPS_DIR/assimp-build-release/include/assimp/config.h"
+ASSIMP_CONFIG_DST="$DEPS_DIR/assimp/include/assimp/config.h"
+if [ -f "$ASSIMP_CONFIG_SRC" ]; then
+  cp "$ASSIMP_CONFIG_SRC" "$ASSIMP_CONFIG_DST"
+fi
 
 echo "Dependencies are ready."

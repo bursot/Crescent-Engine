@@ -23,6 +23,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifndef aiTextureType_GLTF_METALLIC_ROUGHNESS
+#define aiTextureType_GLTF_METALLIC_ROUGHNESS aiTextureType_UNKNOWN
+#endif
+
 namespace Crescent {
 namespace {
 
