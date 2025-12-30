@@ -39,9 +39,9 @@ MIT. See `LICENSE`.
 See `THIRD_PARTY_NOTICES.md`.
 
    
-<img width="1512" height="982" alt="Ekran Resmi 2026-12-31 02 18 35" src="https://github.com/user-attachments/assets/e6c55517-22ec-4526-b150-52d8b496e645" />
-<img width="1512" height="982" alt="Ekran Resmi 2025-12-27 22 51 38" src="https://github.com/user-attachments/assets/de853ff4-b5be-40a7-a69b-238e6db33a35" />
-<img width="1512" height="982" alt="Ekran Resmi 2025-12-24 23 51 47" src="https://github.com/user-attachments/assets/e3f88f6a-1312-4bef-8034-5c642a18d867" />
-<img width="1512" height="982" alt="Ekran Resmi 2025-12-24 23 49 59" src="https://github.com/user-attachments/assets/fd74e850-f561-4cfc-a5f8-65bf41c66a6a" />
-<img width="1512" height="982" alt="Ekran Resmi 2025-12-21 19 56 24" src="https://github.com/user-attachments/assets/0bb6fb9c-66b1-49fe-b8d6-8a1b4d408431" />
-<img width="1512" height="982" alt="Ekran Resmi 2025-12-21 19 55 37" src="https://github.com/user-attachments/assets/f9d92491-2f25-4327-8951-76f2498441ee" />
+
+<img width="1510" height="886" alt="531120812-f9d92491-2f25-4327-8951-76f2498441ee" src="https://github.com/user-attachments/assets/327431a7-0fce-49bc-b799-7cd71ba66d0c" />
+<img width="1511" height="882" alt="531120820-0bb6fb9c-66b1-49fe-b8d6-8a1b4d408431" src="https://github.com/user-attachments/assets/f5b25593-c6cc-4106-845d-795bf60e95cf" />
+<img width="1509" height="892" alt="531120826-e3f88f6a-1312-4bef-8034-5c642a18d867" src="https://github.com/user-attachments/assets/93e7e722-b712-44dc-b601-b63545284a53" />
+<img width="1502" height="880" alt="531120828-de853ff4-b5be-40a7-a69b-238e6db33a35" src="https://github.com/user-attachments/assets/e73d618d-ebca-422e-b570-5f561f7a337e" />
+<img width="1508" height="885" alt="531120835-e6c55517-22ec-4526-b150-52d8b496e645" src="https://github.com/user-attachments/assets/6a966dd5-6295-4298-86c6-15bf35c8661f" />
