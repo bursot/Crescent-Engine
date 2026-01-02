@@ -26,7 +26,7 @@ public:
     
     // Name
     const std::string& getName() const { return m_Name; }
-    void setName(const std::string& name) { m_Name = name; }
+    void setName(const std::string& name);
     
     // Tag and Layer
     const std::string& getTag() const { return m_Tag; }
@@ -80,6 +80,7 @@ public:
     
 private:
     void addComponentInternal(std::unique_ptr<Component> component);
+    void removeAllComponentsInternal(bool callLifecycle);
     
 private:
     UUID m_UUID;
@@ -87,6 +88,7 @@ private:
     std::string m_Tag;
     int m_Layer;
     bool m_IsActive;
+    bool m_Destroyed;
     
     Scene* m_Scene;
     Transform* m_Transform; // Cached for fast access

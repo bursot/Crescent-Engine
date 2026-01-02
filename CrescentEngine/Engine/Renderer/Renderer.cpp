@@ -1621,8 +1621,10 @@ MTL::RenderPipelineState* Renderer::getPipelineState(const PipelineStateKey& key
         std::cout << "Pipeline state created" << std::endl;
     }
     
-    // Cache it
-    m_pipelineStates[key] = pipelineState;
+    // Cache it only on success
+    if (pipelineState) {
+        m_pipelineStates[key] = pipelineState;
+    }
     
     // Cleanup
     vertexDescriptor->release();
@@ -2045,6 +2047,10 @@ void Renderer::ensureRenderTargets(uint32_t width, uint32_t height, uint32_t msa
         msaaDepth->release();
     }
 
+    if (!m_ssaoNoiseTexture) {
+        buildSSAONoiseTexture();
+    }
+
     if (formatChanged) {
         buildEnvironmentPipeline();
         buildDebugPipelines();
@@ -2348,6 +2354,34 @@ void Renderer::renderScene(Scene* scene) {
     
     // Create command buffer
     MTL::CommandBuffer* commandBuffer = m_commandQueue->commandBuffer();
+
+    size_t skinningOffset = 0;
+    size_t prevSkinningOffset = 0;
+    auto allocateSkinningSlice = [&](MTL::Buffer*& buffer,
+                                     size_t& capacity,
+                                     size_t& offset,
+                                     size_t bytes,
+                                     size_t& outOffset) -> bool {
+        constexpr size_t kAlignment = 256;
+        size_t alignedOffset = (offset + (kAlignment - 1)) & ~(kAlignment - 1);
+        size_t required = alignedOffset + bytes;
+        if (!buffer || required > capacity) {
+            size_t newCapacity = std::max(required, capacity > 0 ? capacity * 2 : required);
+            if (buffer) {
+                buffer->release();
+            }
+            buffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
+            capacity = buffer ? buffer->length() : 0;
+            alignedOffset = 0;
+            required = bytes;
+        }
+        if (!buffer || capacity < required) {
+            return false;
+        }
+        outOffset = alignedOffset;
+        offset = alignedOffset + bytes;
+        return true;
+    };
     
     // Ensure meshes are uploaded before any pass uses them
     const auto& entitiesPre = scene->getAllEntities();
@@ -2547,16 +2581,12 @@ void Renderer::renderScene(Scene* scene) {
                 const auto& boneMatrices = skinned->getBoneMatrices();
                 if (!boneMatrices.empty()) {
                     size_t bytes = boneMatrices.size() * sizeof(Math::Matrix4x4);
-                    if (!m_skinningBuffer || m_skinningBufferCapacity < bytes) {
-                        if (m_skinningBuffer) {
-                            m_skinningBuffer->release();
-                        }
-                        m_skinningBuffer = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
-                        m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
-                    }
-                    if (m_skinningBuffer) {
-                        std::memcpy(m_skinningBuffer->contents(), boneMatrices.data(), bytes);
-                        preEncoder->setVertexBuffer(m_skinningBuffer, 0, 3);
+                    size_t bufferOffset = 0;
+                    if (allocateSkinningSlice(m_skinningBuffer, m_skinningBufferCapacity, skinningOffset, bytes, bufferOffset)) {
+                        std::memcpy(static_cast<uint8_t*>(m_skinningBuffer->contents()) + bufferOffset,
+                                    boneMatrices.data(),
+                                    bytes);
+                        preEncoder->setVertexBuffer(m_skinningBuffer, bufferOffset, 3);
                     }
                 }
             }
@@ -2826,32 +2856,24 @@ void Renderer::renderScene(Scene* scene) {
                 const auto& boneMatrices = skinned->getBoneMatrices();
                 if (!boneMatrices.empty()) {
                     size_t bytes = boneMatrices.size() * sizeof(Math::Matrix4x4);
-                    if (!m_skinningBuffer || m_skinningBufferCapacity < bytes) {
-                        if (m_skinningBuffer) {
-                            m_skinningBuffer->release();
-                        }
-                        m_skinningBuffer = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
-                        m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
-                    }
-                    if (m_skinningBuffer) {
-                        std::memcpy(m_skinningBuffer->contents(), boneMatrices.data(), bytes);
-                        velEncoder->setVertexBuffer(m_skinningBuffer, 0, 3);
+                    size_t bufferOffset = 0;
+                    if (allocateSkinningSlice(m_skinningBuffer, m_skinningBufferCapacity, skinningOffset, bytes, bufferOffset)) {
+                        std::memcpy(static_cast<uint8_t*>(m_skinningBuffer->contents()) + bufferOffset,
+                                    boneMatrices.data(),
+                                    bytes);
+                        velEncoder->setVertexBuffer(m_skinningBuffer, bufferOffset, 3);
                     }
 
                     const auto& prevBones = skinned->getPreviousBoneMatrices();
                     const auto& usePrevBones = (prevBones.size() == boneMatrices.size() && !prevBones.empty())
                         ? prevBones
                         : boneMatrices;
-                    if (!m_prevSkinningBuffer || m_prevSkinningBufferCapacity < bytes) {
-                        if (m_prevSkinningBuffer) {
-                            m_prevSkinningBuffer->release();
-                        }
-                        m_prevSkinningBuffer = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
-                        m_prevSkinningBufferCapacity = m_prevSkinningBuffer ? m_prevSkinningBuffer->length() : 0;
-                    }
-                    if (m_prevSkinningBuffer) {
-                        std::memcpy(m_prevSkinningBuffer->contents(), usePrevBones.data(), bytes);
-                        velEncoder->setVertexBuffer(m_prevSkinningBuffer, 0, 6);
+                    size_t prevBufferOffset = 0;
+                    if (allocateSkinningSlice(m_prevSkinningBuffer, m_prevSkinningBufferCapacity, prevSkinningOffset, bytes, prevBufferOffset)) {
+                        std::memcpy(static_cast<uint8_t*>(m_prevSkinningBuffer->contents()) + prevBufferOffset,
+                                    usePrevBones.data(),
+                                    bytes);
+                        velEncoder->setVertexBuffer(m_prevSkinningBuffer, prevBufferOffset, 6);
                     }
                 }
             }
@@ -3059,7 +3081,11 @@ void Renderer::renderScene(Scene* scene) {
 
         renderMeshRenderer(meshRenderer, camera, lights);
         PipelineStateKey pipelineKey{true, true, true, false, isSkinned, m_outputHDR, static_cast<uint8_t>(m_msaaSamples)};
-        encoder->setRenderPipelineState(getPipelineState(pipelineKey));
+        MTL::RenderPipelineState* pipelineState = getPipelineState(pipelineKey);
+        if (!pipelineState) {
+            continue;
+        }
+        encoder->setRenderPipelineState(pipelineState);
         
         // Setup model uniforms
         ModelUniforms modelUniforms;
@@ -3166,16 +3192,12 @@ void Renderer::renderScene(Scene* scene) {
             const auto& boneMatrices = skinned->getBoneMatrices();
             if (!boneMatrices.empty()) {
                 size_t bytes = boneMatrices.size() * sizeof(Math::Matrix4x4);
-                if (!m_skinningBuffer || m_skinningBufferCapacity < bytes) {
-                    if (m_skinningBuffer) {
-                        m_skinningBuffer->release();
-                    }
-                    m_skinningBuffer = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
-                    m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
-                }
-                if (m_skinningBuffer) {
-                    std::memcpy(m_skinningBuffer->contents(), boneMatrices.data(), bytes);
-                    encoder->setVertexBuffer(m_skinningBuffer, 0, 3);
+                size_t bufferOffset = 0;
+                if (allocateSkinningSlice(m_skinningBuffer, m_skinningBufferCapacity, skinningOffset, bytes, bufferOffset)) {
+                    std::memcpy(static_cast<uint8_t*>(m_skinningBuffer->contents()) + bufferOffset,
+                                boneMatrices.data(),
+                                bytes);
+                    encoder->setVertexBuffer(m_skinningBuffer, bufferOffset, 3);
                 }
             }
         }

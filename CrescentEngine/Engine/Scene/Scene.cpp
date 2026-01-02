@@ -2,6 +2,7 @@
 #include "SceneSerializer.hpp"
 #include "SceneManager.hpp"
 #include "../Core/Engine.hpp"
+#include "../Core/SelectionSystem.hpp"
 #include "../Renderer/Renderer.hpp"
 #include "../Components/Light.hpp"
 #include "../Physics/PhysicsWorld.hpp"
@@ -101,6 +102,7 @@ Entity* Scene::createEntityWithUUID(UUID uuid, const std::string& name) {
 void Scene::destroyEntity(Entity* entity) {
     if (!entity) return;
     
+    SelectionSystem::removeEntity(entity);
     UUID uuid = entity->getUUID();
     
     // Call lifecycle
@@ -132,7 +134,12 @@ void Scene::destroyEntity(UUID uuid) {
 void Scene::destroyAllEntities() {
     if (m_IsActive) {
         for (auto& entity : m_Entities) {
+            SelectionSystem::removeEntity(entity.get());
             entity->OnDestroy();
+        }
+    } else {
+        for (auto& entity : m_Entities) {
+            SelectionSystem::removeEntity(entity.get());
         }
     }
     

@@ -91,6 +91,7 @@ public:
     static void setSelectedEntity(Entity* entity);
     static void setSelection(const std::vector<Entity*>& entities);
     static void toggleSelection(Entity* entity);
+    static void removeEntity(Entity* entity);
     static Entity* getSelectedEntity();
     static const std::vector<Entity*>& getSelection();
     static void clearSelection();

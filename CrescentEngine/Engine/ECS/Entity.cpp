@@ -13,6 +13,7 @@ Entity::Entity(const std::string& name)
     , m_Tag("Untagged")
     , m_Layer(0)
     , m_IsActive(true)
+    , m_Destroyed(false)
     , m_Scene(nullptr)
     , m_Transform(nullptr) {
     
@@ -21,6 +22,7 @@ Entity::Entity(const std::string& name)
     
     // Register in name registry
     s_NameRegistry[m_Name] = this;
+    s_TagRegistry.insert({m_Tag, this});
 }
 
 Entity::Entity(UUID uuid, const std::string& name)
@@ -29,6 +31,7 @@ Entity::Entity(UUID uuid, const std::string& name)
     , m_Tag("Untagged")
     , m_Layer(0)
     , m_IsActive(true)
+    , m_Destroyed(false)
     , m_Scene(nullptr)
     , m_Transform(nullptr) {
     
@@ -37,9 +40,14 @@ Entity::Entity(UUID uuid, const std::string& name)
     
     // Register in name registry
     s_NameRegistry[m_Name] = this;
+    s_TagRegistry.insert({m_Tag, this});
 }
 
 Entity::~Entity() {
+    if (!m_Destroyed) {
+        OnDestroy();
+    }
+
     // Unregister from registries
     s_NameRegistry.erase(m_Name);
     
@@ -52,7 +60,19 @@ Entity::~Entity() {
     }
     
     // Destroy all components
-    removeAllComponents();
+    removeAllComponentsInternal(false);
+}
+
+void Entity::setName(const std::string& name) {
+    if (m_Name == name) {
+        return;
+    }
+    auto it = s_NameRegistry.find(m_Name);
+    if (it != s_NameRegistry.end() && it->second == this) {
+        s_NameRegistry.erase(it);
+    }
+    m_Name = name;
+    s_NameRegistry[m_Name] = this;
 }
 
 void Entity::setActive(bool active) {
@@ -73,7 +93,6 @@ void Entity::setActive(bool active) {
                 component->OnDisable();
             }
         }
-        OnDestroy();
     }
 }
 
@@ -134,12 +153,18 @@ void Entity::removeComponent(Component* component) {
 }
 
 void Entity::removeAllComponents() {
+    removeAllComponentsInternal(true);
+}
+
+void Entity::removeAllComponentsInternal(bool callLifecycle) {
     // Call lifecycle for all components
-    for (auto& component : m_Components) {
-        if (component->isEnabled()) {
-            component->OnDisable();
+    if (callLifecycle) {
+        for (auto& component : m_Components) {
+            if (component->isEnabled()) {
+                component->OnDisable();
+            }
+            component->OnDestroy();
         }
-        component->OnDestroy();
     }
     
     m_Components.clear();
@@ -154,7 +179,14 @@ void Entity::OnCreate() {
 }
 
 void Entity::OnDestroy() {
+    if (m_Destroyed) {
+        return;
+    }
+    m_Destroyed = true;
     for (auto& component : m_Components) {
+        if (component->isEnabled()) {
+            component->OnDisable();
+        }
         component->OnDestroy();
     }
 }

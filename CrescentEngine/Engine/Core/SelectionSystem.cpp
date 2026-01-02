@@ -6,6 +6,7 @@
 #include "../ECS/Transform.hpp"
 #include <iostream>
 #include <limits>
+#include <algorithm>
 
 namespace Crescent {
 
@@ -240,6 +241,19 @@ void SelectionSystem::toggleSelection(Entity* entity) {
         s_selectedEntities.erase(it);
     } else {
         s_selectedEntities.insert(s_selectedEntities.begin(), entity);
+    }
+}
+
+void SelectionSystem::removeEntity(Entity* entity) {
+    if (!entity) {
+        return;
+    }
+    auto it = std::remove(s_selectedEntities.begin(), s_selectedEntities.end(), entity);
+    if (it != s_selectedEntities.end()) {
+        s_selectedEntities.erase(it, s_selectedEntities.end());
+        if (s_selectedEntities.empty()) {
+            std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
+        }
     }
 }
 
