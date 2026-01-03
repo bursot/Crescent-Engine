@@ -7,6 +7,23 @@ namespace Crescent {
 std::unordered_map<std::string, Entity*> Entity::s_NameRegistry;
 std::unordered_multimap<std::string, Entity*> Entity::s_TagRegistry;
 
+std::string Entity::makeUniqueName(const std::string& desired, const Entity* self) {
+    std::string baseName = desired.empty() ? "Entity" : desired;
+    auto it = s_NameRegistry.find(baseName);
+    if (it == s_NameRegistry.end() || it->second == self) {
+        return baseName;
+    }
+
+    int suffix = 1;
+    std::string candidate;
+    do {
+        candidate = baseName + " (" + std::to_string(suffix++) + ")";
+        it = s_NameRegistry.find(candidate);
+    } while (it != s_NameRegistry.end() && it->second != self);
+
+    return candidate;
+}
+
 Entity::Entity(const std::string& name)
     : m_UUID()
     , m_Name(name)
@@ -21,6 +38,7 @@ Entity::Entity(const std::string& name)
     m_Transform = addComponent<Transform>();
     
     // Register in name registry
+    m_Name = makeUniqueName(m_Name, this);
     s_NameRegistry[m_Name] = this;
     s_TagRegistry.insert({m_Tag, this});
 }
@@ -39,6 +57,7 @@ Entity::Entity(UUID uuid, const std::string& name)
     m_Transform = addComponent<Transform>();
     
     // Register in name registry
+    m_Name = makeUniqueName(m_Name, this);
     s_NameRegistry[m_Name] = this;
     s_TagRegistry.insert({m_Tag, this});
 }
@@ -49,7 +68,10 @@ Entity::~Entity() {
     }
 
     // Unregister from registries
-    s_NameRegistry.erase(m_Name);
+    auto nameIt = s_NameRegistry.find(m_Name);
+    if (nameIt != s_NameRegistry.end() && nameIt->second == this) {
+        s_NameRegistry.erase(nameIt);
+    }
     
     auto range = s_TagRegistry.equal_range(m_Tag);
     for (auto it = range.first; it != range.second; ++it) {
@@ -64,14 +86,15 @@ Entity::~Entity() {
 }
 
 void Entity::setName(const std::string& name) {
-    if (m_Name == name) {
+    std::string uniqueName = makeUniqueName(name, this);
+    if (m_Name == uniqueName) {
         return;
     }
     auto it = s_NameRegistry.find(m_Name);
     if (it != s_NameRegistry.end() && it->second == this) {
         s_NameRegistry.erase(it);
     }
-    m_Name = name;
+    m_Name = uniqueName;
     s_NameRegistry[m_Name] = this;
 }
 

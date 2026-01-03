@@ -81,6 +81,7 @@ public:
 private:
     void addComponentInternal(std::unique_ptr<Component> component);
     void removeAllComponentsInternal(bool callLifecycle);
+    static std::string makeUniqueName(const std::string& desired, const Entity* self);
     
 private:
     UUID m_UUID;

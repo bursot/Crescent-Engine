@@ -244,24 +244,22 @@ void Scene::deserialize(const std::string& filepath) {
 
 void Scene::applySettings() {
     SceneQualitySettings quality = ResolveQualitySettings(m_Settings);
-    if (m_Settings.quality.overrideProject) {
-        Light::ShadowQuality shadowQuality = MapShadowQuality(quality.shadowQuality);
-        uint32_t shadowResolution = static_cast<uint32_t>(quality.shadowResolution);
-        uint8_t cascadeCount = CascadesForShadowQuality(quality.shadowQuality);
-        
-        for (auto& entity : m_Entities) {
-            if (!entity) {
-                continue;
-            }
-            Light* light = entity->getComponent<Light>();
-            if (!light) {
-                continue;
-            }
-            light->setShadowQuality(shadowQuality);
-            light->setShadowMapResolution(shadowResolution);
-            if (light->getType() == Light::Type::Directional) {
-                light->setCascadeCount(cascadeCount);
-            }
+    Light::ShadowQuality shadowQuality = MapShadowQuality(quality.shadowQuality);
+    uint32_t shadowResolution = static_cast<uint32_t>(quality.shadowResolution);
+    uint8_t cascadeCount = CascadesForShadowQuality(quality.shadowQuality);
+    
+    for (auto& entity : m_Entities) {
+        if (!entity) {
+            continue;
+        }
+        Light* light = entity->getComponent<Light>();
+        if (!light) {
+            continue;
+        }
+        light->setShadowQuality(shadowQuality);
+        light->setShadowMapResolution(shadowResolution);
+        if (light->getType() == Light::Type::Directional) {
+            light->setCascadeCount(cascadeCount);
         }
     }
     
