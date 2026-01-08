@@ -434,22 +434,6 @@ flowchart LR
    - Choose Debug or Release configuration
    - Press ⌘R to build and run
 
-## Project Statistics
-
-- **Total Lines of Code:** ~43,500+ (engine code)
-- **C++ Files:** ~90 (headers + sources)
-- **Swift Files:** ~20
-- **Metal Shaders:** 6 files
-- **Total Files:** ~110+
-
-### Code Distribution
-- **C++ Core:** ~15,000 lines
-- **C++ Components:** ~8,000 lines
-- **C++ Renderer:** ~10,000 lines
-- **Bridge (Objective-C++):** ~2,500 lines
-- **Swift UI:** ~5,000 lines
-- **Metal Shaders:** ~3,000 lines
-
 ## Features in Detail
 
 ### Rendering Features
