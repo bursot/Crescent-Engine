@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <unordered_map>
 #include <unordered_set>
@@ -51,6 +52,82 @@ struct ImportContext {
     std::vector<TextureCandidate> textureCandidates;
     bool textureIndexBuilt = false;
 };
+
+struct MeshCacheEntry {
+    std::shared_ptr<Mesh> mesh;
+    std::shared_ptr<Material> material;
+};
+
+struct ModelCacheEntry {
+    std::unordered_map<int, MeshCacheEntry> meshesByIndex;
+    std::unordered_map<int, MeshCacheEntry> mergedByMaterial;
+    std::shared_ptr<Skeleton> skeleton;
+    std::vector<std::shared_ptr<AnimationClip>> animations;
+};
+
+static ModelCacheEntry BuildModelCache(const std::string& path, const SceneCommands::ModelImportOptions& options) {
+    Scene temp("ModelCache");
+    SceneCommands::importModel(&temp, path, options, "ModelCache");
+
+    ModelCacheEntry entry;
+    for (const auto& entityPtr : temp.getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity) {
+            continue;
+        }
+        ModelMeshReference* reference = entity->getComponent<ModelMeshReference>();
+        if (!reference) {
+            continue;
+        }
+        MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer) {
+            continue;
+        }
+        MeshCacheEntry meshEntry;
+        meshEntry.mesh = renderer->getMesh();
+        meshEntry.material = renderer->getMaterial(0);
+        if (reference->isMerged()) {
+            entry.mergedByMaterial[reference->getMaterialIndex()] = meshEntry;
+        } else {
+            entry.meshesByIndex[reference->getMeshIndex()] = meshEntry;
+        }
+
+        if (reference->isSkinned()) {
+            SkinnedMeshRenderer* skinned = entity->getComponent<SkinnedMeshRenderer>();
+            if (skinned && !entry.skeleton) {
+                entry.skeleton = skinned->getSkeleton();
+                entry.animations = skinned->getAnimationClips();
+            }
+        }
+    }
+    return entry;
+}
+
+static bool ReplaceMaterialTexture(Material* material,
+                                   const std::string& path,
+                                   const std::shared_ptr<Texture2D>& replacement) {
+    if (!material || path.empty() || !replacement) {
+        return false;
+    }
+    bool updated = false;
+    auto swapIfMatch = [&](const std::shared_ptr<Texture2D>& current,
+                           const std::function<void(std::shared_ptr<Texture2D>)>& setter) {
+        if (current && current->getPath() == path) {
+            setter(replacement);
+            updated = true;
+        }
+    };
+
+    swapIfMatch(material->getAlbedoTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setAlbedoTexture(tex); });
+    swapIfMatch(material->getNormalTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setNormalTexture(tex); });
+    swapIfMatch(material->getMetallicTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setMetallicTexture(tex); });
+    swapIfMatch(material->getRoughnessTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setRoughnessTexture(tex); });
+    swapIfMatch(material->getAOTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setAOTexture(tex); });
+    swapIfMatch(material->getEmissionTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setEmissionTexture(tex); });
+    swapIfMatch(material->getORMTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setORMTexture(tex); });
+    swapIfMatch(material->getHeightTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setHeightTexture(tex); });
+    return updated;
+}
 
 static std::string SafeName(const aiString& name, const std::string& fallback) {
     if (name.length > 0) {
@@ -1053,6 +1130,7 @@ static void ImportNodeRecursive(const aiNode* node,
             skinned->setSkeleton(context.skeleton);
             if (!context.animations.empty()) {
                 skinned->setAnimationClips(context.animations);
+                skinned->setPlaying(true);
             }
         }
         
@@ -1293,6 +1371,11 @@ Entity* SceneCommands::importModel(Scene* scene, const std::string& path, const 
     if (context.baseDir.empty()) {
         context.baseDir = ".";
     }
+
+    std::string guid = AssetDatabase::getInstance().registerAsset(path, "model");
+    if (!guid.empty()) {
+        AssetDatabase::getInstance().updateModelImportSettings(guid, options);
+    }
     
     Renderer* renderer = Engine::getInstance().getRenderer();
     context.textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
@@ -1353,6 +1436,7 @@ Entity* SceneCommands::importModel(Scene* scene, const std::string& path, const 
         }
         animator->setStates(states);
         animator->setDefaultBlendDuration(0.25f);
+        animator->setAutoPlay(true);
     }
 
     if (context.options.mergeStaticMeshes) {
@@ -1403,7 +1487,181 @@ Entity* SceneCommands::importModel(Scene* scene, const std::string& path, const 
     }
     
     std::cout << "[ModelImporter] Imported " << context.meshes.size() << " mesh(es) from " << path << std::endl;
+    if (!guid.empty()) {
+        AssetDatabase::getInstance().recordImportForGuid(guid);
+    }
     return root;
+}
+
+bool SceneCommands::reimportModelAsset(Scene* scene, const std::string& guid) {
+    if (!scene || guid.empty()) {
+        return false;
+    }
+    AssetDatabase& db = AssetDatabase::getInstance();
+    AssetRecord record;
+    if (!db.getRecordForGuid(guid, record)) {
+        return false;
+    }
+    if (record.type != "model") {
+        return false;
+    }
+    std::string path = db.getPathForGuid(guid);
+    if (path.empty()) {
+        return false;
+    }
+
+    ModelCacheEntry cache = BuildModelCache(path, record.modelSettings);
+    bool updated = false;
+
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity) {
+            continue;
+        }
+        ModelMeshReference* reference = entity->getComponent<ModelMeshReference>();
+        if (!reference || reference->getSourceGuid() != guid) {
+            continue;
+        }
+
+        MeshCacheEntry entry;
+        bool found = false;
+        if (reference->isMerged()) {
+            auto it = cache.mergedByMaterial.find(reference->getMaterialIndex());
+            if (it != cache.mergedByMaterial.end()) {
+                entry = it->second;
+                found = true;
+            }
+        } else {
+            auto it = cache.meshesByIndex.find(reference->getMeshIndex());
+            if (it != cache.meshesByIndex.end()) {
+                entry = it->second;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            continue;
+        }
+
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            renderer->setMesh(entry.mesh);
+            renderer->setMaterial(entry.material);
+        }
+
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            skinned->setMesh(entry.mesh);
+            skinned->setMaterial(entry.material);
+            if (cache.skeleton) {
+                skinned->setSkeleton(cache.skeleton);
+            }
+            if (!cache.animations.empty()) {
+                skinned->setAnimationClips(cache.animations);
+            }
+        }
+
+        reference->setSourcePath(path);
+        reference->setImportOptions(record.modelSettings);
+        updated = true;
+    }
+
+    if (updated) {
+        AssetDatabase::getInstance().recordImportForGuid(guid);
+    }
+    return updated;
+}
+
+bool SceneCommands::reimportTextureAsset(Scene* scene, const std::string& guid) {
+    if (!scene || guid.empty()) {
+        return false;
+    }
+    AssetDatabase& db = AssetDatabase::getInstance();
+    AssetRecord record;
+    if (!db.getRecordForGuid(guid, record)) {
+        return false;
+    }
+    if (record.type != "texture") {
+        return false;
+    }
+    std::string path = db.getPathForGuid(guid);
+    if (path.empty()) {
+        return false;
+    }
+
+    Renderer* renderer = Engine::getInstance().getRenderer();
+    if (!renderer) {
+        return false;
+    }
+    TextureLoader* loader = renderer->getTextureLoader();
+    if (!loader) {
+        return false;
+    }
+
+    loader->invalidateTexture(path);
+    bool srgb = record.textureSettings.srgb;
+    if (record.textureSettings.normalMap) {
+        srgb = false;
+    }
+    auto texture = loader->loadTexture(path, srgb, record.textureSettings.flipY);
+    if (!texture) {
+        return false;
+    }
+
+    bool updated = false;
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity) {
+            continue;
+        }
+
+        if (auto* rendererComp = entity->getComponent<MeshRenderer>()) {
+            for (const auto& material : rendererComp->getMaterials()) {
+                updated |= ReplaceMaterialTexture(material.get(), path, texture);
+            }
+        }
+
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            for (const auto& material : skinned->getMaterials()) {
+                updated |= ReplaceMaterialTexture(material.get(), path, texture);
+            }
+        }
+    }
+
+    if (updated) {
+        AssetDatabase::getInstance().recordImportForGuid(guid);
+    }
+    return updated;
+}
+
+bool SceneCommands::reimportHdriAsset(Scene* scene, const std::string& guid) {
+    if (!scene || guid.empty()) {
+        return false;
+    }
+    AssetDatabase& db = AssetDatabase::getInstance();
+    AssetRecord record;
+    if (!db.getRecordForGuid(guid, record)) {
+        return false;
+    }
+    if (record.type != "hdri") {
+        return false;
+    }
+    std::string path = db.getPathForGuid(guid);
+    if (path.empty()) {
+        return false;
+    }
+
+    Renderer* renderer = Engine::getInstance().getRenderer();
+    if (!renderer) {
+        return false;
+    }
+    if (renderer->getEnvironmentPath() != path) {
+        AssetDatabase::getInstance().recordImportForGuid(guid);
+        return true;
+    }
+    bool loaded = renderer->loadEnvironmentMap(path);
+    if (loaded) {
+        AssetDatabase::getInstance().recordImportForGuid(guid);
+    }
+    return loaded;
 }
 
 void SceneCommands::destroyEntitiesByUUID(Scene* scene, const std::vector<std::string>& uuids) {
@@ -1447,6 +1705,39 @@ Entity* SceneCommands::getEntityByUUID(Scene* scene, const std::string& uuidStr)
         std::cerr << "Failed to parse UUID: " << uuidStr << std::endl;
         return nullptr;
     }
+}
+
+bool SceneCommands::setParent(Scene* scene, const std::string& childUuid, const std::string& parentUuid) {
+    if (!scene) {
+        return false;
+    }
+    Entity* child = getEntityByUUID(scene, childUuid);
+    if (!child) {
+        return false;
+    }
+    Transform* childTransform = child->getTransform();
+    if (!childTransform) {
+        return false;
+    }
+
+    Transform* newParent = nullptr;
+    if (!parentUuid.empty()) {
+        Entity* parent = getEntityByUUID(scene, parentUuid);
+        if (!parent) {
+            return false;
+        }
+        Transform* parentTransform = parent->getTransform();
+        if (!parentTransform) {
+            return false;
+        }
+        if (parentTransform == childTransform || parentTransform->isChildOf(childTransform)) {
+            return false;
+        }
+        newParent = parentTransform;
+    }
+
+    childTransform->setParent(newParent, true);
+    return true;
 }
 
 } // namespace Crescent

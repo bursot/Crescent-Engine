@@ -1,7 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
-
+import simd
+import Combine
 struct ContentView: View {
     @ObservedObject var editorState: EditorState
     var body: some View {
@@ -272,16 +273,33 @@ struct ConsoleMessage: View {
     }
 }
 
-struct SceneViewport: View {
+struct ViewportPanel: View {
     @ObservedObject var editorState: EditorState
+    let title: String
+    let systemImage: String
+    let viewKind: RenderViewKind
+    let drivesLoop: Bool
+    let allowsDrop: Bool
+    @Binding var isDropping: Bool
+    let onDrop: ([NSItemProvider]) -> Bool
     @State private var viewportSize: CGSize = .zero
-    @State private var isDropping: Bool = false
-    private let hdriExtensions = ["hdr", "exr"]
-    
+    @State private var cameraBasis: CameraBasis = .identity
+    private let cameraTimer = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
+
+    private var isActive: Bool {
+        switch viewKind {
+        case .scene: return editorState.viewMode == .scene
+        case .game: return editorState.viewMode == .game
+        }
+    }
+
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .topLeading) {
-                MetalView()
+            let headerColor = isActive ? EditorTheme.textAccent.opacity(0.25) : EditorTheme.panelHeader
+            let borderColor = isActive ? EditorTheme.textAccent : EditorTheme.panelStroke
+
+            let content = ZStack(alignment: .topLeading) {
+                MetalView(viewKind: viewKind, isActive: isActive, drivesLoop: drivesLoop)
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .background(Color.black.opacity(0.6))
                     .clipped()
@@ -291,38 +309,246 @@ struct SceneViewport: View {
                     .onAppear {
                         viewportSize = geometry.size
                     }
-                
+
                 HStack(spacing: 10) {
-                    Label("Scene", systemImage: "cube.transparent")
+                    Label(title, systemImage: systemImage)
                         .font(EditorTheme.fontBodyMedium)
-                    
+
                     Text("\(Int(viewportSize.width)) x \(Int(viewportSize.height))")
                         .font(EditorTheme.fontMono)
                         .foregroundColor(EditorTheme.textMuted)
+
+                    if isActive {
+                        Text("Active")
+                            .font(EditorTheme.fontCaption)
+                            .foregroundColor(EditorTheme.textAccent)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(EditorTheme.panelHeader)
+                .background(headerColor)
                 .cornerRadius(6)
                 .padding(10)
                 .allowsHitTesting(false)
-                
-                if isDropping {
+
+                if viewKind == .scene {
+                    SceneCameraCompass(basis: cameraBasis)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .allowsHitTesting(false)
+                }
+
+                if allowsDrop && isDropping {
                     RoundedRectangle(cornerRadius: 10)
                         .stroke(EditorTheme.textAccent, style: StrokeStyle(lineWidth: 2, dash: [6]))
                         .background(EditorTheme.textAccent.opacity(0.08))
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(EditorTheme.panelBackground)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(EditorTheme.panelStroke, lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .onDrop(of: [UTType.fileURL], isTargeted: $isDropping) { providers in
-                handleDrop(providers)
+
+            let styled = content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(EditorTheme.panelBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(borderColor, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .onTapGesture {
+                    switch viewKind {
+                    case .scene:
+                        editorState.setViewMode(.scene)
+                    case .game:
+                        editorState.setViewMode(.game)
+                    }
+                }
+
+            if allowsDrop {
+                styled.onDrop(of: [UTType.fileURL], isTargeted: $isDropping) { providers in
+                    onDrop(providers)
+                }
+            } else {
+                styled
             }
+        }
+        .onAppear {
+            refreshCameraBasis()
+        }
+        .onReceive(cameraTimer) { _ in
+            refreshCameraBasis()
+        }
+    }
+
+    private func refreshCameraBasis() {
+        guard viewKind == .scene else { return }
+        let info = CrescentEngineBridge.shared().getSceneCameraBasis()
+        guard let right = info["right"] as? [NSNumber], right.count >= 3,
+              let up = info["up"] as? [NSNumber], up.count >= 3,
+              let forward = info["forward"] as? [NSNumber], forward.count >= 3 else {
+            return
+        }
+
+        cameraBasis = CameraBasis(
+            right: simd_float3(right[0].floatValue, right[1].floatValue, right[2].floatValue),
+            up: simd_float3(up[0].floatValue, up[1].floatValue, up[2].floatValue),
+            forward: simd_float3(forward[0].floatValue, forward[1].floatValue, forward[2].floatValue)
+        )
+    }
+}
+
+private struct CameraBasis {
+    var right: simd_float3
+    var up: simd_float3
+    var forward: simd_float3
+
+    static let identity = CameraBasis(
+        right: simd_float3(1, 0, 0),
+        up: simd_float3(0, 1, 0),
+        forward: simd_float3(0, 0, -1)
+    )
+}
+
+private struct SceneCameraCompass: View {
+    let basis: CameraBasis
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = min(geo.size.width, geo.size.height)
+            let center = CGPoint(x: size * 0.5, y: size * 0.5)
+            let radius = size * 0.32
+            let axes = [
+                AxisMarker(name: "X", color: .red, axis: simd_float3(1, 0, 0)),
+                AxisMarker(name: "Y", color: .green, axis: simd_float3(0, 1, 0)),
+                AxisMarker(name: "Z", color: .blue, axis: simd_float3(0, 0, 1))
+            ]
+
+            ZStack {
+                Circle()
+                    .fill(Color.black.opacity(0.25))
+                    .overlay(
+                        Circle().stroke(EditorTheme.panelStroke, lineWidth: 1)
+                    )
+
+                ForEach(axes) { axis in
+                    let projected = project(axis.axis, center: center, radius: radius)
+                    let alpha = projected.depth > 0 ? 0.95 : 0.4
+
+                    Path { path in
+                        path.move(to: center)
+                        path.addLine(to: projected.point)
+                    }
+                    .stroke(axis.color.opacity(alpha), lineWidth: 2)
+
+                    Text(axis.name)
+                        .font(EditorTheme.fontMono)
+                        .foregroundColor(axis.color.opacity(alpha))
+                        .position(projected.point)
+                }
+            }
+        }
+        .frame(width: 72, height: 72)
+    }
+
+    private func project(_ axis: simd_float3, center: CGPoint, radius: CGFloat) -> ProjectedAxis {
+        let x = simd_dot(axis, basis.right)
+        let y = simd_dot(axis, basis.up)
+        let z = simd_dot(axis, basis.forward)
+        let point = CGPoint(
+            x: center.x + CGFloat(x) * radius,
+            y: center.y - CGFloat(y) * radius
+        )
+        return ProjectedAxis(point: point, depth: z)
+    }
+}
+
+private struct AxisMarker: Identifiable {
+    let id = UUID()
+    let name: String
+    let color: Color
+    let axis: simd_float3
+}
+
+private struct ProjectedAxis {
+    let point: CGPoint
+    let depth: Float
+}
+
+struct ViewportTabBar: View {
+    @ObservedObject var editorState: EditorState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(ViewMode.allCases, id: \.self) { mode in
+                let isActive = editorState.viewMode == mode
+                Button {
+                    editorState.setViewMode(mode)
+                } label: {
+                    Label(mode.label, systemImage: mode.systemImage)
+                        .font(EditorTheme.fontBodyMedium)
+                        .foregroundColor(isActive ? EditorTheme.textPrimary : EditorTheme.textMuted)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(isActive ? EditorTheme.surfaceElevated : EditorTheme.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(isActive ? EditorTheme.textAccent : EditorTheme.panelStroke, lineWidth: 1)
+                        )
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(EditorTheme.panelHeader)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(EditorTheme.panelStroke, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct SceneViewport: View {
+    @ObservedObject var editorState: EditorState
+    @State private var isDroppingScene: Bool = false
+    private let hdriExtensions = ["hdr", "exr"]
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            ViewportTabBar(editorState: editorState)
+
+            ZStack {
+                ViewportPanel(
+                    editorState: editorState,
+                    title: "Scene",
+                    systemImage: "cube.transparent",
+                    viewKind: .scene,
+                    drivesLoop: true,
+                    allowsDrop: editorState.viewMode == .scene,
+                    isDropping: $isDroppingScene,
+                    onDrop: handleDrop
+                )
+                .opacity(editorState.viewMode == .scene ? 1.0 : 0.0)
+                .allowsHitTesting(editorState.viewMode == .scene)
+
+                ViewportPanel(
+                    editorState: editorState,
+                    title: "Game",
+                    systemImage: "play.tv",
+                    viewKind: .game,
+                    drivesLoop: false,
+                    allowsDrop: false,
+                    isDropping: .constant(false),
+                    onDrop: { _ in false }
+                )
+                .opacity(editorState.viewMode == .game ? 1.0 : 0.0)
+                .allowsHitTesting(editorState.viewMode == .game)
+            }
+        }
+        .onAppear {
+            editorState.setViewMode(editorState.viewMode)
         }
     }
     

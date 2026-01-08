@@ -1636,26 +1636,32 @@ MTL::RenderPipelineState* Renderer::getPipelineState(const PipelineStateKey& key
 }
 
 void Renderer::setMetalLayer(void* layer) {
+    setMetalLayer(layer, true);
+}
+
+void Renderer::setMetalLayer(void* layer, bool applySize) {
     m_metalLayer = static_cast<CA::MetalLayer*>(layer);
     
     if (m_metalLayer) {
         m_metalLayer->setDevice(m_device);
         m_metalLayer->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
         
-        // Get initial size
-        auto drawableSize = m_metalLayer->drawableSize();
-        float width = static_cast<float>(drawableSize.width);
-        float height = static_cast<float>(drawableSize.height);
-        
-        std::cout << "Metal layer set with size: " << width << "x" << height << std::endl;
-        
-        // Only resize if we have valid dimensions
-        if (width > 0 && height > 0) {
-            resize(width, height);
-        } else {
-            std::cout << "Warning: Metal layer has invalid size, using defaults" << std::endl;
-            m_viewportWidth = 1920.0f;
-            m_viewportHeight = 1080.0f;
+        if (applySize) {
+            // Get initial size
+            auto drawableSize = m_metalLayer->drawableSize();
+            float width = static_cast<float>(drawableSize.width);
+            float height = static_cast<float>(drawableSize.height);
+            
+            std::cout << "Metal layer set with size: " << width << "x" << height << std::endl;
+            
+            // Only resize if we have valid dimensions
+            if (width > 0 && height > 0) {
+                resize(width, height);
+            } else {
+                std::cout << "Warning: Metal layer has invalid size, using defaults" << std::endl;
+                m_viewportWidth = 1920.0f;
+                m_viewportHeight = 1080.0f;
+            }
         }
     }
 }
@@ -1666,24 +1672,33 @@ void Renderer::resize(float width, float height) {
         std::cerr << "Invalid viewport dimensions: " << width << "x" << height << std::endl;
         return;
     }
-    
+
+    std::cout << "Resizing viewport to: " << width << "x" << height << std::endl;
+    setViewportSize(width, height, true);
+}
+
+void Renderer::setViewportSize(float width, float height, bool updateTargets) {
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    bool sizeChanged = (m_viewportWidth != width) || (m_viewportHeight != height);
+    if (!sizeChanged && !updateTargets) {
+        return;
+    }
+
     m_viewportWidth = width;
     m_viewportHeight = height;
     
-    std::cout << "Resizing viewport to: " << width << "x" << height << std::endl;
-    
-    // Update camera aspect ratio
-    Camera* mainCamera = Camera::getMainCamera();
-    if (mainCamera) {
-        float aspectRatio = width / height;
-        mainCamera->setAspectRatio(aspectRatio);
-        std::cout << "Camera aspect ratio set to: " << aspectRatio << std::endl;
+    if (!updateTargets) {
+        return;
     }
-    
     float scale = std::max(0.5f, std::min(2.0f, m_qualitySettings.renderScale));
     uint32_t renderWidth = static_cast<uint32_t>(std::max(1.0f, std::round(width * scale)));
     uint32_t renderHeight = static_cast<uint32_t>(std::max(1.0f, std::round(height * scale)));
-    ensureRenderTargets(renderWidth, renderHeight, m_qualitySettings.msaaSamples, m_sceneColorFormat);
+    uint32_t targetWidth = std::max(renderWidth, m_renderTargetWidth);
+    uint32_t targetHeight = std::max(renderHeight, m_renderTargetHeight);
+    ensureRenderTargets(targetWidth, targetHeight, m_qualitySettings.msaaSamples, m_sceneColorFormat);
 }
 
 void Renderer::rebuildSamplerState(int anisotropy) {
@@ -2270,10 +2285,15 @@ void Renderer::render() {
 }
 
 void Renderer::renderScene(Scene* scene) {
+    RenderOptions options;
+    renderScene(scene, nullptr, options);
+}
+
+void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOptions& options) {
     if (!scene) return;
 
     // Get main camera
-    Camera* camera = Camera::getMainCamera();
+    Camera* camera = cameraOverride ? cameraOverride : Camera::getMainCamera();
     if (!camera) {
         static bool loggedOnce = false;
         if (!loggedOnce) {
@@ -2282,16 +2302,22 @@ void Renderer::renderScene(Scene* scene) {
         }
         return;
     }
+
+    if (m_viewportHeight > 0.0f) {
+        float aspectRatio = m_viewportWidth / m_viewportHeight;
+        camera->setAspectRatio(aspectRatio);
+    }
     
     float renderScale = std::max(0.5f, std::min(2.0f, m_qualitySettings.renderScale));
     const auto& post = scene->getSettings().postProcess;
     const auto& fog = scene->getSettings().fog;
+    bool allowTemporal = options.allowTemporal;
     bool bloomEnabled = post.enabled && post.bloom;
     bool toneMappingEnabled = post.enabled && post.toneMapping;
     bool colorGradingEnabled = post.enabled && post.colorGrading;
-    bool taaEnabled = post.enabled && post.taa;
+    bool taaEnabled = allowTemporal && post.enabled && post.taa;
     bool ssrEnabled = post.enabled && post.ssr;
-    bool motionBlurEnabled = post.enabled && post.motionBlur;
+    bool motionBlurEnabled = allowTemporal && post.enabled && post.motionBlur;
     bool dofEnabled = post.enabled && post.depthOfField;
     bool fogEnabled = fog.enabled;
     if (!fogEnabled) {
@@ -2307,7 +2333,9 @@ void Renderer::renderScene(Scene* scene) {
     m_outputHDR = hdrPost;
     uint32_t renderWidth = static_cast<uint32_t>(std::max(1.0f, std::round(m_viewportWidth * renderScale)));
     uint32_t renderHeight = static_cast<uint32_t>(std::max(1.0f, std::round(m_viewportHeight * renderScale)));
-    ensureRenderTargets(renderWidth, renderHeight, m_qualitySettings.msaaSamples, desiredColorFormat);
+    uint32_t targetWidth = std::max(renderWidth, m_renderTargetWidth);
+    uint32_t targetHeight = std::max(renderHeight, m_renderTargetHeight);
+    ensureRenderTargets(targetWidth, targetHeight, m_qualitySettings.msaaSamples, desiredColorFormat);
     if (fogEnabled) {
         ensureFogVolume(renderWidth, renderHeight, fog.volumetricQuality);
     }
@@ -2334,7 +2362,7 @@ void Renderer::renderScene(Scene* scene) {
         float ndcY = (jitterY * 2.0f) / std::max(1.0f, static_cast<float>(renderHeight));
         projectionMatrix(0, 2) += ndcX;
         projectionMatrix(1, 2) += ndcY;
-    } else {
+    } else if (options.updateHistory) {
         m_taaFrameIndex = 0;
         m_taaHistoryValid = false;
     }
@@ -3853,13 +3881,15 @@ void Renderer::renderScene(Scene* scene) {
         }
     }
 
-    if (taaEnabled && !useTAA) {
-        m_taaHistoryValid = false;
+    if (options.updateHistory) {
+        if (taaEnabled && !useTAA) {
+            m_taaHistoryValid = false;
+        }
+        m_prevViewProjection = viewProjection;
+        m_prevViewProjectionNoJitter = viewProjectionNoJitter;
+        m_motionHistoryValid = true;
+        m_frameIndex++;
     }
-    m_prevViewProjection = viewProjection;
-    m_prevViewProjectionNoJitter = viewProjectionNoJitter;
-    m_motionHistoryValid = true;
-    m_frameIndex++;
 
     // Present
     commandBuffer->presentDrawable(drawable);

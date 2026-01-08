@@ -29,6 +29,7 @@ public:
     void OnCreate() override;
     void OnDestroy() override;
     void OnUpdate(float deltaTime) override;
+    void OnEditorUpdate(float deltaTime) override;
     
 private:
     float m_MoveSpeed;

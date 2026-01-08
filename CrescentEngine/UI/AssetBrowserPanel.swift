@@ -13,6 +13,10 @@ struct AssetBrowserPanel: View {
     @State private var isDropping: Bool = false
     @State private var selectedAssetID: UUID?
     @State private var viewMode: AssetViewMode = .grid
+    @State private var selectedAssetGuid: String = ""
+    @State private var selectedModelOptions = ModelImportOptions()
+    @State private var selectedTextureOptions = TextureImportOptions()
+    @State private var selectedHdriOptions = HdriImportOptions()
     
     private let modelExtensions = [
         "fbx", "obj", "gltf", "glb", "dae", "blend", "3ds",
@@ -88,6 +92,11 @@ struct AssetBrowserPanel: View {
         
         return list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
+
+    private var selectedAsset: AssetInfo? {
+        guard let selectedAssetID else { return nil }
+        return editorState.assets.first { $0.id == selectedAssetID }
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -98,7 +107,16 @@ struct AssetBrowserPanel: View {
                     .foregroundColor(EditorTheme.textPrimary)
                 
                 Spacer()
-                
+
+                Toggle(isOn: $editorState.autoReimportAssets) {
+                    Text("Auto")
+                        .font(EditorTheme.fontBody)
+                        .foregroundColor(EditorTheme.textMuted)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("Auto reimport assets on disk changes")
+
                 Button(action: {
                     openImporter()
                 }) {
@@ -128,20 +146,34 @@ struct AssetBrowserPanel: View {
                 .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
                 .frame(maxHeight: .infinity)
                 
-                AssetGridPanel(
-                    assets: filteredAssets,
-                    gridSize: $gridSize,
-                    viewMode: $viewMode,
-                    selectedFilter: $selectedFilter,
-                    searchText: $searchText,
-                    selectedAssetID: $selectedAssetID,
-                    isDropping: $isDropping,
-                    assetRootURL: assetsRootURL,
-                    onDrop: handleDrop,
-                    onOpenScene: openSceneAsset,
-                    onReveal: revealInFinder,
-                    onRename: promptRename
-                )
+                VStack(alignment: .leading, spacing: 12) {
+                    AssetGridPanel(
+                        assets: filteredAssets,
+                        gridSize: $gridSize,
+                        viewMode: $viewMode,
+                        selectedFilter: $selectedFilter,
+                        searchText: $searchText,
+                        selectedAssetID: $selectedAssetID,
+                        isDropping: $isDropping,
+                        assetRootURL: assetsRootURL,
+                        onDrop: handleDrop,
+                        onOpenScene: openSceneAsset,
+                        onReveal: revealInFinder,
+                        onRename: promptRename
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if let selectedAsset = selectedAsset, !selectedAssetGuid.isEmpty {
+                        AssetImportSettingsPanel(
+                            asset: selectedAsset,
+                            modelOptions: $selectedModelOptions,
+                            textureOptions: $selectedTextureOptions,
+                            hdriOptions: $selectedHdriOptions,
+                            onApply: applySelectedAssetSettings,
+                            onReimport: reimportSelectedAsset
+                        )
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxHeight: .infinity, alignment: .top)
@@ -164,6 +196,12 @@ struct AssetBrowserPanel: View {
         }
         .onChange(of: editorState.projectRootURL) { _ in
             reloadFolderTree()
+        }
+        .onChange(of: selectedAssetID) { _ in
+            loadSelectedAssetSettings()
+        }
+        .onChange(of: editorState.assets) { _ in
+            loadSelectedAssetSettings()
         }
     }
     
@@ -355,12 +393,88 @@ struct AssetBrowserPanel: View {
             return
         }
         
+        if let assetsRoot = assetsRootURL,
+           isUnderRoot(url, root: assetsRoot),
+           (isModelFile(url) || isSupportedAssetFile(url)) {
+            let moved = CrescentEngineBridge.shared().moveAsset(source: url.path, to: newURL.path, overwrite: false)
+            if moved {
+                editorState.rescanAssetRoot()
+            } else {
+                editorState.addLog(.error, "Rename failed: \(newName)")
+            }
+            return
+        }
+
         do {
             try FileManager.default.moveItem(at: url, to: newURL)
             editorState.rescanAssetRoot()
         } catch {
             editorState.addLog(.error, "Rename failed: \(error.localizedDescription)")
         }
+    }
+
+    private func loadSelectedAssetSettings() {
+        guard let asset = selectedAsset else {
+            selectedAssetGuid = ""
+            selectedModelOptions = ModelImportOptions()
+            selectedTextureOptions = TextureImportOptions()
+            selectedHdriOptions = HdriImportOptions()
+            return
+        }
+        let meta = CrescentEngineBridge.shared().getAssetMeta(path: asset.path) as? [String: Any] ?? [:]
+        let guid = meta["guid"] as? String ?? ""
+        selectedAssetGuid = guid
+        if guid.isEmpty {
+            selectedModelOptions = ModelImportOptions()
+            selectedTextureOptions = TextureImportOptions()
+            selectedHdriOptions = HdriImportOptions()
+            return
+        }
+        if let model = meta["model"] as? [String: Any] {
+            selectedModelOptions = ModelImportOptions(dictionary: model)
+        }
+        if let texture = meta["texture"] as? [String: Any] {
+            selectedTextureOptions = TextureImportOptions(dictionary: texture)
+        }
+        if let hdri = meta["hdri"] as? [String: Any] {
+            selectedHdriOptions = HdriImportOptions(dictionary: hdri)
+        }
+    }
+
+    private func applySelectedAssetSettings() {
+        guard let asset = selectedAsset, !selectedAssetGuid.isEmpty else { return }
+        let bridge = CrescentEngineBridge.shared()
+        switch asset.type {
+        case .model:
+            let ok = bridge.updateModelImportSettings(guid: selectedAssetGuid, settings: selectedModelOptions.toDictionary())
+            editorState.addLog(ok ? .info : .error, ok ? "Model import settings saved." : "Failed to save model import settings.")
+        case .texture:
+            let ok = bridge.updateTextureImportSettings(guid: selectedAssetGuid, settings: selectedTextureOptions.toDictionary())
+            editorState.addLog(ok ? .info : .error, ok ? "Texture import settings saved." : "Failed to save texture import settings.")
+        case .hdri:
+            let ok = bridge.updateHdriImportSettings(guid: selectedAssetGuid, settings: selectedHdriOptions.toDictionary())
+            editorState.addLog(ok ? .info : .error, ok ? "HDRI import settings saved." : "Failed to save HDRI import settings.")
+        default:
+            break
+        }
+    }
+
+    private func reimportSelectedAsset() {
+        guard let asset = selectedAsset, !selectedAssetGuid.isEmpty else { return }
+        applySelectedAssetSettings()
+        let bridge = CrescentEngineBridge.shared()
+        let ok: Bool
+        switch asset.type {
+        case .model:
+            ok = bridge.reimportModelAsset(guid: selectedAssetGuid)
+        case .texture:
+            ok = bridge.reimportTextureAsset(guid: selectedAssetGuid)
+        case .hdri:
+            ok = bridge.reimportHdriAsset(guid: selectedAssetGuid)
+        default:
+            return
+        }
+        editorState.addLog(ok ? .info : .warning, ok ? "Reimported \(asset.name)" : "Reimport skipped: \(asset.name)")
     }
 
 }
@@ -826,6 +940,136 @@ private struct ImportOptionsPanel: View {
             get: { editorState.modelImportOptions.mergeStaticMeshes },
             set: { editorState.modelImportOptions.mergeStaticMeshes = $0 }
         )
+    }
+}
+
+private struct AssetImportSettingsPanel: View {
+    let asset: AssetInfo
+    @Binding var modelOptions: ModelImportOptions
+    @Binding var textureOptions: TextureImportOptions
+    @Binding var hdriOptions: HdriImportOptions
+    let onApply: () -> Void
+    let onReimport: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Asset Settings")
+                    .font(EditorTheme.fontBodyMedium)
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                Text(asset.name)
+                    .font(EditorTheme.fontCaption)
+                    .foregroundColor(EditorTheme.textMuted)
+                    .lineLimit(1)
+            }
+
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+
+            switch asset.type {
+            case .model:
+                modelSettings
+            case .texture:
+                textureSettings
+            case .hdri:
+                hdriSettings
+            default:
+                Text("No import settings for this asset type.")
+                    .font(EditorTheme.fontBody)
+                    .foregroundColor(EditorTheme.textMuted)
+            }
+
+            HStack(spacing: 8) {
+                Button("Apply") { onApply() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Reimport") { onReimport() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                Spacer()
+            }
+        }
+        .padding(10)
+        .background(EditorTheme.panelBackground)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(EditorTheme.panelStroke, lineWidth: 1)
+        )
+        .cornerRadius(10)
+    }
+
+    private var modelSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Scale")
+                    .font(EditorTheme.fontBody)
+                    .foregroundColor(EditorTheme.textMuted)
+                TextField("", value: Binding(
+                    get: { modelOptions.scale },
+                    set: { modelOptions.scale = max(0.0001, $0) }
+                ), format: .number.precision(.fractionLength(3)))
+                    .textFieldStyle(.plain)
+                    .font(EditorTheme.fontMono)
+                    .multilineTextAlignment(.trailing)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(EditorTheme.panelBackground)
+                    .cornerRadius(4)
+                    .frame(width: 80)
+                Spacer()
+            }
+
+            Toggle("Flip UVs", isOn: Binding(
+                get: { modelOptions.flipUVs },
+                set: { modelOptions.flipUVs = $0 }
+            ))
+            .font(EditorTheme.fontBody)
+
+            Toggle("Import LOD0 Only", isOn: Binding(
+                get: { modelOptions.onlyLOD0 },
+                set: { modelOptions.onlyLOD0 = $0 }
+            ))
+            .font(EditorTheme.fontBody)
+
+            Toggle("Merge Static Meshes", isOn: Binding(
+                get: { modelOptions.mergeStaticMeshes },
+                set: { modelOptions.mergeStaticMeshes = $0 }
+            ))
+            .font(EditorTheme.fontBody)
+        }
+    }
+
+    private var textureSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("sRGB", isOn: Binding(
+                get: { textureOptions.srgb },
+                set: { textureOptions.srgb = $0 }
+            ))
+            .font(EditorTheme.fontBody)
+
+            Toggle("Flip Y", isOn: Binding(
+                get: { textureOptions.flipY },
+                set: { textureOptions.flipY = $0 }
+            ))
+            .font(EditorTheme.fontBody)
+
+            Toggle("Normal Map", isOn: Binding(
+                get: { textureOptions.normalMap },
+                set: { textureOptions.normalMap = $0 }
+            ))
+            .font(EditorTheme.fontBody)
+        }
+    }
+
+    private var hdriSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Flip Y", isOn: Binding(
+                get: { hdriOptions.flipY },
+                set: { hdriOptions.flipY = $0 }
+            ))
+            .font(EditorTheme.fontBody)
+        }
     }
 }
 

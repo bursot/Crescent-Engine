@@ -13,6 +13,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)render;
 - (void)setMetalLayer:(CAMetalLayer *)layer;
 - (void)resizeWithWidth:(float)width height:(float)height;
+- (void)setSceneMetalLayer:(CAMetalLayer *)layer;
+- (void)setGameMetalLayer:(CAMetalLayer *)layer;
+- (void)resizeSceneWithWidth:(float)width height:(float)height;
+- (void)resizeGameWithWidth:(float)width height:(float)height;
 
 // Input handling
 - (void)handleKeyDown:(unsigned short)keyCode;
@@ -39,12 +43,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)deleteEntitiesByUUID:(NSArray<NSString *> *)uuids NS_SWIFT_NAME(deleteEntities(uuids:));
 
 // Scene query
-- (NSArray<NSDictionary *> *)getAllEntityInfo; // Returns array of {uuid, name}
+- (NSArray<NSDictionary *> *)getAllEntityInfo; // Returns array of {uuid, name, parent}
 - (NSString *)getSelectedEntityUUID NS_SWIFT_NAME(getSelectedEntityUUID());
 - (NSArray<NSString *> *)getAllSelectedEntityUUIDs NS_SWIFT_NAME(getAllSelectedUUIDs()); // Returns ALL selected UUIDs
 - (void)setSelectionByUUID:(NSArray<NSString *> *)uuids NS_SWIFT_NAME(setSelection(uuids:));
 - (void)selectEntityByUUID:(NSString *)uuid NS_SWIFT_NAME(selectEntity(uuid:));
 - (void)clearSelection;
+- (BOOL)setEntityParent:(NSString *)childUUID parent:(NSString *)parentUUID NS_SWIFT_NAME(setEntityParent(child:parent:));
+- (BOOL)setEntityName:(NSString *)uuid name:(NSString *)name NS_SWIFT_NAME(setEntityName(uuid:name:));
 
 // Entity transform query (by UUID)
 - (NSArray<NSNumber *> *)getEntityPositionByUUID:(NSString *)uuid NS_SWIFT_NAME(getPosition(uuid:));
@@ -67,6 +73,7 @@ NS_ASSUME_NONNULL_BEGIN
 // Camera controls
 - (float)getCameraMoveSpeed;
 - (void)setCameraMoveSpeed:(float)speed;
+- (NSDictionary *)getSceneCameraBasis NS_SWIFT_NAME(getSceneCameraBasis());
 
 // Material editing (by UUID)
 - (NSDictionary *)getMaterialInfoForEntity:(NSString *)uuid;
@@ -106,11 +113,25 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)enterPlayMode NS_SWIFT_NAME(enterPlayMode());
 - (void)exitPlayMode NS_SWIFT_NAME(exitPlayMode());
 - (BOOL)isPlaying NS_SWIFT_NAME(isPlaying());
+- (BOOL)isPaused NS_SWIFT_NAME(isPaused());
+- (void)setPaused:(BOOL)paused NS_SWIFT_NAME(setPaused(_:));
+- (float)getTimeScale NS_SWIFT_NAME(getTimeScale());
+- (void)setTimeScale:(float)scale NS_SWIFT_NAME(setTimeScale(_:));
+- (void)setViewMode:(int)mode NS_SWIFT_NAME(setViewMode(_:));
+- (int)getViewMode NS_SWIFT_NAME(getViewMode());
 - (void)setAssetRootPath:(NSString *)path NS_SWIFT_NAME(setAssetRoot(path:));
 - (BOOL)createProjectAtPath:(NSString *)path name:(NSString *)name NS_SWIFT_NAME(createProject(path:name:));
 - (BOOL)openProjectAtPath:(NSString *)path NS_SWIFT_NAME(openProject(path:));
 - (NSDictionary *)getProjectInfo NS_SWIFT_NAME(getProjectInfo());
 - (NSString *)importAssetAtPath:(NSString *)path type:(NSString *)type NS_SWIFT_NAME(importAsset(path:type:));
+- (BOOL)moveAssetAtPath:(NSString *)sourcePath toPath:(NSString *)targetPath overwrite:(BOOL)overwrite NS_SWIFT_NAME(moveAsset(source:to:overwrite:));
+- (NSDictionary *)getAssetMetaAtPath:(NSString *)path NS_SWIFT_NAME(getAssetMeta(path:));
+- (BOOL)updateModelImportSettings:(NSString *)guid settings:(NSDictionary *)settings NS_SWIFT_NAME(updateModelImportSettings(guid:settings:));
+- (BOOL)updateTextureImportSettings:(NSString *)guid settings:(NSDictionary *)settings NS_SWIFT_NAME(updateTextureImportSettings(guid:settings:));
+- (BOOL)updateHdriImportSettings:(NSString *)guid settings:(NSDictionary *)settings NS_SWIFT_NAME(updateHdriImportSettings(guid:settings:));
+- (BOOL)reimportModelAsset:(NSString *)guid NS_SWIFT_NAME(reimportModelAsset(guid:));
+- (BOOL)reimportTextureAsset:(NSString *)guid NS_SWIFT_NAME(reimportTextureAsset(guid:));
+- (BOOL)reimportHdriAsset:(NSString *)guid NS_SWIFT_NAME(reimportHdriAsset(guid:));
 - (NSDictionary *)getProjectSettings NS_SWIFT_NAME(getProjectSettings());
 - (void)setProjectSettings:(NSDictionary *)settings NS_SWIFT_NAME(setProjectSettings(settings:));
 - (NSDictionary *)getSceneSettings NS_SWIFT_NAME(getSceneSettings());
@@ -141,6 +162,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setColliderInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setColliderInfo(uuid:info:));
 - (BOOL)addCollider:(NSString *)uuid NS_SWIFT_NAME(addCollider(uuid:));
 - (void)removeCollider:(NSString *)uuid NS_SWIFT_NAME(removeCollider(uuid:));
+- (NSDictionary *)getCharacterControllerInfo:(NSString *)uuid NS_SWIFT_NAME(getCharacterControllerInfo(uuid:));
+- (BOOL)setCharacterControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setCharacterControllerInfo(uuid:info:));
+- (BOOL)addCharacterController:(NSString *)uuid NS_SWIFT_NAME(addCharacterController(uuid:));
+- (void)removeCharacterController:(NSString *)uuid NS_SWIFT_NAME(removeCharacterController(uuid:));
+- (NSDictionary *)getFirstPersonControllerInfo:(NSString *)uuid NS_SWIFT_NAME(getFirstPersonControllerInfo(uuid:));
+- (BOOL)setFirstPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setFirstPersonControllerInfo(uuid:info:));
+- (BOOL)addFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(addFirstPersonController(uuid:));
+- (void)removeFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(removeFirstPersonController(uuid:));
 - (BOOL)getPhysicsDebugDraw NS_SWIFT_NAME(getPhysicsDebugDraw());
 - (void)setPhysicsDebugDraw:(BOOL)enabled NS_SWIFT_NAME(setPhysicsDebugDraw(enabled:));
 

@@ -302,6 +302,9 @@ void Animator::OnCreate() {
         }
     }
     if (m_AutoPlay && m_CurrentStateIndex >= 0) {
+        if (skinned) {
+            skinned->setPlaying(true);
+        }
         ApplyState(m_CurrentStateIndex, 0.0f, true);
     }
 }

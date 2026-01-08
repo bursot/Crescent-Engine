@@ -317,6 +317,7 @@ std::shared_ptr<Project> ProjectManager::createProject(const std::string& rootPa
     m_ActiveProject = Project::Create(rootPath, name);
     if (m_ActiveProject) {
         AssetDatabase::getInstance().setRootPath(m_ActiveProject->getAssetsPath());
+        AssetDatabase::getInstance().setLibraryPath(m_ActiveProject->getLibraryPath());
     }
     return m_ActiveProject;
 }
@@ -325,6 +326,7 @@ std::shared_ptr<Project> ProjectManager::openProject(const std::string& projectF
     m_ActiveProject = Project::Load(projectFilePath);
     if (m_ActiveProject) {
         AssetDatabase::getInstance().setRootPath(m_ActiveProject->getAssetsPath());
+        AssetDatabase::getInstance().setLibraryPath(m_ActiveProject->getLibraryPath());
     }
     return m_ActiveProject;
 }
@@ -332,6 +334,7 @@ std::shared_ptr<Project> ProjectManager::openProject(const std::string& projectF
 void ProjectManager::closeProject() {
     m_ActiveProject.reset();
     AssetDatabase::getInstance().setRootPath("");
+    AssetDatabase::getInstance().setLibraryPath("");
 }
 
 } // namespace Crescent

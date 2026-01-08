@@ -13,15 +13,27 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
+#include <Jolt/Physics/Collision/CollisionGroup.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Body/Body.h>
+#include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Core/HashCombine.h>
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <thread>
 
 namespace Crescent {
@@ -101,6 +113,102 @@ Math::Quaternion ToCrescent(const JPH::Quat& q) {
     return Math::Quaternion(q.GetX(), q.GetY(), q.GetZ(), q.GetW());
 }
 
+struct BodyPairKey {
+    JPH::BodyID body1;
+    JPH::BodyID body2;
+
+    bool operator==(const BodyPairKey& other) const {
+        return body1 == other.body1 && body2 == other.body2;
+    }
+};
+
+struct BodyPairKeyHash {
+    size_t operator()(const BodyPairKey& key) const {
+        return static_cast<size_t>(JPH::HashCombineArgs(key.body1.GetIndexAndSequenceNumber(),
+                                                        key.body2.GetIndexAndSequenceNumber()));
+    }
+};
+
+inline BodyPairKey MakeBodyPairKey(const JPH::BodyID& a, const JPH::BodyID& b) {
+    if (a < b) {
+        return {a, b};
+    }
+    return {b, a};
+}
+
+inline PhysicsCollider::CombineMode ResolveCombineMode(PhysicsCollider::CombineMode a,
+                                                       PhysicsCollider::CombineMode b) {
+    return (static_cast<int>(a) >= static_cast<int>(b)) ? a : b;
+}
+
+inline float CombineValues(float a, float b, PhysicsCollider::CombineMode mode) {
+    switch (mode) {
+    case PhysicsCollider::CombineMode::Min:
+        return std::min(a, b);
+    case PhysicsCollider::CombineMode::Multiply:
+        return a * b;
+    case PhysicsCollider::CombineMode::Max:
+        return std::max(a, b);
+    case PhysicsCollider::CombineMode::Average:
+    default:
+        return 0.5f * (a + b);
+    }
+}
+
+inline const PhysicsCollider* GetColliderFromBody(const JPH::Body& body) {
+    auto* entity = reinterpret_cast<Entity*>(body.GetUserData());
+    return entity ? entity->getComponent<PhysicsCollider>() : nullptr;
+}
+
+float CombineFriction(const JPH::Body& body1,
+                      const JPH::SubShapeID&,
+                      const JPH::Body& body2,
+                      const JPH::SubShapeID&) {
+    const PhysicsCollider* collider1 = GetColliderFromBody(body1);
+    const PhysicsCollider* collider2 = GetColliderFromBody(body2);
+    float friction1 = collider1 ? collider1->getFriction() : body1.GetFriction();
+    float friction2 = collider2 ? collider2->getFriction() : body2.GetFriction();
+    PhysicsCollider::CombineMode mode1 = collider1 ? collider1->getFrictionCombine()
+                                                   : PhysicsCollider::CombineMode::Average;
+    PhysicsCollider::CombineMode mode2 = collider2 ? collider2->getFrictionCombine()
+                                                   : PhysicsCollider::CombineMode::Average;
+    PhysicsCollider::CombineMode mode = ResolveCombineMode(mode1, mode2);
+    return CombineValues(friction1, friction2, mode);
+}
+
+float CombineRestitution(const JPH::Body& body1,
+                         const JPH::SubShapeID&,
+                         const JPH::Body& body2,
+                         const JPH::SubShapeID&) {
+    const PhysicsCollider* collider1 = GetColliderFromBody(body1);
+    const PhysicsCollider* collider2 = GetColliderFromBody(body2);
+    float restitution1 = collider1 ? collider1->getRestitution() : body1.GetRestitution();
+    float restitution2 = collider2 ? collider2->getRestitution() : body2.GetRestitution();
+    PhysicsCollider::CombineMode mode1 = collider1 ? collider1->getRestitutionCombine()
+                                                   : PhysicsCollider::CombineMode::Average;
+    PhysicsCollider::CombineMode mode2 = collider2 ? collider2->getRestitutionCombine()
+                                                   : PhysicsCollider::CombineMode::Average;
+    PhysicsCollider::CombineMode mode = ResolveCombineMode(mode1, mode2);
+    return CombineValues(restitution1, restitution2, mode);
+}
+
+enum class ContactEventType {
+    Enter,
+    Stay,
+    Exit
+};
+
+struct ContactEvent {
+    JPH::BodyID body1;
+    JPH::BodyID body2;
+    Math::Vector3 point1;
+    Math::Vector3 point2;
+    Math::Vector3 normal;
+    float penetration;
+    bool isTrigger;
+    ContactEventType type;
+};
+
 } // namespace
 
 struct PhysicsWorld::BodyRecord {
@@ -114,12 +222,119 @@ struct PhysicsWorld::BodyRecord {
 
 class PhysicsWorld::PhysicsWorldImpl {
 public:
+    class ContactListenerImpl final : public JPH::ContactListener {
+    public:
+        explicit ContactListenerImpl(PhysicsWorldImpl& impl)
+            : m_Impl(impl) {}
+
+        JPH::ValidateResult OnContactValidate(const JPH::Body& inBody1,
+                                              const JPH::Body& inBody2,
+                                              JPH::RVec3Arg,
+                                              const JPH::CollideShapeResult&) override {
+            const PhysicsCollider* collider1 = GetColliderFromBody(inBody1);
+            const PhysicsCollider* collider2 = GetColliderFromBody(inBody2);
+            if (!collider1 || !collider2) {
+                return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+            }
+
+            uint32_t layer1 = collider1->getCollisionLayer();
+            uint32_t layer2 = collider2->getCollisionLayer();
+            uint32_t mask1 = collider1->getCollisionMask();
+            uint32_t mask2 = collider2->getCollisionMask();
+
+            if (layer1 >= PhysicsCollider::kMaxLayers || layer2 >= PhysicsCollider::kMaxLayers) {
+                return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+            }
+
+            uint32_t bit1 = 1u << layer2;
+            uint32_t bit2 = 1u << layer1;
+            bool collide = (mask1 & bit1) != 0 && (mask2 & bit2) != 0;
+            return collide ? JPH::ValidateResult::AcceptAllContactsForThisBodyPair
+                           : JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+        }
+
+        void OnContactAdded(const JPH::Body& inBody1,
+                            const JPH::Body& inBody2,
+                            const JPH::ContactManifold& inManifold,
+                            JPH::ContactSettings&) override {
+            recordEvent(inBody1, inBody2, inManifold, ContactEventType::Enter);
+        }
+
+        void OnContactPersisted(const JPH::Body& inBody1,
+                                const JPH::Body& inBody2,
+                                const JPH::ContactManifold& inManifold,
+                                JPH::ContactSettings&) override {
+            recordEvent(inBody1, inBody2, inManifold, ContactEventType::Stay);
+        }
+
+        void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {
+            BodyPairKey key = MakeBodyPairKey(inSubShapePair.GetBody1ID(), inSubShapePair.GetBody2ID());
+            bool isTrigger = false;
+            {
+                std::lock_guard<std::mutex> lock(m_Impl.eventMutex);
+                auto it = m_Impl.activeContacts.find(key);
+                if (it != m_Impl.activeContacts.end()) {
+                    isTrigger = it->second;
+                    m_Impl.activeContacts.erase(it);
+                }
+            }
+
+            ContactEvent event{};
+            event.body1 = key.body1;
+            event.body2 = key.body2;
+            event.isTrigger = isTrigger;
+            event.type = ContactEventType::Exit;
+            {
+                std::lock_guard<std::mutex> lock(m_Impl.eventMutex);
+                m_Impl.pendingEvents.push_back(event);
+            }
+        }
+
+    private:
+        void recordEvent(const JPH::Body& body1,
+                         const JPH::Body& body2,
+                         const JPH::ContactManifold& manifold,
+                         ContactEventType type) {
+            ContactEvent event{};
+            event.body1 = body1.GetID();
+            event.body2 = body2.GetID();
+            event.isTrigger = body1.IsSensor() || body2.IsSensor();
+            event.normal = ToCrescent(manifold.mWorldSpaceNormal);
+            event.penetration = manifold.mPenetrationDepth;
+
+            if (!manifold.mRelativeContactPointsOn1.empty()) {
+                JPH::RVec3 p1 = manifold.GetWorldSpaceContactPointOn1(0);
+                JPH::RVec3 p2 = manifold.GetWorldSpaceContactPointOn2(0);
+                event.point1 = Math::Vector3(static_cast<float>(p1.GetX()),
+                                             static_cast<float>(p1.GetY()),
+                                             static_cast<float>(p1.GetZ()));
+                event.point2 = Math::Vector3(static_cast<float>(p2.GetX()),
+                                             static_cast<float>(p2.GetY()),
+                                             static_cast<float>(p2.GetZ()));
+            }
+
+            event.type = type;
+            BodyPairKey key = MakeBodyPairKey(event.body1, event.body2);
+            {
+                std::lock_guard<std::mutex> lock(m_Impl.eventMutex);
+                m_Impl.activeContacts[key] = event.isTrigger;
+                m_Impl.pendingEvents.push_back(event);
+            }
+        }
+
+        PhysicsWorldImpl& m_Impl;
+    };
+
     BroadPhaseLayerInterfaceImpl broadphaseLayerInterface;
     ObjectVsBroadPhaseLayerFilterImpl objectVsBroadphaseLayerFilter;
     ObjectLayerPairFilterImpl objectLayerPairFilter;
     JPH::PhysicsSystem physicsSystem;
     std::unique_ptr<JPH::TempAllocatorImpl> tempAllocator;
     std::unique_ptr<JPH::JobSystemThreadPool> jobSystem;
+    std::unique_ptr<ContactListenerImpl> contactListener;
+    std::mutex eventMutex;
+    std::vector<ContactEvent> pendingEvents;
+    std::unordered_map<BodyPairKey, bool, BodyPairKeyHash> activeContacts;
 };
 
 PhysicsWorld::PhysicsWorld(Scene* scene)
@@ -170,12 +385,21 @@ bool PhysicsWorld::initialize() {
                                m_Impl->objectVsBroadphaseLayerFilter,
                                m_Impl->objectLayerPairFilter);
 
+    m_Impl->contactListener = std::make_unique<PhysicsWorldImpl::ContactListenerImpl>(*m_Impl);
+    m_Impl->physicsSystem.SetContactListener(m_Impl->contactListener.get());
+    m_Impl->physicsSystem.SetCombineFriction(&CombineFriction);
+    m_Impl->physicsSystem.SetCombineRestitution(&CombineRestitution);
     m_Impl->physicsSystem.SetGravity(ToJolt(m_Gravity));
 
     m_Initialized = true;
     m_DebugDraw = false;
     m_Pending.clear();
     m_Bodies.clear();
+    {
+        std::lock_guard<std::mutex> lock(m_Impl->eventMutex);
+        m_Impl->pendingEvents.clear();
+        m_Impl->activeContacts.clear();
+    }
     m_TimeAccumulator = 0.0f;
 
     return true;
@@ -194,6 +418,13 @@ void PhysicsWorld::shutdown() {
         }
         m_Bodies.clear();
         m_Pending.clear();
+        m_Impl->physicsSystem.SetContactListener(nullptr);
+        m_Impl->contactListener.reset();
+        {
+            std::lock_guard<std::mutex> lock(m_Impl->eventMutex);
+            m_Impl->pendingEvents.clear();
+            m_Impl->activeContacts.clear();
+        }
     }
 
     if (--g_JoltRefCount == 0) {
@@ -232,6 +463,7 @@ void PhysicsWorld::update(float deltaTime, bool simulate) {
     }
 
     syncDynamicBodies();
+    dispatchContactEvents();
 }
 
 void PhysicsWorld::setGravity(const Math::Vector3& gravity) {
@@ -264,8 +496,19 @@ void PhysicsWorld::removeBody(Entity* entity) {
         return;
     }
     JPH::BodyInterface& bodyInterface = m_Impl->physicsSystem.GetBodyInterface();
+    JPH::BodyID bodyID = it->second.id;
     bodyInterface.RemoveBody(it->second.id);
     bodyInterface.DestroyBody(it->second.id);
+    {
+        std::lock_guard<std::mutex> lock(m_Impl->eventMutex);
+        for (auto pairIt = m_Impl->activeContacts.begin(); pairIt != m_Impl->activeContacts.end(); ) {
+            if (pairIt->first.body1 == bodyID || pairIt->first.body2 == bodyID) {
+                pairIt = m_Impl->activeContacts.erase(pairIt);
+            } else {
+                ++pairIt;
+            }
+        }
+    }
     m_Bodies.erase(it);
 }
 
@@ -409,9 +652,17 @@ void PhysicsWorld::rebuildBody(Entity* entity) {
                                        ToJolt(rot),
                                        motionType,
                                        layer);
+    uint32_t collisionLayer = collider->getCollisionLayer();
+    if (collisionLayer >= PhysicsCollider::kMaxLayers) {
+        collisionLayer = PhysicsCollider::kMaxLayers - 1;
+    }
+    uint32_t collisionMask = collider->getCollisionMask();
+    settings.mCollisionGroup.SetGroupID(collisionLayer);
+    settings.mCollisionGroup.SetSubGroupID(collisionMask);
     settings.mIsSensor = collider->isTrigger();
     settings.mFriction = collider->getFriction();
     settings.mRestitution = collider->getRestitution();
+    settings.mUserData = reinterpret_cast<uint64_t>(entity);
 
     if (rb) {
         settings.mLinearDamping = rb->getLinearDamping();
@@ -596,6 +847,698 @@ JPH::RefConst<JPH::Shape> PhysicsWorld::buildShape(const PhysicsCollider& collid
                                                 shape);
     }
     return shape;
+}
+
+Entity* PhysicsWorld::resolveEntity(const JPH::BodyID& bodyID) const {
+    if (!m_Impl) {
+        return nullptr;
+    }
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    JPH::BodyLockRead lock(lockInterface, bodyID);
+    if (!lock.Succeeded()) {
+        return nullptr;
+    }
+    const JPH::Body& body = lock.GetBody();
+    return reinterpret_cast<Entity*>(body.GetUserData());
+}
+
+void PhysicsWorld::dispatchContactEvents() {
+    if (!m_Impl) {
+        return;
+    }
+    std::vector<ContactEvent> events;
+    {
+        std::lock_guard<std::mutex> lock(m_Impl->eventMutex);
+        if (m_Impl->pendingEvents.empty()) {
+            return;
+        }
+        events.swap(m_Impl->pendingEvents);
+    }
+
+    struct EventKey {
+        BodyPairKey pair;
+        ContactEventType type;
+
+        bool operator==(const EventKey& other) const {
+            return pair == other.pair && type == other.type;
+        }
+    };
+
+    struct EventKeyHash {
+        size_t operator()(const EventKey& key) const {
+            return static_cast<size_t>(JPH::HashCombineArgs(
+                static_cast<uint64_t>(BodyPairKeyHash{}(key.pair)),
+                static_cast<uint32_t>(key.type)));
+        }
+    };
+
+    std::unordered_set<EventKey, EventKeyHash> seen;
+    for (const auto& event : events) {
+        BodyPairKey pair = MakeBodyPairKey(event.body1, event.body2);
+        EventKey key{pair, event.type};
+        if (!seen.insert(key).second) {
+            continue;
+        }
+
+        Entity* entity1 = resolveEntity(event.body1);
+        Entity* entity2 = resolveEntity(event.body2);
+        if (!entity1 || !entity2) {
+            continue;
+        }
+        if (!entity1->isActiveInHierarchy() || !entity2->isActiveInHierarchy()) {
+            continue;
+        }
+
+        PhysicsContact contact1;
+        contact1.other = entity2;
+        contact1.point = event.point1;
+        contact1.normal = event.normal;
+        contact1.penetration = event.penetration;
+        contact1.isTrigger = event.isTrigger;
+
+        PhysicsContact contact2;
+        contact2.other = entity1;
+        contact2.point = event.point2;
+        contact2.normal = -event.normal;
+        contact2.penetration = event.penetration;
+        contact2.isTrigger = event.isTrigger;
+
+        if (event.isTrigger) {
+            switch (event.type) {
+            case ContactEventType::Enter:
+                entity1->OnTriggerEnter(contact1);
+                entity2->OnTriggerEnter(contact2);
+                break;
+            case ContactEventType::Stay:
+                entity1->OnTriggerStay(contact1);
+                entity2->OnTriggerStay(contact2);
+                break;
+            case ContactEventType::Exit:
+                entity1->OnTriggerExit(contact1);
+                entity2->OnTriggerExit(contact2);
+                break;
+            }
+        } else {
+            switch (event.type) {
+            case ContactEventType::Enter:
+                entity1->OnCollisionEnter(contact1);
+                entity2->OnCollisionEnter(contact2);
+                break;
+            case ContactEventType::Stay:
+                entity1->OnCollisionStay(contact1);
+                entity2->OnCollisionStay(contact2);
+                break;
+            case ContactEventType::Exit:
+                entity1->OnCollisionExit(contact1);
+                entity2->OnCollisionExit(contact2);
+                break;
+            }
+        }
+    }
+}
+
+namespace {
+
+class QueryBodyFilter final : public JPH::BodyFilter {
+public:
+    QueryBodyFilter(uint32_t mask, bool includeTriggers, const Entity* ignore)
+        : m_Mask(mask)
+        , m_IncludeTriggers(includeTriggers)
+        , m_Ignore(ignore) {}
+
+    bool ShouldCollideLocked(const JPH::Body& body) const override {
+        if (!m_IncludeTriggers && body.IsSensor()) {
+            return false;
+        }
+        if (m_Ignore) {
+            const auto* entity = reinterpret_cast<const Entity*>(body.GetUserData());
+            if (entity == m_Ignore) {
+                return false;
+            }
+        }
+        const JPH::CollisionGroup& group = body.GetCollisionGroup();
+        uint32_t layer = group.GetGroupID();
+        if (layer == JPH::CollisionGroup::cInvalidGroup) {
+            return true;
+        }
+        if (layer >= PhysicsCollider::kMaxLayers) {
+            return false;
+        }
+        return (m_Mask & (1u << layer)) != 0;
+    }
+
+private:
+    uint32_t m_Mask;
+    bool m_IncludeTriggers;
+    const Entity* m_Ignore;
+};
+
+bool PopulateShapeCastHit(const JPH::ShapeCastResult& hit,
+                          float maxDistance,
+                          const Math::Vector3& direction,
+                          const JPH::BodyLockInterface& lockInterface,
+                          PhysicsRaycastHit& outHit) {
+    JPH::BodyLockRead lock(lockInterface, hit.mBodyID2);
+    if (!lock.Succeeded()) {
+        return false;
+    }
+
+    const JPH::Body& body = lock.GetBody();
+    Entity* entity = reinterpret_cast<Entity*>(body.GetUserData());
+    if (!entity) {
+        return false;
+    }
+
+    JPH::Vec3 axis = hit.mPenetrationAxis;
+    JPH::Vec3 fallback = JPH::Vec3(direction.x, direction.y, direction.z);
+    JPH::Vec3 normal = (axis.LengthSq() > 0.0f) ? -axis.Normalized() : -fallback;
+
+    outHit.hit = true;
+    outHit.entity = entity;
+    outHit.distance = hit.mFraction * maxDistance;
+    outHit.point = Math::Vector3(hit.mContactPointOn2.GetX(),
+                                 hit.mContactPointOn2.GetY(),
+                                 hit.mContactPointOn2.GetZ());
+    outHit.normal = Math::Vector3(normal.GetX(), normal.GetY(), normal.GetZ());
+    outHit.isTrigger = body.IsSensor();
+    return true;
+}
+
+} // namespace
+
+bool PhysicsWorld::raycast(const Math::Vector3& origin,
+                           const Math::Vector3& direction,
+                           float maxDistance,
+                           PhysicsRaycastHit& outHit,
+                           uint32_t layerMask,
+                           bool includeTriggers,
+                           const Entity* ignore) const {
+    outHit = PhysicsRaycastHit{};
+    if (!m_Impl || maxDistance <= 0.0f) {
+        return false;
+    }
+
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return false;
+    }
+    Math::Vector3 scaled = dir * maxDistance;
+
+    JPH::RRayCast ray(JPH::RVec3(origin.x, origin.y, origin.z),
+                      JPH::Vec3(scaled.x, scaled.y, scaled.z));
+    JPH::RayCastResult hit;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    if (!query.CastRay(ray, hit, {}, {}, bodyFilter)) {
+        return false;
+    }
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    JPH::BodyLockRead lock(lockInterface, hit.mBodyID);
+    if (!lock.Succeeded()) {
+        return false;
+    }
+
+    const JPH::Body& body = lock.GetBody();
+    Entity* entity = reinterpret_cast<Entity*>(body.GetUserData());
+    if (!entity) {
+        return false;
+    }
+
+    JPH::RVec3 hitPoint = ray.GetPointOnRay(hit.mFraction);
+    JPH::Vec3 normal = body.GetTransformedShape().GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPoint);
+
+    outHit.hit = true;
+    outHit.entity = entity;
+    outHit.distance = hit.mFraction * maxDistance;
+    outHit.point = Math::Vector3(static_cast<float>(hitPoint.GetX()),
+                                 static_cast<float>(hitPoint.GetY()),
+                                 static_cast<float>(hitPoint.GetZ()));
+    outHit.normal = Math::Vector3(normal.GetX(), normal.GetY(), normal.GetZ());
+    outHit.isTrigger = body.IsSensor();
+    return true;
+}
+
+int PhysicsWorld::raycastAll(const Math::Vector3& origin,
+                             const Math::Vector3& direction,
+                             float maxDistance,
+                             std::vector<PhysicsRaycastHit>& outHits,
+                             uint32_t layerMask,
+                             bool includeTriggers,
+                             const Entity* ignore) const {
+    outHits.clear();
+    if (!m_Impl || maxDistance <= 0.0f) {
+        return 0;
+    }
+
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return 0;
+    }
+    Math::Vector3 scaled = dir * maxDistance;
+
+    JPH::RRayCast ray(JPH::RVec3(origin.x, origin.y, origin.z),
+                      JPH::Vec3(scaled.x, scaled.y, scaled.z));
+    JPH::AllHitCollisionCollector<JPH::CastRayCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CastRay(ray, JPH::RayCastSettings(), collector, {}, {}, bodyFilter);
+
+    if (!collector.HadHit()) {
+        return 0;
+    }
+    collector.Sort();
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    outHits.reserve(collector.mHits.size());
+    for (const auto& hit : collector.mHits) {
+        JPH::BodyLockRead lock(lockInterface, hit.mBodyID);
+        if (!lock.Succeeded()) {
+            continue;
+        }
+        const JPH::Body& body = lock.GetBody();
+        Entity* entity = reinterpret_cast<Entity*>(body.GetUserData());
+        if (!entity) {
+            continue;
+        }
+
+        JPH::RVec3 hitPoint = ray.GetPointOnRay(hit.mFraction);
+        JPH::Vec3 normal = body.GetTransformedShape().GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPoint);
+
+        PhysicsRaycastHit result;
+        result.hit = true;
+        result.entity = entity;
+        result.distance = hit.mFraction * maxDistance;
+        result.point = Math::Vector3(static_cast<float>(hitPoint.GetX()),
+                                     static_cast<float>(hitPoint.GetY()),
+                                     static_cast<float>(hitPoint.GetZ()));
+        result.normal = Math::Vector3(normal.GetX(), normal.GetY(), normal.GetZ());
+        result.isTrigger = body.IsSensor();
+        outHits.push_back(result);
+    }
+
+    return static_cast<int>(outHits.size());
+}
+
+bool PhysicsWorld::sphereCast(const Math::Vector3& center,
+                              float radius,
+                              const Math::Vector3& direction,
+                              float maxDistance,
+                              PhysicsRaycastHit& outHit,
+                              uint32_t layerMask,
+                              bool includeTriggers,
+                              const Entity* ignore) const {
+    outHit = PhysicsRaycastHit{};
+    if (!m_Impl || radius <= 0.0f || maxDistance <= 0.0f) {
+        return false;
+    }
+
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return false;
+    }
+
+    JPH::RefConst<JPH::Shape> shape = new JPH::SphereShape(radius);
+    JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
+    JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,
+                                                                     JPH::Vec3(1.0f, 1.0f, 1.0f),
+                                                                     world,
+                                                                     castDir);
+    JPH::ShapeCastSettings settings;
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CastShape(shapeCast, settings, JPH::RVec3::sZero(), collector, {}, {}, bodyFilter);
+
+    if (!collector.HadHit()) {
+        return false;
+    }
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    return PopulateShapeCastHit(collector.mHit, maxDistance, dir, lockInterface, outHit);
+}
+
+int PhysicsWorld::sphereCastAll(const Math::Vector3& center,
+                                float radius,
+                                const Math::Vector3& direction,
+                                float maxDistance,
+                                std::vector<PhysicsRaycastHit>& outHits,
+                                uint32_t layerMask,
+                                bool includeTriggers,
+                                const Entity* ignore) const {
+    outHits.clear();
+    if (!m_Impl || radius <= 0.0f || maxDistance <= 0.0f) {
+        return 0;
+    }
+
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return 0;
+    }
+
+    JPH::RefConst<JPH::Shape> shape = new JPH::SphereShape(radius);
+    JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
+    JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,
+                                                                     JPH::Vec3(1.0f, 1.0f, 1.0f),
+                                                                     world,
+                                                                     castDir);
+    JPH::ShapeCastSettings settings;
+    JPH::AllHitCollisionCollector<JPH::CastShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CastShape(shapeCast, settings, JPH::RVec3::sZero(), collector, {}, {}, bodyFilter);
+
+    if (!collector.HadHit()) {
+        return 0;
+    }
+    collector.Sort();
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    outHits.reserve(collector.mHits.size());
+    for (const auto& hit : collector.mHits) {
+        PhysicsRaycastHit result;
+        if (!PopulateShapeCastHit(hit, maxDistance, dir, lockInterface, result)) {
+            continue;
+        }
+        outHits.push_back(result);
+    }
+
+    return static_cast<int>(outHits.size());
+}
+
+bool PhysicsWorld::boxCast(const Math::Vector3& center,
+                           const Math::Vector3& halfExtents,
+                           const Math::Vector3& direction,
+                           float maxDistance,
+                           PhysicsRaycastHit& outHit,
+                           uint32_t layerMask,
+                           bool includeTriggers,
+                           const Entity* ignore) const {
+    outHit = PhysicsRaycastHit{};
+    if (!m_Impl || maxDistance <= 0.0f) {
+        return false;
+    }
+    if (halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f) {
+        return false;
+    }
+
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return false;
+    }
+
+    JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(JPH::Vec3(halfExtents.x,
+                                                                 halfExtents.y,
+                                                                 halfExtents.z));
+    JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
+    JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,
+                                                                     JPH::Vec3(1.0f, 1.0f, 1.0f),
+                                                                     world,
+                                                                     castDir);
+    JPH::ShapeCastSettings settings;
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CastShape(shapeCast, settings, JPH::RVec3::sZero(), collector, {}, {}, bodyFilter);
+
+    if (!collector.HadHit()) {
+        return false;
+    }
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    return PopulateShapeCastHit(collector.mHit, maxDistance, dir, lockInterface, outHit);
+}
+
+int PhysicsWorld::boxCastAll(const Math::Vector3& center,
+                             const Math::Vector3& halfExtents,
+                             const Math::Vector3& direction,
+                             float maxDistance,
+                             std::vector<PhysicsRaycastHit>& outHits,
+                             uint32_t layerMask,
+                             bool includeTriggers,
+                             const Entity* ignore) const {
+    outHits.clear();
+    if (!m_Impl || maxDistance <= 0.0f) {
+        return 0;
+    }
+    if (halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f) {
+        return 0;
+    }
+
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return 0;
+    }
+
+    JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(JPH::Vec3(halfExtents.x,
+                                                                 halfExtents.y,
+                                                                 halfExtents.z));
+    JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
+    JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,
+                                                                     JPH::Vec3(1.0f, 1.0f, 1.0f),
+                                                                     world,
+                                                                     castDir);
+    JPH::ShapeCastSettings settings;
+    JPH::AllHitCollisionCollector<JPH::CastShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CastShape(shapeCast, settings, JPH::RVec3::sZero(), collector, {}, {}, bodyFilter);
+
+    if (!collector.HadHit()) {
+        return 0;
+    }
+    collector.Sort();
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    outHits.reserve(collector.mHits.size());
+    for (const auto& hit : collector.mHits) {
+        PhysicsRaycastHit result;
+        if (!PopulateShapeCastHit(hit, maxDistance, dir, lockInterface, result)) {
+            continue;
+        }
+        outHits.push_back(result);
+    }
+
+    return static_cast<int>(outHits.size());
+}
+
+bool PhysicsWorld::capsuleCast(const Math::Vector3& center,
+                               float radius,
+                               float height,
+                               const Math::Vector3& direction,
+                               float maxDistance,
+                               PhysicsRaycastHit& outHit,
+                               uint32_t layerMask,
+                               bool includeTriggers,
+                               const Entity* ignore) const {
+    outHit = PhysicsRaycastHit{};
+    if (!m_Impl || radius <= 0.0f || maxDistance <= 0.0f) {
+        return false;
+    }
+
+    float halfHeight = std::max(0.0f, (height * 0.5f) - radius);
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return false;
+    }
+
+    JPH::RefConst<JPH::Shape> shape = new JPH::CapsuleShape(halfHeight, radius);
+    JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
+    JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,
+                                                                     JPH::Vec3(1.0f, 1.0f, 1.0f),
+                                                                     world,
+                                                                     castDir);
+    JPH::ShapeCastSettings settings;
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CastShape(shapeCast, settings, JPH::RVec3::sZero(), collector, {}, {}, bodyFilter);
+
+    if (!collector.HadHit()) {
+        return false;
+    }
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    return PopulateShapeCastHit(collector.mHit, maxDistance, dir, lockInterface, outHit);
+}
+
+int PhysicsWorld::capsuleCastAll(const Math::Vector3& center,
+                                 float radius,
+                                 float height,
+                                 const Math::Vector3& direction,
+                                 float maxDistance,
+                                 std::vector<PhysicsRaycastHit>& outHits,
+                                 uint32_t layerMask,
+                                 bool includeTriggers,
+                                 const Entity* ignore) const {
+    outHits.clear();
+    if (!m_Impl || radius <= 0.0f || maxDistance <= 0.0f) {
+        return 0;
+    }
+
+    float halfHeight = std::max(0.0f, (height * 0.5f) - radius);
+    Math::Vector3 dir = direction.normalized();
+    if (dir.lengthSquared() == 0.0f) {
+        return 0;
+    }
+
+    JPH::RefConst<JPH::Shape> shape = new JPH::CapsuleShape(halfHeight, radius);
+    JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
+    JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,
+                                                                     JPH::Vec3(1.0f, 1.0f, 1.0f),
+                                                                     world,
+                                                                     castDir);
+    JPH::ShapeCastSettings settings;
+    JPH::AllHitCollisionCollector<JPH::CastShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CastShape(shapeCast, settings, JPH::RVec3::sZero(), collector, {}, {}, bodyFilter);
+
+    if (!collector.HadHit()) {
+        return 0;
+    }
+    collector.Sort();
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    outHits.reserve(collector.mHits.size());
+    for (const auto& hit : collector.mHits) {
+        PhysicsRaycastHit result;
+        if (!PopulateShapeCastHit(hit, maxDistance, dir, lockInterface, result)) {
+            continue;
+        }
+        outHits.push_back(result);
+    }
+
+    return static_cast<int>(outHits.size());
+}
+
+int PhysicsWorld::overlapSphere(const Math::Vector3& center,
+                                float radius,
+                                std::vector<PhysicsOverlapHit>& outHits,
+                                uint32_t layerMask,
+                                bool includeTriggers,
+                                const Entity* ignore) const {
+    outHits.clear();
+    if (!m_Impl || radius <= 0.0f) {
+        return 0;
+    }
+
+    JPH::SphereShape shape(radius);
+    JPH::RMat44 transform = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CollideShape(&shape,
+                       JPH::Vec3(1.0f, 1.0f, 1.0f),
+                       transform,
+                       JPH::CollideShapeSettings(),
+                       JPH::RVec3::sZero(),
+                       collector,
+                       {},
+                       {},
+                       bodyFilter);
+
+    if (!collector.HadHit()) {
+        return 0;
+    }
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    outHits.reserve(collector.mHits.size());
+    for (const auto& hit : collector.mHits) {
+        JPH::BodyLockRead lock(lockInterface, hit.mBodyID2);
+        if (!lock.Succeeded()) {
+            continue;
+        }
+        const JPH::Body& body = lock.GetBody();
+        Entity* entity = reinterpret_cast<Entity*>(body.GetUserData());
+        if (!entity) {
+            continue;
+        }
+
+        PhysicsOverlapHit result;
+        result.entity = entity;
+        result.point = Math::Vector3(hit.mContactPointOn2.GetX(),
+                                     hit.mContactPointOn2.GetY(),
+                                     hit.mContactPointOn2.GetZ());
+        Math::Vector3 normal = Math::Vector3(hit.mPenetrationAxis.GetX(),
+                                             hit.mPenetrationAxis.GetY(),
+                                             hit.mPenetrationAxis.GetZ());
+        result.normal = -normal.normalized();
+        result.penetration = hit.mPenetrationDepth;
+        result.isTrigger = body.IsSensor();
+        outHits.push_back(result);
+    }
+
+    return static_cast<int>(outHits.size());
+}
+
+int PhysicsWorld::overlapBox(const Math::Vector3& center,
+                             const Math::Vector3& halfExtents,
+                             std::vector<PhysicsOverlapHit>& outHits,
+                             uint32_t layerMask,
+                             bool includeTriggers,
+                             const Entity* ignore) const {
+    outHits.clear();
+    if (!m_Impl) {
+        return 0;
+    }
+
+    Math::Vector3 clamped(std::max(0.001f, halfExtents.x),
+                          std::max(0.001f, halfExtents.y),
+                          std::max(0.001f, halfExtents.z));
+    JPH::BoxShape shape(JPH::Vec3(clamped.x, clamped.y, clamped.z));
+    JPH::RMat44 transform = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
+    JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+    QueryBodyFilter bodyFilter(layerMask, includeTriggers, ignore);
+    const auto& query = m_Impl->physicsSystem.GetNarrowPhaseQuery();
+    query.CollideShape(&shape,
+                       JPH::Vec3(1.0f, 1.0f, 1.0f),
+                       transform,
+                       JPH::CollideShapeSettings(),
+                       JPH::RVec3::sZero(),
+                       collector,
+                       {},
+                       {},
+                       bodyFilter);
+
+    if (!collector.HadHit()) {
+        return 0;
+    }
+
+    const auto& lockInterface = m_Impl->physicsSystem.GetBodyLockInterface();
+    outHits.reserve(collector.mHits.size());
+    for (const auto& hit : collector.mHits) {
+        JPH::BodyLockRead lock(lockInterface, hit.mBodyID2);
+        if (!lock.Succeeded()) {
+            continue;
+        }
+        const JPH::Body& body = lock.GetBody();
+        Entity* entity = reinterpret_cast<Entity*>(body.GetUserData());
+        if (!entity) {
+            continue;
+        }
+
+        PhysicsOverlapHit result;
+        result.entity = entity;
+        result.point = Math::Vector3(hit.mContactPointOn2.GetX(),
+                                     hit.mContactPointOn2.GetY(),
+                                     hit.mContactPointOn2.GetZ());
+        Math::Vector3 normal = Math::Vector3(hit.mPenetrationAxis.GetX(),
+                                             hit.mPenetrationAxis.GetY(),
+                                             hit.mPenetrationAxis.GetZ());
+        result.normal = -normal.normalized();
+        result.penetration = hit.mPenetrationDepth;
+        result.isTrigger = body.IsSensor();
+        outHits.push_back(result);
+    }
+
+    return static_cast<int>(outHits.size());
 }
 
 } // namespace Crescent

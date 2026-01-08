@@ -2,6 +2,11 @@ import SwiftUI
 import MetalKit
 import QuartzCore
 
+enum RenderViewKind {
+    case scene
+    case game
+}
+
 // Protocol for input
 protocol InputDelegate: AnyObject {
     func handleKeyDown(_ keyCode: UInt16)
@@ -12,14 +17,27 @@ protocol InputDelegate: AnyObject {
 
 struct MetalView: NSViewRepresentable {
     typealias NSViewType = MetalDisplayView
+
+    let viewKind: RenderViewKind
+    let isActive: Bool
+    let drivesLoop: Bool
+
+    init(viewKind: RenderViewKind, isActive: Bool, drivesLoop: Bool = false) {
+        self.viewKind = viewKind
+        self.isActive = isActive
+        self.drivesLoop = drivesLoop
+    }
     
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(viewKind: viewKind, drivesLoop: drivesLoop)
     }
     
     func makeNSView(context: Context) -> MetalDisplayView {
         let metalView = MetalDisplayView()
         metalView.coordinator = context.coordinator
+        metalView.allowsPicking = (viewKind == .scene) && isActive
+        metalView.allowsCameraControl = isActive
+        metalView.inputDelegate = isActive ? context.coordinator : nil
         context.coordinator.metalView = metalView
         
         // Initialize engine (delayed until view is laid out)
@@ -35,21 +53,39 @@ struct MetalView: NSViewRepresentable {
         if nsView.bounds.size.width > 0 && nsView.bounds.size.height > 0 {
             context.coordinator.handleResize(nsView.bounds.size)
         }
+        nsView.allowsPicking = (viewKind == .scene) && isActive
+        nsView.allowsCameraControl = isActive
+        nsView.inputDelegate = isActive ? context.coordinator : nil
+        context.coordinator.setInputMonitoring(active: isActive)
+        if isActive, let window = nsView.window, window.firstResponder !== nsView {
+            DispatchQueue.main.async {
+                window.makeFirstResponder(nsView)
+            }
+        }
     }
     
     class Coordinator: NSObject, InputDelegate {
+        static var engineInitialized = false
+
         var bridge: CrescentEngineBridge?
         var metalView: MetalDisplayView?
         private var displayLink: Any? // Can be CVDisplayLink or CADisplayLink
         private var lastTime: CFTimeInterval = 0
         private var isEngineInitialized = false
+        private let viewKind: RenderViewKind
+        private let drivesLoop: Bool
+        private var keyDownMonitor: Any?
+        private var keyUpMonitor: Any?
+        private var flagsChangedMonitor: Any?
+
+        init(viewKind: RenderViewKind, drivesLoop: Bool) {
+            self.viewKind = viewKind
+            self.drivesLoop = drivesLoop
+        }
         
         func initializeEngine() {
             guard !isEngineInitialized else { return }
             guard let metalView = metalView else { return }
-            
-            // Set input delegate
-            metalView.inputDelegate = self
             
             // Wait for layout
             guard metalView.bounds.size.width > 0 && metalView.bounds.size.height > 0 else {
@@ -64,38 +100,58 @@ struct MetalView: NSViewRepresentable {
             
             // Initialize engine
             let bridge = CrescentEngineBridge.shared()
-            if bridge.initialize() {
+            if !Coordinator.engineInitialized {
+                Coordinator.engineInitialized = bridge.initialize()
+            }
+            if Coordinator.engineInitialized {
                 print("Engine initialized successfully from Swift")
                 
                 // Set metal layer
                 if let metalLayer = metalView.metalLayer {
                     print("Setting metal layer...")
-                    bridge.setMetalLayer(metalLayer)
+                    switch viewKind {
+                    case .scene:
+                        bridge.setSceneMetalLayer(metalLayer)
+                    case .game:
+                        bridge.setGameMetalLayer(metalLayer)
+                    }
                 }
                 
                 self.bridge = bridge
-                self.isEngineInitialized = true
+                self.isEngineInitialized = Coordinator.engineInitialized
+
+                handleResize(metalView.bounds.size)
                 
                 // Setup display link
-                setupDisplayLink()
+                if drivesLoop {
+                    setupDisplayLink()
+                }
                 
-                // Print mouse instructions
-                print("CONTROLS:")
-                print("  HOLD RIGHT-CLICK and move mouse to look around")
-                print("  WASD to move, QE for up/down, Shift to sprint")
+                if drivesLoop {
+                    // Print mouse instructions
+                    print("CONTROLS:")
+                    print("  HOLD RIGHT-CLICK and move mouse to look around")
+                    print("  WASD to move, QE for up/down, Shift to sprint")
+                }
             }
         }
         
         func handleResize(_ size: CGSize) {
             guard let metalView = metalView else { return }
             guard let bridge = bridge else { return }
-            
+
+            let drawableSize = metalView.metalLayer?.drawableSize ?? .zero
             let scale = metalView.layer?.contentsScale ?? 2.0
-            let width = Float(size.width * scale)
-            let height = Float(size.height * scale)
-            
+            let width = Float(drawableSize.width > 0 ? drawableSize.width : size.width * scale)
+            let height = Float(drawableSize.height > 0 ? drawableSize.height : size.height * scale)
+
             if width > 0 && height > 0 {
-                bridge.resize(withWidth: width, height: height)
+                switch viewKind {
+                case .scene:
+                    bridge.resizeScene(withWidth: width, height: height)
+                case .game:
+                    bridge.resizeGame(withWidth: width, height: height)
+                }
             }
         }
         
@@ -132,7 +188,7 @@ struct MetalView: NSViewRepresentable {
         }
         
         func renderFrame() {
-            guard let bridge = bridge, isEngineInitialized else { return }
+            guard drivesLoop, let bridge = bridge, isEngineInitialized else { return }
             
             let currentTime = CACurrentMediaTime()
             let deltaTime = lastTime == 0 ? 0.016 : Float(currentTime - lastTime)
@@ -174,7 +230,7 @@ struct MetalView: NSViewRepresentable {
             bridge?.handleMouseButton(Int32(button), pressed: pressed)
         }
         
-    func handleMouseClick(at point: CGPoint, viewSize: CGSize, additive: Bool) {
+        func handleMouseClick(at point: CGPoint, viewSize: CGSize, additive: Bool) {
             guard let metalView = metalView else { return }
             let scale = metalView.layer?.contentsScale ?? 2.0
             let x = Float(point.x * scale)
@@ -199,6 +255,95 @@ struct MetalView: NSViewRepresentable {
         func handleMouseUpEvent() {
             bridge?.handleMouseUpEvent()
         }
+
+        func setInputMonitoring(active: Bool) {
+            if active {
+                installInputMonitorsIfNeeded()
+            } else {
+                removeInputMonitors()
+            }
+        }
+
+        private func installInputMonitorsIfNeeded() {
+            if keyDownMonitor == nil {
+                keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+                    guard let self = self else { return event }
+                    guard self.shouldCaptureKeyboardEvent() else { return event }
+                    self.handleKeyDown(event.keyCode)
+                    return nil
+                }
+            }
+            if keyUpMonitor == nil {
+                keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+                    guard let self = self else { return event }
+                    guard self.shouldCaptureKeyboardEvent() else { return event }
+                    self.handleKeyUp(event.keyCode)
+                    return nil
+                }
+            }
+            if flagsChangedMonitor == nil {
+                flagsChangedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
+                    guard let self = self else { return event }
+                    guard self.shouldCaptureKeyboardEvent() else { return event }
+                    self.handleModifierEvent(event)
+                    return event
+                }
+            }
+        }
+
+        private func removeInputMonitors() {
+            if let monitor = keyDownMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyDownMonitor = nil
+            }
+            if let monitor = keyUpMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyUpMonitor = nil
+            }
+            if let monitor = flagsChangedMonitor {
+                NSEvent.removeMonitor(monitor)
+                flagsChangedMonitor = nil
+            }
+        }
+
+        private func shouldCaptureKeyboardEvent() -> Bool {
+            guard let window = metalView?.window else { return false }
+            if window.firstResponder is NSTextView {
+                return false
+            }
+            return true
+        }
+
+        private func handleModifierEvent(_ event: NSEvent) {
+            switch event.keyCode {
+            case 56, 60:
+                if event.modifierFlags.contains(.shift) {
+                    handleKeyDown(event.keyCode)
+                } else {
+                    handleKeyUp(event.keyCode)
+                }
+            case 59, 62:
+                if event.modifierFlags.contains(.control) {
+                    handleKeyDown(event.keyCode)
+                } else {
+                    handleKeyUp(event.keyCode)
+                }
+            case 58, 61:
+                if event.modifierFlags.contains(.option) {
+                    handleKeyDown(event.keyCode)
+                } else {
+                    handleKeyUp(event.keyCode)
+                }
+            case 55, 54:
+                if event.modifierFlags.contains(.command) {
+                    handleKeyDown(event.keyCode)
+                } else {
+                    handleKeyUp(event.keyCode)
+                }
+            default:
+                break
+            }
+        }
     }
 }
 
@@ -207,6 +352,8 @@ class MetalDisplayView: NSView {
     var metalLayer: CAMetalLayer?
     weak var inputDelegate: InputDelegate?
     weak var coordinator: MetalView.Coordinator?
+    var allowsPicking: Bool = true
+    var allowsCameraControl: Bool = true
     private var trackingArea: NSTrackingArea?
     private var isRightMouseDown: Bool = false
     private var isLeftMouseDown: Bool = false
@@ -247,24 +394,35 @@ class MetalDisplayView: NSView {
             print("Metal layer created with scale: \(metalLayer.contentsScale)")
         }
     }
+
+    private func updateDrawableSize(_ newSize: NSSize) {
+        guard let metalLayer = metalLayer, newSize.width > 0 && newSize.height > 0 else {
+            return
+        }
+
+        let scale = metalLayer.contentsScale
+        let drawableSize = CGSize(
+            width: newSize.width * scale,
+            height: newSize.height * scale
+        )
+
+        metalLayer.frame = bounds
+        metalLayer.drawableSize = drawableSize
+        print("Setting drawable size: \(drawableSize)")
+    }
     
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        
-        if let metalLayer = metalLayer, newSize.width > 0 && newSize.height > 0 {
-            let scale = metalLayer.contentsScale
-            let drawableSize = CGSize(
-                width: newSize.width * scale,
-                height: newSize.height * scale
-            )
-            
-            print("Setting drawable size: \(drawableSize)")
-            metalLayer.drawableSize = drawableSize
-        }
+        updateDrawableSize(newSize)
         
         if newSize.width > 0 && newSize.height > 0 {
             coordinator?.handleResize(CGSize(width: newSize.width, height: newSize.height))
         }
+    }
+
+    override func layout() {
+        super.layout()
+        updateDrawableSize(bounds.size)
     }
     
     override func viewDidMoveToWindow() {
@@ -320,13 +478,16 @@ class MetalDisplayView: NSView {
     // MARK: - Mouse Input (Unity/Unreal style)
     
     override func rightMouseDragged(with event: NSEvent) {
+        guard inputDelegate != nil else { return }
         // Send mouse movement to camera controller
         inputDelegate?.handleMouseMove(deltaX: Float(event.deltaX), deltaY: Float(event.deltaY))
     }
     
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         isLeftMouseDown = true
         inputDelegate?.handleMouseButton(0, pressed: true)
+        guard allowsPicking else { return }
         
         // Get click position
         let point = convert(event.locationInWindow, from: nil)
@@ -335,6 +496,7 @@ class MetalDisplayView: NSView {
     }
     
     override func mouseDragged(with event: NSEvent) {
+        guard allowsPicking else { return }
         if isLeftMouseDown {
             // Get current position
             let point = convert(event.locationInWindow, from: nil)
@@ -345,27 +507,32 @@ class MetalDisplayView: NSView {
     override func mouseUp(with event: NSEvent) {
         isLeftMouseDown = false
         inputDelegate?.handleMouseButton(0, pressed: false)
+        guard allowsPicking else { return }
         coordinator?.handleMouseUpEvent()
     }
     
     override func rightMouseDown(with event: NSEvent) {
+        guard inputDelegate != nil else { return }
+        window?.makeFirstResponder(self)
         isRightMouseDown = true
         
         // Hide cursor (Unity/Unreal style)
-        NSCursor.hide()
-        
-        print("Camera control active - Mouse hidden")
+        if allowsCameraControl {
+            NSCursor.hide()
+            print("Camera control active - Mouse hidden")
+        }
         inputDelegate?.handleMouseButton(1, pressed: true)
     }
     
     override func rightMouseUp(with event: NSEvent) {
+        guard inputDelegate != nil else { return }
         isRightMouseDown = false
         
         // Show cursor again
-        NSCursor.unhide()
-        
-        print("Camera control released - Mouse visible")
+        if allowsCameraControl {
+            NSCursor.unhide()
+            print("Camera control released - Mouse visible")
+        }
         inputDelegate?.handleMouseButton(1, pressed: false)
     }
 }
-

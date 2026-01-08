@@ -13,6 +13,7 @@ namespace Crescent {
 
 // Forward declaration
 class Scene;
+struct PhysicsContact;
 
 // Entity (GameObject) - container for components
 class Entity {
@@ -40,10 +41,14 @@ public:
     void setActive(bool active);
     bool isActiveSelf() const { return m_IsActive; }
     bool isActiveInHierarchy() const;
+
+    // Editor-only flag (not included in play mode)
+    bool isEditorOnly() const { return m_EditorOnly; }
+    void setEditorOnly(bool editorOnly) { m_EditorOnly = editorOnly; }
     
     // Scene reference
     Scene* getScene() const { return m_Scene; }
-    void setScene(Scene* scene) { m_Scene = scene; }
+    void setScene(Scene* scene);
     
     // Transform (every entity has a transform)
     Transform* getTransform() const { return m_Transform; }
@@ -70,8 +75,21 @@ public:
     
     // Lifecycle
     void OnCreate();
+    void OnStart();
     void OnDestroy();
     void OnUpdate(float deltaTime);
+    void OnFixedUpdate(float deltaTime);
+    void OnEditorUpdate(float deltaTime);
+    void OnCollisionEnter(const PhysicsContact& contact);
+    void OnCollisionStay(const PhysicsContact& contact);
+    void OnCollisionExit(const PhysicsContact& contact);
+    void OnTriggerEnter(const PhysicsContact& contact);
+    void OnTriggerStay(const PhysicsContact& contact);
+    void OnTriggerExit(const PhysicsContact& contact);
+
+    // Scene activation hooks (internal use)
+    void onSceneActivated();
+    void onSceneDeactivated();
     
     // Static methods
     static Entity* Find(const std::string& name);
@@ -81,7 +99,10 @@ public:
 private:
     void addComponentInternal(std::unique_ptr<Component> component);
     void removeAllComponentsInternal(bool callLifecycle);
-    static std::string makeUniqueName(const std::string& desired, const Entity* self);
+    static std::string makeUniqueName(const std::string& desired, const Entity* self, Scene* scene);
+    static std::unordered_map<std::string, Entity*>& getNameRegistry(Scene* scene);
+    static std::unordered_multimap<std::string, Entity*>& getTagRegistry(Scene* scene);
+    bool isSceneActive() const;
     
 private:
     UUID m_UUID;
@@ -90,6 +111,8 @@ private:
     int m_Layer;
     bool m_IsActive;
     bool m_Destroyed;
+    bool m_HasCreated;
+    bool m_EditorOnly;
     
     Scene* m_Scene;
     Transform* m_Transform; // Cached for fast access
@@ -97,8 +120,8 @@ private:
     std::vector<std::unique_ptr<Component>> m_Components;
     std::unordered_map<std::type_index, Component*> m_ComponentMap;
     
-    static std::unordered_map<std::string, Entity*> s_NameRegistry;
-    static std::unordered_multimap<std::string, Entity*> s_TagRegistry;
+    static std::unordered_map<Scene*, std::unordered_map<std::string, Entity*>> s_NameRegistry;
+    static std::unordered_map<Scene*, std::unordered_multimap<std::string, Entity*>> s_TagRegistry;
 };
     
 // Template implementations
@@ -126,9 +149,9 @@ T* Entity::addComponent(Args&&... args) {
     m_Components.push_back(std::move(component));
     
     // Call lifecycle
-    if (m_IsActive) {
+    if (m_HasCreated) {
         componentPtr->OnCreate();
-        if (componentPtr->isEnabled()) {
+        if (m_IsActive && isSceneActive() && componentPtr->isEnabled()) {
             componentPtr->OnEnable();
         }
     }

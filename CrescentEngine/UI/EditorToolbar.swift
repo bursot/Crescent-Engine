@@ -129,16 +129,43 @@ struct EditorToolbar: View {
             
             Spacer()
 
-            Button(action: {
-                editorState.togglePlay()
-            }) {
-                Image(systemName: editorState.isPlaying ? "stop.fill" : "play.fill")
-                    .font(EditorTheme.fontBody)
-                    .frame(width: 28, height: 28)
+            HStack(spacing: 6) {
+                Button(action: {
+                    editorState.togglePlay()
+                }) {
+                    Image(systemName: editorState.isPlaying ? "stop.fill" : "play.fill")
+                        .font(EditorTheme.fontBody)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .tint(editorState.isPlaying ? .red : .green)
+                .help(editorState.isPlaying ? "Stop" : "Play")
+
+                Button(action: {
+                    editorState.togglePause()
+                }) {
+                    Image(systemName: "pause.fill")
+                        .font(EditorTheme.fontBody)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .tint(editorState.isPaused ? .yellow : .secondary)
+                .help(editorState.isPaused ? "Resume" : "Pause")
+                .disabled(!editorState.isPlaying)
+
+                HStack(spacing: 4) {
+                    Text(String(format: "%.2fx", editorState.timeScale))
+                        .font(EditorTheme.fontMono)
+                        .frame(width: 46, alignment: .trailing)
+                    Slider(value: $editorState.timeScale, in: 0.0...2.0, step: 0.05)
+                        .frame(width: 90)
+                }
+                .disabled(!editorState.isPlaying)
+                .onChange(of: editorState.timeScale) { _ in
+                    editorState.applyTimeScale()
+                }
+                .help("Time Scale")
             }
-            .buttonStyle(.bordered)
-            .tint(editorState.isPlaying ? .red : .green)
-            .help(editorState.isPlaying ? "Stop" : "Play")
             
             // View toggles
             HStack(spacing: 6) {

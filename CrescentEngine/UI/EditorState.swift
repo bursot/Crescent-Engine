@@ -6,6 +6,7 @@ import AppKit
 struct EntityInfo: Identifiable, Hashable {
     let uuid: String
     let name: String
+    let parentUUID: String
     let hasSkinned: Bool
     let hasAnimator: Bool
     let clipCount: Int
@@ -42,6 +43,62 @@ struct ModelImportOptions: Hashable {
             "onlyLOD0": onlyLOD0,
             "mergeStaticMeshes": mergeStaticMeshes
         ]
+    }
+
+    init() {}
+
+    init(dictionary: [String: Any]) {
+        scale = (dictionary["scale"] as? NSNumber)?.doubleValue ?? 1.0
+        flipUVs = (dictionary["flipUVs"] as? NSNumber)?.boolValue ?? false
+        onlyLOD0 = (dictionary["onlyLOD0"] as? NSNumber)?.boolValue ?? false
+        mergeStaticMeshes = (dictionary["mergeStaticMeshes"] as? NSNumber)?.boolValue ?? false
+    }
+}
+
+struct TextureImportOptions: Hashable {
+    var srgb: Bool = true
+    var generateMipmaps: Bool = true
+    var flipY: Bool = false
+    var maxSize: Int = 4096
+    var normalMap: Bool = false
+
+    func toDictionary() -> [String: Any] {
+        [
+            "srgb": srgb,
+            "generateMipmaps": generateMipmaps,
+            "flipY": flipY,
+            "maxSize": maxSize,
+            "normalMap": normalMap
+        ]
+    }
+
+    init() {}
+
+    init(dictionary: [String: Any]) {
+        srgb = (dictionary["srgb"] as? NSNumber)?.boolValue ?? true
+        generateMipmaps = (dictionary["generateMipmaps"] as? NSNumber)?.boolValue ?? true
+        flipY = (dictionary["flipY"] as? NSNumber)?.boolValue ?? false
+        maxSize = (dictionary["maxSize"] as? NSNumber)?.intValue ?? 4096
+        normalMap = (dictionary["normalMap"] as? NSNumber)?.boolValue ?? false
+    }
+}
+
+struct HdriImportOptions: Hashable {
+    var flipY: Bool = false
+    var maxSize: Int = 2048
+
+    func toDictionary() -> [String: Any] {
+        [
+            "flipY": flipY,
+            "maxSize": maxSize
+        ]
+    }
+
+    init() {}
+
+    init(dictionary: [String: Any]) {
+        flipY = (dictionary["flipY"] as? NSNumber)?.boolValue ?? false
+        maxSize = (dictionary["maxSize"] as? NSNumber)?.intValue ?? 2048
     }
 }
 
@@ -98,6 +155,25 @@ struct ConsoleLog: Identifiable {
     }
 }
 
+enum ViewMode: Int, CaseIterable {
+    case scene = 0
+    case game = 1
+
+    var label: String {
+        switch self {
+        case .scene: return "Scene"
+        case .game: return "Game"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .scene: return "cube.transparent"
+        case .game: return "play.tv"
+        }
+    }
+}
+
 // Editor state - Observable object to manage editor state
 class EditorState: ObservableObject {
     @Published var selectedEntityUUIDs: Set<String> = []  // Swift manages multi-selection
@@ -113,7 +189,11 @@ class EditorState: ObservableObject {
     @Published var showConsole: Bool = true
     @Published var dockTab: DockTab = .assets
     @Published var modelImportOptions = ModelImportOptions()
+    @Published var autoReimportAssets: Bool = true
     @Published var isPlaying: Bool = false
+    @Published var isPaused: Bool = false
+    @Published var timeScale: Float = 1.0
+    @Published var viewMode: ViewMode = .scene
     @Published var sceneURL: URL?
     @Published var sceneName: String = "Untitled"
     @Published var projectName: String = ""
@@ -128,6 +208,11 @@ class EditorState: ObservableObject {
     private var assetRootAccessActive: Bool = false
     private var projectRootAccessActive: Bool = false
     private var projectRootAccessURL: URL?
+    private var hotReloadCancellable: AnyCancellable?
+    private var assetModDates: [String: Date] = [:]
+    private var keyDownMonitor: Any?
+    private var keyUpMonitor: Any?
+    private var flagsChangedMonitor: Any?
     
     init() {
         // Add initial welcome messages
@@ -138,10 +223,15 @@ class EditorState: ObservableObject {
         updateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.refreshEntityList()
         }
+
+        installKeyboardMonitors()
+        startHotReloadTimer()
     }
     
     deinit {
         updateTimer?.invalidate()
+        hotReloadCancellable?.cancel()
+        removeKeyboardMonitors()
         if assetRootAccessActive, let url = assetRootURL {
             url.stopAccessingSecurityScopedResource()
         }
@@ -157,10 +247,11 @@ class EditorState: ObservableObject {
         let newEntityList = entityInfos.map { info in
             let uuid = info["uuid"] as? String ?? ""
             let name = info["name"] as? String ?? "Entity"
+            let parentUUID = info["parent"] as? String ?? ""
             let hasSkinned = (info["skinned"] as? NSNumber)?.boolValue ?? false
             let hasAnimator = (info["animator"] as? NSNumber)?.boolValue ?? false
             let clipCount = (info["clipCount"] as? NSNumber)?.intValue ?? 0
-            return EntityInfo(uuid: uuid, name: name, hasSkinned: hasSkinned, hasAnimator: hasAnimator, clipCount: clipCount)
+            return EntityInfo(uuid: uuid, name: name, parentUUID: parentUUID, hasSkinned: hasSkinned, hasAnimator: hasAnimator, clipCount: clipCount)
         }
         
         // Only update if list actually changed
@@ -252,6 +343,86 @@ class EditorState: ObservableObject {
     func clearConsole() {
         consoleLogs.removeAll()
         addLog(.info, "Console cleared")
+    }
+
+    private func installKeyboardMonitors() {
+        if keyDownMonitor == nil {
+            keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
+                guard self.shouldCaptureKeyboardEvent() else { return event }
+                CrescentEngineBridge.shared().handleKeyDown(event.keyCode)
+                return nil
+            }
+        }
+        if keyUpMonitor == nil {
+            keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { event in
+                guard self.shouldCaptureKeyboardEvent() else { return event }
+                CrescentEngineBridge.shared().handleKeyUp(event.keyCode)
+                return nil
+            }
+        }
+        if flagsChangedMonitor == nil {
+            flagsChangedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { event in
+                guard self.shouldCaptureKeyboardEvent() else { return event }
+                self.handleModifierEvent(event)
+                return event
+            }
+        }
+    }
+
+    private func removeKeyboardMonitors() {
+        if let monitor = keyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyDownMonitor = nil
+        }
+        if let monitor = keyUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyUpMonitor = nil
+        }
+        if let monitor = flagsChangedMonitor {
+            NSEvent.removeMonitor(monitor)
+            flagsChangedMonitor = nil
+        }
+    }
+
+    private func shouldCaptureKeyboardEvent() -> Bool {
+        guard let window = (NSApp.keyWindow ?? NSApp.mainWindow) else {
+            return true
+        }
+        if window.firstResponder is NSTextView {
+            return false
+        }
+        return true
+    }
+
+    private func handleModifierEvent(_ event: NSEvent) {
+        switch event.keyCode {
+        case 56, 60:
+            if event.modifierFlags.contains(.shift) {
+                CrescentEngineBridge.shared().handleKeyDown(event.keyCode)
+            } else {
+                CrescentEngineBridge.shared().handleKeyUp(event.keyCode)
+            }
+        case 59, 62:
+            if event.modifierFlags.contains(.control) {
+                CrescentEngineBridge.shared().handleKeyDown(event.keyCode)
+            } else {
+                CrescentEngineBridge.shared().handleKeyUp(event.keyCode)
+            }
+        case 58, 61:
+            if event.modifierFlags.contains(.option) {
+                CrescentEngineBridge.shared().handleKeyDown(event.keyCode)
+            } else {
+                CrescentEngineBridge.shared().handleKeyUp(event.keyCode)
+            }
+        case 55, 54:
+            if event.modifierFlags.contains(.command) {
+                CrescentEngineBridge.shared().handleKeyDown(event.keyCode)
+            } else {
+                CrescentEngineBridge.shared().handleKeyUp(event.keyCode)
+            }
+        default:
+            break
+        }
     }
     
     func setAssetRoot(from url: URL) {
@@ -392,14 +563,96 @@ class EditorState: ObservableObject {
                 scanned.append(contentsOf: scanAssets(in: scenesRoot))
             }
             assets = scanned.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            refreshAssetModificationCache()
             return
         }
         guard let root = assetRootURL else {
             assets = []
+            assetModDates.removeAll()
             return
         }
         CrescentEngineBridge.shared().setAssetRoot(path: root.path)
         assets = scanAssets(in: root)
+        refreshAssetModificationCache()
+    }
+
+    private func startHotReloadTimer() {
+        hotReloadCancellable?.cancel()
+        hotReloadCancellable = Timer.publish(every: 2.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.pollAssetChanges()
+            }
+    }
+
+    private func refreshAssetModificationCache() {
+        assetModDates.removeAll()
+        for asset in assets {
+            if let date = modificationDate(for: asset.path) {
+                assetModDates[asset.path] = date
+            }
+        }
+    }
+
+    private func updateAssetModificationCache(for asset: AssetInfo) {
+        if let date = modificationDate(for: asset.path) {
+            assetModDates[asset.path] = date
+        }
+    }
+
+    private func modificationDate(for path: String) -> Date? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        return attrs?[.modificationDate] as? Date
+    }
+
+    private func pollAssetChanges() {
+        if !autoReimportAssets || isPlaying {
+            return
+        }
+        if assets.isEmpty {
+            return
+        }
+        for asset in assets {
+            switch asset.type {
+            case .model, .texture, .hdri:
+                break
+            default:
+                continue
+            }
+            guard let date = modificationDate(for: asset.path) else {
+                assetModDates.removeValue(forKey: asset.path)
+                continue
+            }
+            if let previous = assetModDates[asset.path] {
+                if date > previous {
+                    assetModDates[asset.path] = date
+                    handleAssetModified(asset)
+                }
+            } else {
+                assetModDates[asset.path] = date
+            }
+        }
+    }
+
+    private func handleAssetModified(_ asset: AssetInfo) {
+        let meta = CrescentEngineBridge.shared().getAssetMeta(path: asset.path) as? [String: Any] ?? [:]
+        let guid = meta["guid"] as? String ?? ""
+        if guid.isEmpty {
+            return
+        }
+        let bridge = CrescentEngineBridge.shared()
+        let ok: Bool
+        switch asset.type {
+        case .model:
+            ok = bridge.reimportModelAsset(guid: guid)
+        case .texture:
+            ok = bridge.reimportTextureAsset(guid: guid)
+        case .hdri:
+            ok = bridge.reimportHdriAsset(guid: guid)
+        default:
+            return
+        }
+        addLog(ok ? .info : .warning, ok ? "Auto reimported: \(asset.name)" : "Auto reimport skipped: \(asset.name)")
     }
     
     func importModel(from url: URL, options overrideOptions: ModelImportOptions? = nil) {
@@ -438,13 +691,39 @@ class EditorState: ObservableObject {
         if isPlaying {
             bridge.exitPlayMode()
             isPlaying = false
+            if isPaused {
+                isPaused = false
+                bridge.setPaused(false)
+            }
             addLog(.info, "Exited Play Mode")
         } else {
             bridge.enterPlayMode()
             isPlaying = true
+            isPaused = false
+            bridge.setPaused(false)
+            bridge.setTimeScale(timeScale)
             addLog(.info, "Entered Play Mode")
         }
         refreshEntityList()
+    }
+
+    func togglePause() {
+        guard isPlaying else { return }
+        let bridge = CrescentEngineBridge.shared()
+        isPaused.toggle()
+        bridge.setPaused(isPaused)
+        addLog(.info, isPaused ? "Paused" : "Resumed")
+    }
+
+    func applyTimeScale() {
+        if isPlaying {
+            CrescentEngineBridge.shared().setTimeScale(timeScale)
+        }
+    }
+
+    func setViewMode(_ mode: ViewMode) {
+        viewMode = mode
+        CrescentEngineBridge.shared().setViewMode(Int32(mode.rawValue))
     }
 
     func saveScene() {
@@ -541,6 +820,9 @@ class EditorState: ObservableObject {
             return
         }
         assets.append(AssetInfo(name: name, path: path, relativePath: relativePath, type: type))
+        if let asset = assets.last {
+            updateAssetModificationCache(for: asset)
+        }
     }
 
     private func scanAssets(in root: URL) -> [AssetInfo] {

@@ -96,6 +96,7 @@ public:
     
     // Set the Metal layer from Swift (as void* to avoid type conflicts)
     void setMetalLayer(void* layer);
+    void setMetalLayer(void* layer, bool applySize);
     
     // Shutdown renderer
     void shutdown();
@@ -105,12 +106,18 @@ public:
     
     // Render a specific scene
     void renderScene(Scene* scene);
+    struct RenderOptions {
+        bool allowTemporal = true;
+        bool updateHistory = true;
+    };
+    void renderScene(Scene* scene, Camera* cameraOverride, const RenderOptions& options);
     
     // Get Metal device (return as void* to avoid type conflicts)
     void* getDevice() const;
     
     // Resize viewport
     void resize(float width, float height);
+    void setViewportSize(float width, float height, bool updateTargets);
     void applyQualitySettings(const SceneQualitySettings& quality);
     
     // Mesh management

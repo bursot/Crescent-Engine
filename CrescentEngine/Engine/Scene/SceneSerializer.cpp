@@ -10,6 +10,9 @@
 #include "../Components/IKConstraint.hpp"
 #include "../Components/Rigidbody.hpp"
 #include "../Components/PhysicsCollider.hpp"
+#include "../Components/CharacterController.hpp"
+#include "../Components/FirstPersonController.hpp"
+#include "../Input/InputManager.hpp"
 #include "../Animation/AnimationClip.hpp"
 #include "../Components/ModelMeshReference.hpp"
 #include "../Components/PrimitiveMesh.hpp"
@@ -113,10 +116,28 @@ std::string ColliderShapeToString(PhysicsCollider::ShapeType type) {
     }
 }
 
+std::string CombineModeToString(PhysicsCollider::CombineMode mode) {
+    switch (mode) {
+    case PhysicsCollider::CombineMode::Min: return "Min";
+    case PhysicsCollider::CombineMode::Multiply: return "Multiply";
+    case PhysicsCollider::CombineMode::Max: return "Max";
+    case PhysicsCollider::CombineMode::Average:
+    default:
+        return "Average";
+    }
+}
+
 PhysicsCollider::ShapeType ColliderShapeFromString(const std::string& value) {
     if (value == "Sphere") return PhysicsCollider::ShapeType::Sphere;
     if (value == "Capsule") return PhysicsCollider::ShapeType::Capsule;
     return PhysicsCollider::ShapeType::Box;
+}
+
+PhysicsCollider::CombineMode CombineModeFromString(const std::string& value) {
+    if (value == "Min") return PhysicsCollider::CombineMode::Min;
+    if (value == "Multiply") return PhysicsCollider::CombineMode::Multiply;
+    if (value == "Max") return PhysicsCollider::CombineMode::Max;
+    return PhysicsCollider::CombineMode::Average;
 }
 
 std::string AnimatorStateTypeToString(AnimatorStateType type) {
@@ -824,7 +845,7 @@ bool SceneSerializer::LoadScene(Scene* scene, const std::string& path) {
 
 namespace {
 
-json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scenePath) {
+json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scenePath, bool includeEditorOnly) {
     json root;
     root["version"] = 1;
     root["name"] = scene ? scene->getName() : "Scene";
@@ -841,10 +862,14 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
         if (!entity) {
             continue;
         }
+        if (!includeEditorOnly && entity->isEditorOnly()) {
+            continue;
+        }
         json e;
         e["uuid"] = entity->getUUID().toString();
         e["name"] = entity->getName();
         e["active"] = entity->isActive();
+        e["editorOnly"] = entity->isEditorOnly();
 
         Transform* transform = entity->getTransform();
         if (transform && transform->getParent()) {
@@ -1062,7 +1087,57 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"center", Vec3ToJson(collider->getCenter())},
                 {"trigger", collider->isTrigger()},
                 {"friction", collider->getFriction()},
-                {"restitution", collider->getRestitution()}
+                {"restitution", collider->getRestitution()},
+                {"frictionCombine", CombineModeToString(collider->getFrictionCombine())},
+                {"restitutionCombine", CombineModeToString(collider->getRestitutionCombine())},
+                {"collisionLayer", collider->getCollisionLayer()},
+                {"collisionMask", collider->getCollisionMask()}
+            };
+        }
+
+        if (auto* controller = entity->getComponent<CharacterController>()) {
+            components["CharacterController"] = {
+                {"radius", controller->getRadius()},
+                {"height", controller->getHeight()},
+                {"skinWidth", controller->getSkinWidth()},
+                {"moveSpeed", controller->getMoveSpeed()},
+                {"acceleration", controller->getAcceleration()},
+                {"airAcceleration", controller->getAirAcceleration()},
+                {"jumpSpeed", controller->getJumpSpeed()},
+                {"gravity", controller->getGravity()},
+                {"maxFallSpeed", controller->getMaxFallSpeed()},
+                {"groundSnapSpeed", controller->getGroundSnapSpeed()},
+                {"stepOffset", controller->getStepOffset()},
+                {"slopeLimit", controller->getSlopeLimit()},
+                {"slopeSlideSpeed", controller->getSlopeSlideSpeed()},
+                {"groundCheckDistance", controller->getGroundCheckDistance()},
+                {"useInput", controller->getUseInput()},
+                {"useGravity", controller->getUseGravity()},
+                {"enableStep", controller->getEnableStep()},
+                {"enableSlopeLimit", controller->getEnableSlopeLimit()},
+                {"snapToGround", controller->getSnapToGround()},
+                {"collisionMask", controller->getCollisionMask()}
+            };
+        }
+
+        if (auto* controller = entity->getComponent<FirstPersonController>()) {
+            components["FirstPersonController"] = {
+                {"mouseSensitivity", controller->getMouseSensitivity()},
+                {"invertY", controller->getInvertY()},
+                {"requireLookButton", controller->getRequireLookButton()},
+                {"lookButton", static_cast<int>(controller->getLookButton())},
+                {"minPitch", controller->getMinPitch()},
+                {"maxPitch", controller->getMaxPitch()},
+                {"walkSpeed", controller->getWalkSpeed()},
+                {"sprintMultiplier", controller->getSprintMultiplier()},
+                {"enableSprint", controller->getEnableSprint()},
+                {"enableCrouch", controller->getEnableCrouch()},
+                {"crouchHeight", controller->getCrouchHeight()},
+                {"crouchEyeHeight", controller->getCrouchEyeHeight()},
+                {"crouchSpeed", controller->getCrouchSpeed()},
+                {"eyeHeight", controller->getEyeHeight()},
+                {"useEyeHeight", controller->getUseEyeHeight()},
+                {"driveCharacterController", controller->getDriveCharacterController()}
             };
         }
 
@@ -1148,7 +1223,8 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"aspect", camera->getAspectRatio()},
                 {"viewport", Vec4ToJson(camera->getViewport())},
                 {"clearColor", Vec4ToJson(camera->getClearColor())},
-                {"clearDepth", camera->getClearDepth()}
+                {"clearDepth", camera->getClearDepth()},
+                {"editorCamera", camera->isEditorCamera()}
             };
         }
         
@@ -1203,12 +1279,17 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
 } // namespace
 
 std::string SceneSerializer::SerializeScene(Scene* scene) {
-    json root = BuildSceneJson(scene, false, "");
+    json root = BuildSceneJson(scene, false, "", true);
     return root.dump(2);
 }
 
 std::string SceneSerializer::SerializeScene(Scene* scene, const std::string& scenePath) {
-    json root = BuildSceneJson(scene, true, scenePath);
+    json root = BuildSceneJson(scene, true, scenePath, true);
+    return root.dump(2);
+}
+
+std::string SceneSerializer::SerializeScene(Scene* scene, bool includeEditorOnly) {
+    json root = BuildSceneJson(scene, false, "", includeEditorOnly);
     return root.dump(2);
 }
 
@@ -1288,6 +1369,7 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
         json components;
         std::string parentUUID;
         bool active = true;
+        bool editorOnly = false;
     };
 
     std::unordered_map<std::string, EntityRecord> records;
@@ -1311,6 +1393,7 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
             record.components = e.value("components", json::object());
             record.parentUUID = e.value("parent", std::string());
             record.active = e.value("active", true);
+            record.editorOnly = e.value("editorOnly", false);
             records[uuidStr] = record;
         }
     }
@@ -1331,12 +1414,12 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
     TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
     std::unordered_map<std::string, ModelCacheEntry> modelCache;
 
-    bool hasCameraController = false;
     for (auto& [uuid, record] : records) {
         Entity* entity = record.entity;
         if (!entity) {
             continue;
         }
+        entity->setEditorOnly(record.editorOnly);
         const json& components = record.components;
 
         if (components.contains("Transform")) {
@@ -1664,6 +1747,62 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
             collider->setTrigger(c.value("trigger", collider->isTrigger()));
             collider->setFriction(c.value("friction", collider->getFriction()));
             collider->setRestitution(c.value("restitution", collider->getRestitution()));
+            collider->setFrictionCombine(CombineModeFromString(c.value("frictionCombine", std::string("Average"))));
+            collider->setRestitutionCombine(CombineModeFromString(c.value("restitutionCombine", std::string("Average"))));
+            collider->setCollisionLayer(c.value("collisionLayer", collider->getCollisionLayer()));
+            collider->setCollisionMask(c.value("collisionMask", collider->getCollisionMask()));
+        }
+
+        if (components.contains("CharacterController")) {
+            const json& c = components["CharacterController"];
+            CharacterController* controller = entity->getComponent<CharacterController>();
+            if (!controller) {
+                controller = entity->addComponent<CharacterController>();
+            }
+            controller->setRadius(c.value("radius", controller->getRadius()));
+            controller->setHeight(c.value("height", controller->getHeight()));
+            controller->setSkinWidth(c.value("skinWidth", controller->getSkinWidth()));
+            controller->setMoveSpeed(c.value("moveSpeed", controller->getMoveSpeed()));
+            controller->setAcceleration(c.value("acceleration", controller->getAcceleration()));
+            controller->setAirAcceleration(c.value("airAcceleration", controller->getAirAcceleration()));
+            controller->setJumpSpeed(c.value("jumpSpeed", controller->getJumpSpeed()));
+            controller->setGravity(c.value("gravity", controller->getGravity()));
+            controller->setMaxFallSpeed(c.value("maxFallSpeed", controller->getMaxFallSpeed()));
+            controller->setGroundSnapSpeed(c.value("groundSnapSpeed", controller->getGroundSnapSpeed()));
+            controller->setStepOffset(c.value("stepOffset", controller->getStepOffset()));
+            controller->setSlopeLimit(c.value("slopeLimit", controller->getSlopeLimit()));
+            controller->setSlopeSlideSpeed(c.value("slopeSlideSpeed", controller->getSlopeSlideSpeed()));
+            controller->setGroundCheckDistance(c.value("groundCheckDistance", controller->getGroundCheckDistance()));
+            controller->setUseInput(c.value("useInput", controller->getUseInput()));
+            controller->setUseGravity(c.value("useGravity", controller->getUseGravity()));
+            controller->setEnableStep(c.value("enableStep", controller->getEnableStep()));
+            controller->setEnableSlopeLimit(c.value("enableSlopeLimit", controller->getEnableSlopeLimit()));
+            controller->setSnapToGround(c.value("snapToGround", controller->getSnapToGround()));
+            controller->setCollisionMask(c.value("collisionMask", controller->getCollisionMask()));
+        }
+
+        if (components.contains("FirstPersonController")) {
+            const json& c = components["FirstPersonController"];
+            FirstPersonController* controller = entity->getComponent<FirstPersonController>();
+            if (!controller) {
+                controller = entity->addComponent<FirstPersonController>();
+            }
+            controller->setMouseSensitivity(c.value("mouseSensitivity", controller->getMouseSensitivity()));
+            controller->setInvertY(c.value("invertY", controller->getInvertY()));
+            controller->setRequireLookButton(c.value("requireLookButton", controller->getRequireLookButton()));
+            controller->setLookButton(static_cast<MouseButton>(c.value("lookButton", static_cast<int>(controller->getLookButton()))));
+            controller->setMinPitch(c.value("minPitch", controller->getMinPitch()));
+            controller->setMaxPitch(c.value("maxPitch", controller->getMaxPitch()));
+            controller->setWalkSpeed(c.value("walkSpeed", controller->getWalkSpeed()));
+            controller->setSprintMultiplier(c.value("sprintMultiplier", controller->getSprintMultiplier()));
+            controller->setEnableSprint(c.value("enableSprint", controller->getEnableSprint()));
+            controller->setEnableCrouch(c.value("enableCrouch", controller->getEnableCrouch()));
+            controller->setCrouchHeight(c.value("crouchHeight", controller->getCrouchHeight()));
+            controller->setCrouchEyeHeight(c.value("crouchEyeHeight", controller->getCrouchEyeHeight()));
+            controller->setCrouchSpeed(c.value("crouchSpeed", controller->getCrouchSpeed()));
+            controller->setEyeHeight(c.value("eyeHeight", controller->getEyeHeight()));
+            controller->setUseEyeHeight(c.value("useEyeHeight", controller->getUseEyeHeight()));
+            controller->setDriveCharacterController(c.value("driveCharacterController", controller->getDriveCharacterController()));
         }
 
         if (components.contains("Light")) {
@@ -1769,6 +1908,7 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
                 camera->setClearColor(JsonToVec4(c["clearColor"], camera->getClearColor()));
             }
             camera->setClearDepth(c.value("clearDepth", camera->getClearDepth()));
+            camera->setEditorCamera(c.value("editorCamera", false));
         }
 
         if (components.contains("CameraController")) {
@@ -1776,7 +1916,6 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
             CameraController* controller = entity->addComponent<CameraController>();
             controller->setMoveSpeed(cc.value("moveSpeed", controller->getMoveSpeed()));
             controller->setRotationSpeed(cc.value("rotationSpeed", controller->getRotationSpeed()));
-            hasCameraController = true;
         }
     }
 
@@ -1787,19 +1926,6 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
     for (auto& [uuid, record] : records) {
         if (record.entity && !record.active) {
             record.entity->setActive(false);
-        }
-    }
-
-    if (!hasCameraController) {
-        for (const auto& entityPtr : scene->getAllEntities()) {
-            Entity* entity = entityPtr.get();
-            if (!entity || !entity->getComponent<Camera>()) {
-                continue;
-            }
-            CameraController* controller = entity->addComponent<CameraController>();
-            controller->setMoveSpeed(5.0f);
-            controller->setRotationSpeed(45.0f);
-            break;
         }
     }
 

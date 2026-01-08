@@ -120,6 +120,9 @@ RaycastHit SelectionSystem::raycastAll(const Ray& ray, const std::vector<Entity*
     
     for (Entity* entity : entities) {
         if (!entity || !entity->isActiveInHierarchy()) continue;
+        if (entity->isEditorOnly()) {
+            continue;
+        }
         
         // CRITICAL: Skip scene entities - they should never be selectable!
         std::string entityName = entity->getName();

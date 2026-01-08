@@ -59,28 +59,11 @@ bool Engine::initialize() {
     // Create default scene
     Scene* defaultScene = SceneManager::getInstance().createScene("Default Scene");
     
-    // CREATE CAMERA
-    Entity* cameraEntity = defaultScene->createEntity("Main Camera");
-    Camera* camera = cameraEntity->addComponent<Camera>();
-    camera->setFieldOfView(75.0f * Math::DEG_TO_RAD);
-    // Slightly darker neutral clear to make grid pop
-    camera->setClearColor(Math::Vector4(0.08f, 0.09f, 0.12f, 1.0f));
-    
-    // Add camera controller for movement
-    CameraController* cameraController = cameraEntity->addComponent<CameraController>();
-    cameraController->setMoveSpeed(5.0f);
-    cameraController->setRotationSpeed(45.0f);
-    
-    // Position camera
-    Transform* camTransform = cameraEntity->getTransform();
-    camTransform->setPosition(Math::Vector3(0.0f, 8.0f, 20.0f));
-    
-    // Rotate camera to look down at scene
-    camTransform->setRotation(
-        Math::Quaternion::FromEulerAngles(Math::Vector3(-25.0f * Math::DEG_TO_RAD, 0, 0))
-    );
-    
-    std::cout << "Camera at (0, 8, 20) looking down 25 degrees" << std::endl;
+    // CREATE GAME CAMERA
+    Entity* cameraEntity = SceneCommands::createCamera(defaultScene, "Main Camera");
+    if (cameraEntity) {
+        std::cout << "Main Camera created for runtime" << std::endl;
+    }
     
     // CREATE DIRECTIONAL LIGHT
     Entity* lightEntity = defaultScene->createEntity("Directional Light");
@@ -138,19 +121,21 @@ void Engine::update(float deltaTime) {
         return;
     }
     
-    // Handle gizmo shortcuts
     InputManager& input = InputManager::getInstance();
-    if (input.isKeyDown(KeyCode::Q)) {
-        toggleGizmoMode();
-    }
-    if (input.isKeyDown(KeyCode::E)) {
-        toggleGizmoSpace();
-    }
-    
-    // CRITICAL: Clear mouse delta if gizmo is manipulating
-    // This prevents camera from moving during gizmo drag
-    if (m_gizmoSystem && m_gizmoSystem->isManipulating()) {
-        input.setMouseDelta(Math::Vector2::Zero);
+    if (SceneManager::getInstance().isSceneView()) {
+        // Handle gizmo shortcuts
+        if (input.isKeyDown(KeyCode::Q)) {
+            toggleGizmoMode();
+        }
+        if (input.isKeyDown(KeyCode::E)) {
+            toggleGizmoSpace();
+        }
+        
+        // CRITICAL: Clear mouse delta if gizmo is manipulating
+        // This prevents camera from moving during gizmo drag
+        if (m_gizmoSystem && m_gizmoSystem->isManipulating()) {
+            input.setMouseDelta(Math::Vector2::Zero);
+        }
     }
     
     // CRITICAL FIX: Update scene FIRST (to read input from previous frame)
@@ -170,50 +155,112 @@ void Engine::render() {
         return;
     }
     
-    // Clear debug lines before we enqueue gizmo/selection for this frame
-    if (m_renderer->getDebugRenderer()) {
-        m_renderer->getDebugRenderer()->clear();
-    }
-    
-    // CRITICAL: Draw gizmo/wireframe BEFORE render() so they're in debug buffer!
-    const auto& selection = SelectionSystem::getSelection();  // ✅ Get ALL selected entities
-    float viewportWidth = m_renderer->getViewportWidth();
-    float viewportHeight = m_renderer->getViewportHeight();
-    
-    static int renderDebugCount = 0;
-    if (renderDebugCount < 5) {
-        if (!selection.empty()) {
-            std::cout << "[RENDER] Drawing gizmo for " << selection.size() << " entities" << std::endl;
-        } else {
-            std::cout << "[RENDER] No selection, skipping gizmo" << std::endl;
-        }
-        renderDebugCount++;
-    }
-    
-    if (!selection.empty() && Camera::getMainCamera() && m_gizmoSystem) {
-        Math::Vector2 screenSize(viewportWidth, viewportHeight);
-        
-        // ✅ Draw selection wireframe for ALL selected entities
-        for (Entity* entity : selection) {
-            m_gizmoSystem->drawSelectionBox(entity);
-        }
-        
-        // ✅ Draw gizmo handles only for PRIMARY selection (first entity)
-        Entity* primarySelection = selection.front();
-        m_gizmoSystem->drawGizmo(primarySelection, Camera::getMainCamera(), screenSize);
-    } else if (m_gizmoSystem) {
-        m_gizmoSystem->hideGizmoMesh();
+    Scene* activeScene = SceneManager::getInstance().getActiveScene();
+    if (!activeScene) {
+        return;
     }
 
-    Scene* activeScene = SceneManager::getInstance().getActiveScene();
-    if (activeScene && m_renderer->getDebugRenderer()) {
-        if (auto* physics = activeScene->getPhysicsWorld()) {
-            physics->debugDraw(m_renderer->getDebugRenderer());
+    bool hasSceneSurface = m_sceneSurface.isValid();
+    bool hasGameSurface = m_gameSurface.isValid();
+    if (!hasSceneSurface && !hasGameSurface) {
+        m_renderer->render();
+        return;
+    }
+
+    auto viewMode = SceneManager::getInstance().getViewMode();
+    bool renderSceneSurface = hasSceneSurface && (viewMode == SceneManager::ViewMode::Scene || !hasGameSurface);
+    bool renderGameSurface = hasGameSurface && (viewMode == SceneManager::ViewMode::Game || !hasSceneSurface);
+
+    auto* debugRenderer = m_renderer->getDebugRenderer();
+    const auto& selection = SelectionSystem::getSelection();
+    static int renderDebugCount = 0;
+
+    // Scene view render (editor camera)
+    if (renderSceneSurface) {
+        m_renderer->setMetalLayer(m_sceneSurface.layer, false);
+        m_renderer->setViewportSize(m_sceneSurface.width, m_sceneSurface.height, true);
+        if (debugRenderer) {
+            debugRenderer->clear();
+        }
+
+        if (renderDebugCount < 5) {
+            if (!selection.empty()) {
+                std::cout << "[RENDER] Drawing gizmo for " << selection.size() << " entities" << std::endl;
+            } else {
+                std::cout << "[RENDER] No selection, skipping gizmo" << std::endl;
+            }
+            renderDebugCount++;
+        }
+
+        Camera* sceneCamera = SceneManager::getInstance().getSceneCamera();
+        if (sceneCamera && m_gizmoSystem) {
+            float viewportWidth = m_renderer->getViewportWidth();
+            float viewportHeight = m_renderer->getViewportHeight();
+            Math::Vector2 screenSize(viewportWidth, viewportHeight);
+
+            if (!selection.empty()) {
+                for (Entity* entity : selection) {
+                    m_gizmoSystem->drawSelectionBox(entity);
+                }
+                Entity* primarySelection = selection.front();
+                m_gizmoSystem->drawGizmo(primarySelection, sceneCamera, screenSize);
+            } else {
+                m_gizmoSystem->hideGizmoMesh();
+            }
+        }
+
+        if (activeScene && debugRenderer) {
+            if (auto* physics = activeScene->getPhysicsWorld()) {
+                physics->debugDraw(debugRenderer);
+            }
+        }
+
+        Renderer::RenderOptions sceneOptions;
+        sceneOptions.allowTemporal = false;
+        sceneOptions.updateHistory = false;
+        m_renderer->renderScene(activeScene, sceneCamera, sceneOptions);
+    }
+
+    // Game view render (runtime camera)
+    if (renderGameSurface) {
+        m_renderer->setMetalLayer(m_gameSurface.layer, false);
+        m_renderer->setViewportSize(m_gameSurface.width, m_gameSurface.height, true);
+        if (debugRenderer) {
+            debugRenderer->clear();
+        }
+
+        Camera* gameCamera = SceneManager::getInstance().getGameCamera();
+        if (gameCamera) {
+            Renderer::RenderOptions gameOptions;
+            gameOptions.allowTemporal = true;
+            gameOptions.updateHistory = true;
+            m_renderer->renderScene(activeScene, gameCamera, gameOptions);
         }
     }
-    
-    // THEN render everything (scene meshes + debug lines together)
-    m_renderer->render();
+}
+
+void Engine::setSceneMetalLayer(void* layer) {
+    m_sceneSurface.layer = layer;
+    if (m_renderer && layer) {
+        m_renderer->setMetalLayer(layer, true);
+    }
+}
+
+void Engine::setGameMetalLayer(void* layer) {
+    m_gameSurface.layer = layer;
+    if (m_renderer && layer) {
+        m_renderer->setMetalLayer(layer, true);
+    }
+}
+
+void Engine::resizeScene(float width, float height) {
+    m_sceneSurface.width = width;
+    m_sceneSurface.height = height;
+}
+
+void Engine::resizeGame(float width, float height) {
+    m_gameSurface.width = width;
+    m_gameSurface.height = height;
 }
 
 // ============================================================================
@@ -235,6 +282,13 @@ void Engine::handleKeyDown(unsigned short keyCode) {
         case 14: key = KeyCode::E; break;
         case 49: key = KeyCode::Space; break;
         case 56: key = KeyCode::Shift; break;
+        case 60: key = KeyCode::Shift; break;
+        case 59: key = KeyCode::Control; break;
+        case 62: key = KeyCode::Control; break;
+        case 58: key = KeyCode::Alt; break;
+        case 61: key = KeyCode::Alt; break;
+        case 55: key = KeyCode::Command; break;
+        case 54: key = KeyCode::Command; break;
         case 53: key = KeyCode::Escape; break;
         default: break;
     }
@@ -242,6 +296,7 @@ void Engine::handleKeyDown(unsigned short keyCode) {
     if (key != KeyCode::Unknown) {
         input.setKeyPressed(key, true);
     }
+
 }
 
 void Engine::handleKeyUp(unsigned short keyCode) {
@@ -259,6 +314,13 @@ void Engine::handleKeyUp(unsigned short keyCode) {
         case 14: key = KeyCode::E; break;
         case 49: key = KeyCode::Space; break;
         case 56: key = KeyCode::Shift; break;
+        case 60: key = KeyCode::Shift; break;
+        case 59: key = KeyCode::Control; break;
+        case 62: key = KeyCode::Control; break;
+        case 58: key = KeyCode::Alt; break;
+        case 61: key = KeyCode::Alt; break;
+        case 55: key = KeyCode::Command; break;
+        case 54: key = KeyCode::Command; break;
         case 53: key = KeyCode::Escape; break;
         default: break;
     }
@@ -266,6 +328,7 @@ void Engine::handleKeyUp(unsigned short keyCode) {
     if (key != KeyCode::Unknown) {
         input.setKeyPressed(key, false);
     }
+
 }
 
 void Engine::handleMouseMove(float deltaX, float deltaY) {
@@ -312,6 +375,9 @@ void Engine::handleMouseButton(int button, bool pressed) {
 // ============================================================================
 
 void Engine::handleMouseClick(float x, float y, float screenWidth, float screenHeight, bool additive) {
+    if (!SceneManager::getInstance().isSceneView()) {
+        return;
+    }
     Scene* activeScene = SceneManager::getInstance().getActiveScene();
     Camera* mainCamera = Camera::getMainCamera();
     
@@ -372,6 +438,9 @@ void Engine::handleMouseClick(float x, float y, float screenWidth, float screenH
 }
 
 void Engine::handleMouseDrag(float x, float y, float screenWidth, float screenHeight) {
+    if (!SceneManager::getInstance().isSceneView()) {
+        return;
+    }
     if (!m_isLeftMouseDown) return;
     
     if (m_gizmoSystem->isManipulating()) {
@@ -394,7 +463,9 @@ void Engine::handleMouseDrag(float x, float y, float screenWidth, float screenHe
 
 void Engine::handleMouseUp() {
     m_isLeftMouseDown = false;
-    m_gizmoSystem->handleMouseUp();
+    if (m_gizmoSystem) {
+        m_gizmoSystem->handleMouseUp();
+    }
 }
 
 // ============================================================================

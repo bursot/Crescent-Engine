@@ -32,7 +32,14 @@ struct InspectorPanel: View {
                     let decalSection = DecalInspectorSection(uuid: selectedEntity.uuid)
                     let physicsSection = PhysicsInspectorSection(uuid: selectedEntity.uuid)
                     VStack(alignment: .leading, spacing: 14) {
-                        InspectorSummaryCard(entityName: selectedEntity.name, selectionCount: editorState.selectedEntityUUIDs.count)
+                        InspectorSummaryCard(
+                            entityUUID: selectedEntity.uuid,
+                            entityName: selectedEntity.name,
+                            selectionCount: editorState.selectedEntityUUIDs.count
+                        ) { newName in
+                            let _ = CrescentEngineBridge.shared().setEntityName(uuid: selectedEntity.uuid, name: newName)
+                            editorState.refreshEntityList()
+                        }
                         
                         ComponentSection(title: "Transform", icon: "arrow.up.and.down.and.arrow.left.and.right") {
                             TransformInspector(selectedUUIDs: editorState.selectedEntityUUIDs)  // Pass ALL selected UUIDs
@@ -250,17 +257,37 @@ func DecalInspectorSection(uuid: String) -> AnyView? {
 }
 
 struct InspectorSummaryCard: View {
+    let entityUUID: String
     let entityName: String
     let selectionCount: Int
+    let onRename: (String) -> Void
+
+    @State private var nameDraft: String
+
+    init(entityUUID: String, entityName: String, selectionCount: Int, onRename: @escaping (String) -> Void) {
+        self.entityUUID = entityUUID
+        self.entityName = entityName
+        self.selectionCount = selectionCount
+        self.onRename = onRename
+        _nameDraft = State(initialValue: entityName)
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(entityName)
-                .font(EditorTheme.font(size: 16, weight: .semibold))
-                .foregroundColor(EditorTheme.textPrimary)
-                .lineLimit(2)
+            if selectionCount > 1 {
+                Text("\(selectionCount) objects selected")
+                    .font(EditorTheme.font(size: 12, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+            } else {
+                TextField("Name", text: $nameDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(EditorTheme.font(size: 13, weight: .semibold))
+                    .onSubmit {
+                        commitRename()
+                    }
+            }
             
-            Text(selectionCount > 1 ? "\(selectionCount) objects selected" : "GameObject")
+            Text(selectionCount > 1 ? "Multiple Selection" : "GameObject")
                 .font(EditorTheme.font(size: 11))
                 .foregroundColor(EditorTheme.textMuted)
         }
@@ -272,6 +299,20 @@ struct InspectorSummaryCard: View {
                 .stroke(EditorTheme.panelStroke, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onChange(of: entityName) { newValue in
+            nameDraft = newValue
+        }
+    }
+
+    private func commitRename() {
+        let trimmed = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            nameDraft = entityName
+            return
+        }
+        if trimmed != entityName {
+            onRename(trimmed)
+        }
     }
 }
 
@@ -766,11 +807,56 @@ struct PhysicsInspector: View {
     @State private var isTrigger: Bool = false
     @State private var friction: Float = 0.5
     @State private var restitution: Float = 0.0
+    @State private var frictionCombine: String = "Average"
+    @State private var restitutionCombine: String = "Average"
+    @State private var collisionLayer: Int = 0
+    @State private var collisionMask: Int = Int(UInt32.max)
     @State private var debugDraw: Bool = false
+
+    @State private var hasCharacterController: Bool = false
+    @State private var ccRadius: Float = 0.5
+    @State private var ccHeight: Float = 2.0
+    @State private var ccSkinWidth: Float = 0.02
+    @State private var ccMoveSpeed: Float = 5.0
+    @State private var ccAcceleration: Float = 30.0
+    @State private var ccAirAcceleration: Float = 10.0
+    @State private var ccJumpSpeed: Float = 5.5
+    @State private var ccGravity: Float = 20.0
+    @State private var ccMaxFallSpeed: Float = 40.0
+    @State private var ccGroundSnapSpeed: Float = 2.0
+    @State private var ccStepOffset: Float = 0.4
+    @State private var ccSlopeLimit: Float = 50.0
+    @State private var ccSlopeSlideSpeed: Float = 8.0
+    @State private var ccGroundCheckDistance: Float = 0.08
+    @State private var ccUseInput: Bool = true
+    @State private var ccUseGravity: Bool = true
+    @State private var ccEnableStep: Bool = true
+    @State private var ccEnableSlopeLimit: Bool = true
+    @State private var ccSnapToGround: Bool = true
+    @State private var ccCollisionMask: Int = Int(UInt32.max)
+
+    @State private var hasFpsController: Bool = false
+    @State private var fpsMouseSensitivity: Float = 0.002
+    @State private var fpsInvertY: Bool = false
+    @State private var fpsRequireLookButton: Bool = true
+    @State private var fpsLookButton: Int = 1
+    @State private var fpsMinPitch: Float = -89.0
+    @State private var fpsMaxPitch: Float = 89.0
+    @State private var fpsWalkSpeed: Float = 5.0
+    @State private var fpsSprintMultiplier: Float = 1.6
+    @State private var fpsEnableSprint: Bool = true
+    @State private var fpsEnableCrouch: Bool = true
+    @State private var fpsCrouchHeight: Float = 1.2
+    @State private var fpsCrouchEyeHeight: Float = 1.0
+    @State private var fpsCrouchSpeed: Float = 6.0
+    @State private var fpsEyeHeight: Float = 1.6
+    @State private var fpsUseEyeHeight: Bool = true
+    @State private var fpsDriveCharacter: Bool = true
 
     private let timer = Timer.publish(every: 0.8, on: .main, in: .common).autoconnect()
     private let bodyTypes = ["Static", "Dynamic", "Kinematic"]
     private let shapeTypes = ["Box", "Sphere", "Capsule"]
+    private let combineModes = ["Average", "Min", "Multiply", "Max"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -786,6 +872,12 @@ struct PhysicsInspector: View {
             Divider()
                 .overlay(EditorTheme.panelStroke)
             colliderSection
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+            characterControllerSection
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+            firstPersonControllerSection
         }
         .onAppear { refresh() }
         .onReceive(timer) { _ in refresh() }
@@ -931,6 +1023,65 @@ struct PhysicsInspector: View {
                     }))
                 .font(EditorTheme.font(size: 11, weight: .medium))
 
+                Picker("Friction Combine", selection: Binding(
+                    get: { frictionCombine },
+                    set: { newVal in
+                        frictionCombine = newVal
+                        pushCollider()
+                    })) {
+                    ForEach(combineModes, id: \.self) { mode in
+                        Text(mode).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(EditorTheme.font(size: 11))
+
+                Picker("Restitution Combine", selection: Binding(
+                    get: { restitutionCombine },
+                    set: { newVal in
+                        restitutionCombine = newVal
+                        pushCollider()
+                    })) {
+                    ForEach(combineModes, id: \.self) { mode in
+                        Text(mode).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(EditorTheme.font(size: 11))
+
+                HStack {
+                    Text("Collision Layer")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    TextField("0",
+                              value: Binding(
+                                get: { collisionLayer },
+                                set: { newVal in
+                                    collisionLayer = max(0, min(newVal, 31))
+                                    pushCollider()
+                                }),
+                              formatter: NumberFormatter.intFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 72)
+                }
+
+                HStack {
+                    Text("Collision Mask")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    TextField("4294967295",
+                              value: Binding(
+                                get: { collisionMask },
+                                set: { newVal in
+                                    let clamped = max(0, min(newVal, Int(UInt32.max)))
+                                    collisionMask = clamped
+                                    pushCollider()
+                                }),
+                              formatter: NumberFormatter.intFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                }
+
                 SliderRow(title: "Friction", value: $friction, range: 0...2, step: 0.01) { _ in
                     pushCollider()
                 }
@@ -938,6 +1089,255 @@ struct PhysicsInspector: View {
                 SliderRow(title: "Restitution", value: $restitution, range: 0...1, step: 0.01) { _ in
                     pushCollider()
                 }
+            }
+        }
+    }
+
+    private var characterControllerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Character Controller")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                if hasCharacterController {
+                    Button(action: removeCharacterController) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if !hasCharacterController {
+                Button("Add Character Controller") {
+                    let _ = CrescentEngineBridge.shared().addCharacterController(uuid: entityUUID)
+                    refresh()
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            } else {
+                SliderRow(title: "Radius", value: $ccRadius, range: 0.1...5, step: 0.01) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Height", value: $ccHeight, range: 0.5...10, step: 0.01) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Skin Width", value: $ccSkinWidth, range: 0...0.2, step: 0.001) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Move Speed", value: $ccMoveSpeed, range: 0...20, step: 0.1) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Acceleration", value: $ccAcceleration, range: 0...100, step: 0.5) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Air Acceleration", value: $ccAirAcceleration, range: 0...100, step: 0.5) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Jump Speed", value: $ccJumpSpeed, range: 0...20, step: 0.1) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Gravity", value: $ccGravity, range: 0...50, step: 0.1) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Max Fall Speed", value: $ccMaxFallSpeed, range: 0...100, step: 0.5) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Ground Snap Speed", value: $ccGroundSnapSpeed, range: 0...10, step: 0.1) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Step Offset", value: $ccStepOffset, range: 0...2, step: 0.01) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Slope Limit", value: $ccSlopeLimit, range: 0...89, step: 0.5) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Slope Slide Speed", value: $ccSlopeSlideSpeed, range: 0...20, step: 0.1) { _ in
+                    pushCharacterController()
+                }
+                SliderRow(title: "Ground Check Dist", value: $ccGroundCheckDistance, range: 0...0.5, step: 0.005) { _ in
+                    pushCharacterController()
+                }
+
+                Toggle("Use Input", isOn: Binding(
+                    get: { ccUseInput },
+                    set: { newVal in
+                        ccUseInput = newVal
+                        pushCharacterController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Use Gravity", isOn: Binding(
+                    get: { ccUseGravity },
+                    set: { newVal in
+                        ccUseGravity = newVal
+                        pushCharacterController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Enable Step", isOn: Binding(
+                    get: { ccEnableStep },
+                    set: { newVal in
+                        ccEnableStep = newVal
+                        pushCharacterController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Enable Slope Limit", isOn: Binding(
+                    get: { ccEnableSlopeLimit },
+                    set: { newVal in
+                        ccEnableSlopeLimit = newVal
+                        pushCharacterController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Snap To Ground", isOn: Binding(
+                    get: { ccSnapToGround },
+                    set: { newVal in
+                        ccSnapToGround = newVal
+                        pushCharacterController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                HStack {
+                    Text("Collision Mask")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    TextField("4294967295",
+                              value: Binding(
+                                get: { ccCollisionMask },
+                                set: { newVal in
+                                    let clamped = max(0, min(newVal, Int(UInt32.max)))
+                                    ccCollisionMask = clamped
+                                    pushCharacterController()
+                                }),
+                              formatter: NumberFormatter.intFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                }
+            }
+        }
+    }
+
+    private var firstPersonControllerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("First Person Controller")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                if hasFpsController {
+                    Button(action: removeFirstPersonController) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if !hasFpsController {
+                Button("Add First Person Controller") {
+                    let _ = CrescentEngineBridge.shared().addFirstPersonController(uuid: entityUUID)
+                    refresh()
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            } else {
+                SliderRow(title: "Mouse Sensitivity", value: $fpsMouseSensitivity, range: 0.0005...0.01, step: 0.0001) { _ in
+                    pushFirstPersonController()
+                }
+
+                Toggle("Invert Y", isOn: Binding(
+                    get: { fpsInvertY },
+                    set: { newVal in
+                        fpsInvertY = newVal
+                        pushFirstPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Require Look Button", isOn: Binding(
+                    get: { fpsRequireLookButton },
+                    set: { newVal in
+                        fpsRequireLookButton = newVal
+                        pushFirstPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                HStack {
+                    Text("Look Button")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { fpsLookButton },
+                        set: { newVal in
+                            fpsLookButton = newVal
+                            pushFirstPersonController()
+                        })) {
+                        Text("Left").tag(0)
+                        Text("Right").tag(1)
+                        Text("Middle").tag(2)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 120)
+                }
+
+                SliderRow(title: "Min Pitch", value: $fpsMinPitch, range: -89...0, step: 0.5) { _ in
+                    pushFirstPersonController()
+                }
+                SliderRow(title: "Max Pitch", value: $fpsMaxPitch, range: 0...89, step: 0.5) { _ in
+                    pushFirstPersonController()
+                }
+
+                SliderRow(title: "Walk Speed", value: $fpsWalkSpeed, range: 0...20, step: 0.1) { _ in
+                    pushFirstPersonController()
+                }
+                SliderRow(title: "Sprint Multiplier", value: $fpsSprintMultiplier, range: 1...3, step: 0.05) { _ in
+                    pushFirstPersonController()
+                }
+
+                Toggle("Enable Sprint", isOn: Binding(
+                    get: { fpsEnableSprint },
+                    set: { newVal in
+                        fpsEnableSprint = newVal
+                        pushFirstPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Enable Crouch", isOn: Binding(
+                    get: { fpsEnableCrouch },
+                    set: { newVal in
+                        fpsEnableCrouch = newVal
+                        pushFirstPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                SliderRow(title: "Crouch Height", value: $fpsCrouchHeight, range: 0.5...2.0, step: 0.01) { _ in
+                    pushFirstPersonController()
+                }
+                SliderRow(title: "Crouch Eye Height", value: $fpsCrouchEyeHeight, range: 0.2...2.0, step: 0.01) { _ in
+                    pushFirstPersonController()
+                }
+                SliderRow(title: "Crouch Speed", value: $fpsCrouchSpeed, range: 0...12, step: 0.1) { _ in
+                    pushFirstPersonController()
+                }
+                SliderRow(title: "Eye Height", value: $fpsEyeHeight, range: 0.2...2.5, step: 0.01) { _ in
+                    pushFirstPersonController()
+                }
+
+                Toggle("Use Eye Height", isOn: Binding(
+                    get: { fpsUseEyeHeight },
+                    set: { newVal in
+                        fpsUseEyeHeight = newVal
+                        pushFirstPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Drive Character Controller", isOn: Binding(
+                    get: { fpsDriveCharacter },
+                    set: { newVal in
+                        fpsDriveCharacter = newVal
+                        pushFirstPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
             }
         }
     }
@@ -973,8 +1373,62 @@ struct PhysicsInspector: View {
             isTrigger = (info["trigger"] as? NSNumber)?.boolValue ?? isTrigger
             friction = (info["friction"] as? NSNumber)?.floatValue ?? friction
             restitution = (info["restitution"] as? NSNumber)?.floatValue ?? restitution
+            frictionCombine = info["frictionCombine"] as? String ?? frictionCombine
+            restitutionCombine = info["restitutionCombine"] as? String ?? restitutionCombine
+            collisionLayer = (info["layer"] as? NSNumber)?.intValue ?? collisionLayer
+            collisionMask = (info["mask"] as? NSNumber)?.intValue ?? collisionMask
         } else {
             hasCollider = false
+        }
+
+        if let info = bridge.getCharacterControllerInfo(uuid: entityUUID) as? [String: Any],
+           !info.isEmpty {
+            hasCharacterController = true
+            ccRadius = (info["radius"] as? NSNumber)?.floatValue ?? ccRadius
+            ccHeight = (info["height"] as? NSNumber)?.floatValue ?? ccHeight
+            ccSkinWidth = (info["skinWidth"] as? NSNumber)?.floatValue ?? ccSkinWidth
+            ccMoveSpeed = (info["moveSpeed"] as? NSNumber)?.floatValue ?? ccMoveSpeed
+            ccAcceleration = (info["acceleration"] as? NSNumber)?.floatValue ?? ccAcceleration
+            ccAirAcceleration = (info["airAcceleration"] as? NSNumber)?.floatValue ?? ccAirAcceleration
+            ccJumpSpeed = (info["jumpSpeed"] as? NSNumber)?.floatValue ?? ccJumpSpeed
+            ccGravity = (info["gravity"] as? NSNumber)?.floatValue ?? ccGravity
+            ccMaxFallSpeed = (info["maxFallSpeed"] as? NSNumber)?.floatValue ?? ccMaxFallSpeed
+            ccGroundSnapSpeed = (info["groundSnapSpeed"] as? NSNumber)?.floatValue ?? ccGroundSnapSpeed
+            ccStepOffset = (info["stepOffset"] as? NSNumber)?.floatValue ?? ccStepOffset
+            ccSlopeLimit = (info["slopeLimit"] as? NSNumber)?.floatValue ?? ccSlopeLimit
+            ccSlopeSlideSpeed = (info["slopeSlideSpeed"] as? NSNumber)?.floatValue ?? ccSlopeSlideSpeed
+            ccGroundCheckDistance = (info["groundCheckDistance"] as? NSNumber)?.floatValue ?? ccGroundCheckDistance
+            ccUseInput = (info["useInput"] as? NSNumber)?.boolValue ?? ccUseInput
+            ccUseGravity = (info["useGravity"] as? NSNumber)?.boolValue ?? ccUseGravity
+            ccEnableStep = (info["enableStep"] as? NSNumber)?.boolValue ?? ccEnableStep
+            ccEnableSlopeLimit = (info["enableSlopeLimit"] as? NSNumber)?.boolValue ?? ccEnableSlopeLimit
+            ccSnapToGround = (info["snapToGround"] as? NSNumber)?.boolValue ?? ccSnapToGround
+            ccCollisionMask = (info["collisionMask"] as? NSNumber)?.intValue ?? ccCollisionMask
+        } else {
+            hasCharacterController = false
+        }
+
+        if let info = bridge.getFirstPersonControllerInfo(uuid: entityUUID) as? [String: Any],
+           !info.isEmpty {
+            hasFpsController = true
+            fpsMouseSensitivity = (info["mouseSensitivity"] as? NSNumber)?.floatValue ?? fpsMouseSensitivity
+            fpsInvertY = (info["invertY"] as? NSNumber)?.boolValue ?? fpsInvertY
+            fpsRequireLookButton = (info["requireLookButton"] as? NSNumber)?.boolValue ?? fpsRequireLookButton
+            fpsLookButton = (info["lookButton"] as? NSNumber)?.intValue ?? fpsLookButton
+            fpsMinPitch = (info["minPitch"] as? NSNumber)?.floatValue ?? fpsMinPitch
+            fpsMaxPitch = (info["maxPitch"] as? NSNumber)?.floatValue ?? fpsMaxPitch
+            fpsWalkSpeed = (info["walkSpeed"] as? NSNumber)?.floatValue ?? fpsWalkSpeed
+            fpsSprintMultiplier = (info["sprintMultiplier"] as? NSNumber)?.floatValue ?? fpsSprintMultiplier
+            fpsEnableSprint = (info["enableSprint"] as? NSNumber)?.boolValue ?? fpsEnableSprint
+            fpsEnableCrouch = (info["enableCrouch"] as? NSNumber)?.boolValue ?? fpsEnableCrouch
+            fpsCrouchHeight = (info["crouchHeight"] as? NSNumber)?.floatValue ?? fpsCrouchHeight
+            fpsCrouchEyeHeight = (info["crouchEyeHeight"] as? NSNumber)?.floatValue ?? fpsCrouchEyeHeight
+            fpsCrouchSpeed = (info["crouchSpeed"] as? NSNumber)?.floatValue ?? fpsCrouchSpeed
+            fpsEyeHeight = (info["eyeHeight"] as? NSNumber)?.floatValue ?? fpsEyeHeight
+            fpsUseEyeHeight = (info["useEyeHeight"] as? NSNumber)?.boolValue ?? fpsUseEyeHeight
+            fpsDriveCharacter = (info["driveCharacterController"] as? NSNumber)?.boolValue ?? fpsDriveCharacter
+        } else {
+            hasFpsController = false
         }
 
         debugDraw = bridge.getPhysicsDebugDraw()
@@ -1002,7 +1456,11 @@ struct PhysicsInspector: View {
             "center": center,
             "trigger": isTrigger,
             "friction": friction,
-            "restitution": restitution
+            "restitution": restitution,
+            "frictionCombine": frictionCombine,
+            "restitutionCombine": restitutionCombine,
+            "layer": collisionLayer,
+            "mask": collisionMask
         ]
         _ = CrescentEngineBridge.shared().setColliderInfo(uuid: entityUUID, info: info)
     }
@@ -1015,6 +1473,64 @@ struct PhysicsInspector: View {
     private func removeCollider() {
         CrescentEngineBridge.shared().removeCollider(uuid: entityUUID)
         hasCollider = false
+    }
+
+    private func pushCharacterController() {
+        let info: [String: Any] = [
+            "radius": ccRadius,
+            "height": ccHeight,
+            "skinWidth": ccSkinWidth,
+            "moveSpeed": ccMoveSpeed,
+            "acceleration": ccAcceleration,
+            "airAcceleration": ccAirAcceleration,
+            "jumpSpeed": ccJumpSpeed,
+            "gravity": ccGravity,
+            "maxFallSpeed": ccMaxFallSpeed,
+            "groundSnapSpeed": ccGroundSnapSpeed,
+            "stepOffset": ccStepOffset,
+            "slopeLimit": ccSlopeLimit,
+            "slopeSlideSpeed": ccSlopeSlideSpeed,
+            "groundCheckDistance": ccGroundCheckDistance,
+            "useInput": ccUseInput,
+            "useGravity": ccUseGravity,
+            "enableStep": ccEnableStep,
+            "enableSlopeLimit": ccEnableSlopeLimit,
+            "snapToGround": ccSnapToGround,
+            "collisionMask": ccCollisionMask
+        ]
+        _ = CrescentEngineBridge.shared().setCharacterControllerInfo(uuid: entityUUID, info: info)
+    }
+
+    private func removeCharacterController() {
+        CrescentEngineBridge.shared().removeCharacterController(uuid: entityUUID)
+        hasCharacterController = false
+    }
+
+    private func pushFirstPersonController() {
+        let info: [String: Any] = [
+            "mouseSensitivity": fpsMouseSensitivity,
+            "invertY": fpsInvertY,
+            "requireLookButton": fpsRequireLookButton,
+            "lookButton": fpsLookButton,
+            "minPitch": fpsMinPitch,
+            "maxPitch": fpsMaxPitch,
+            "walkSpeed": fpsWalkSpeed,
+            "sprintMultiplier": fpsSprintMultiplier,
+            "enableSprint": fpsEnableSprint,
+            "enableCrouch": fpsEnableCrouch,
+            "crouchHeight": fpsCrouchHeight,
+            "crouchEyeHeight": fpsCrouchEyeHeight,
+            "crouchSpeed": fpsCrouchSpeed,
+            "eyeHeight": fpsEyeHeight,
+            "useEyeHeight": fpsUseEyeHeight,
+            "driveCharacterController": fpsDriveCharacter
+        ]
+        _ = CrescentEngineBridge.shared().setFirstPersonControllerInfo(uuid: entityUUID, info: info)
+    }
+
+    private func removeFirstPersonController() {
+        CrescentEngineBridge.shared().removeFirstPersonController(uuid: entityUUID)
+        hasFpsController = false
     }
 }
 

@@ -15,7 +15,11 @@ PhysicsCollider::PhysicsCollider()
     , m_Center(0.0f, 0.0f, 0.0f)
     , m_IsTrigger(false)
     , m_Friction(0.5f)
-    , m_Restitution(0.0f) {
+    , m_Restitution(0.0f)
+    , m_FrictionCombine(CombineMode::Average)
+    , m_RestitutionCombine(CombineMode::Average)
+    , m_CollisionLayer(0)
+    , m_CollisionMask(kAllLayersMask) {
 }
 
 void PhysicsCollider::setShapeType(ShapeType type) {
@@ -88,6 +92,39 @@ void PhysicsCollider::setRestitution(float restitution) {
         return;
     }
     m_Restitution = clamped;
+    notifyChanged();
+}
+
+void PhysicsCollider::setFrictionCombine(CombineMode mode) {
+    if (m_FrictionCombine == mode) {
+        return;
+    }
+    m_FrictionCombine = mode;
+    notifyChanged();
+}
+
+void PhysicsCollider::setRestitutionCombine(CombineMode mode) {
+    if (m_RestitutionCombine == mode) {
+        return;
+    }
+    m_RestitutionCombine = mode;
+    notifyChanged();
+}
+
+void PhysicsCollider::setCollisionLayer(uint32_t layer) {
+    uint32_t clamped = std::min(layer, kMaxLayers - 1);
+    if (m_CollisionLayer == clamped) {
+        return;
+    }
+    m_CollisionLayer = clamped;
+    notifyChanged();
+}
+
+void PhysicsCollider::setCollisionMask(uint32_t mask) {
+    if (m_CollisionMask == mask) {
+        return;
+    }
+    m_CollisionMask = mask;
     notifyChanged();
 }
 

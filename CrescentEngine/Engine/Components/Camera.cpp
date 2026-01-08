@@ -16,6 +16,7 @@ Camera::Camera()
     , m_Viewport(0.0f, 0.0f, 1.0f, 1.0f)
     , m_ClearColor(0.1f, 0.1f, 0.15f, 1.0f)
     , m_ClearDepth(true)
+    , m_IsEditorCamera(false)
     , m_ProjectionDirty(true) {
 }
 

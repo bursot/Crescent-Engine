@@ -75,6 +75,13 @@ TextureLoader::~TextureLoader() {
     m_Cache.clear();
 }
 
+void TextureLoader::invalidateTexture(const std::string& path) {
+    if (path.empty()) {
+        return;
+    }
+    m_Cache.erase(path);
+}
+
 std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, bool srgb, bool flipVertical) {
     if (!m_Device) {
         std::cerr << "[TextureLoader] Invalid Metal device, cannot load texture\n";

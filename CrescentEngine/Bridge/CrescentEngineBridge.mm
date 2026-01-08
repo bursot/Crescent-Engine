@@ -10,11 +10,14 @@
 #include "../Engine/Components/IKConstraint.hpp"
 #include "../Engine/Components/Rigidbody.hpp"
 #include "../Engine/Components/PhysicsCollider.hpp"
+#include "../Engine/Components/CharacterController.hpp"
+#include "../Engine/Components/FirstPersonController.hpp"
 #include "../Engine/ECS/Transform.hpp"
 #include "../Engine/Assets/AssetDatabase.hpp"
 #include "../Engine/Animation/AnimationClip.hpp"
 #include "../Engine/Project/Project.hpp"
 #include "../Engine/Components/CameraController.hpp"
+#include "../Engine/Components/Camera.hpp"
 #include "../Engine/Components/Light.hpp"
 #include "../Engine/Components/Decal.hpp"
 #include "../Engine/Physics/PhysicsWorld.hpp"
@@ -228,15 +231,34 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 }
 
 - (void)setMetalLayer:(CAMetalLayer *)layer {
-    if (_engine && _engine->getRenderer()) {
-        // Pass layer as void* to avoid type conflicts between native and metal-cpp
-        _engine->getRenderer()->setMetalLayer((__bridge void*)layer);
-    }
+    [self setSceneMetalLayer:layer];
 }
 
 - (void)resizeWithWidth:(float)width height:(float)height {
-    if (_engine && _engine->getRenderer()) {
-        _engine->getRenderer()->resize(width, height);
+    [self resizeSceneWithWidth:width height:height];
+}
+
+- (void)setSceneMetalLayer:(CAMetalLayer *)layer {
+    if (_engine) {
+        _engine->setSceneMetalLayer((__bridge void*)layer);
+    }
+}
+
+- (void)setGameMetalLayer:(CAMetalLayer *)layer {
+    if (_engine) {
+        _engine->setGameMetalLayer((__bridge void*)layer);
+    }
+}
+
+- (void)resizeSceneWithWidth:(float)width height:(float)height {
+    if (_engine) {
+        _engine->resizeScene(width, height);
+    }
+}
+
+- (void)resizeGameWithWidth:(float)width height:(float)height {
+    if (_engine) {
+        _engine->resizeGame(width, height);
     }
 }
 
@@ -425,6 +447,9 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             if (entityName == "Editor Gizmo") {
                 continue;
             }
+            if (entity->isEditorOnly()) {
+                continue;
+            }
             
             std::string uuidStr = entity->getUUID().toString();
             bool hasSkinned = entity->getComponent<SkinnedMeshRenderer>() != nullptr;
@@ -436,13 +461,23 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
                     clipCount = static_cast<int>(skinned->getAnimationClips().size());
                 }
             }
+
+            std::string parentUuidStr;
+            if (auto* transform = entity->getTransform()) {
+                if (auto* parent = transform->getParent()) {
+                    if (auto* parentEntity = parent->getEntity()) {
+                        parentUuidStr = parentEntity->getUUID().toString();
+                    }
+                }
+            }
             
             NSDictionary *info = @{
                 @"uuid": [NSString stringWithUTF8String:uuidStr.c_str()],
                 @"name": [NSString stringWithUTF8String:entityName.c_str()],
                 @"skinned": @(hasSkinned),
                 @"animator": @(hasAnimator),
-                @"clipCount": @(clipCount)
+                @"clipCount": @(clipCount),
+                @"parent": [NSString stringWithUTF8String:parentUuidStr.c_str()]
             };
             [entityInfos addObject:info];
         }
@@ -499,6 +534,29 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (void)clearSelection {
     Crescent::SelectionSystem::clearSelection();
+}
+
+- (BOOL)setEntityParent:(NSString *)childUUID parent:(NSString *)parentUUID {
+    Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
+    if (!scene || !childUUID) {
+        return NO;
+    }
+    std::string child = [childUUID UTF8String];
+    std::string parent = parentUUID ? [parentUUID UTF8String] : "";
+    return Crescent::SceneCommands::setParent(scene, child, parent);
+}
+
+- (BOOL)setEntityName:(NSString *)uuid name:(NSString *)name {
+    Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
+    if (!scene || !uuid || !name) {
+        return NO;
+    }
+    Crescent::Entity* entity = Crescent::SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+    if (!entity) {
+        return NO;
+    }
+    entity->setName([name UTF8String]);
+    return YES;
 }
 
 // MARK: - Entity Transform Query (by UUID)
@@ -649,6 +707,30 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     if (!controller) return;
     
     controller->setMoveSpeed(speed);
+}
+
+- (NSDictionary *)getSceneCameraBasis {
+    Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
+    if (!scene) return @{};
+
+    Crescent::Camera* camera = Crescent::SceneManager::getInstance().getSceneCamera();
+    if (!camera) return @{};
+
+    Crescent::Entity* entity = camera->getEntity();
+    if (!entity) return @{};
+
+    Crescent::Transform* transform = entity->getTransform();
+    if (!transform) return @{};
+
+    Math::Vector3 right = transform->right();
+    Math::Vector3 up = transform->up();
+    Math::Vector3 forward = transform->forward();
+
+    return @{
+        @"right": @[@(right.x), @(right.y), @(right.z)],
+        @"up": @[@(up.x), @(up.y), @(up.z)],
+        @"forward": @[@(forward.x), @(forward.y), @(forward.z)]
+    };
 }
 
 // MARK: - Material Editing
@@ -948,6 +1030,34 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     return SceneManager::getInstance().isPlaying();
 }
 
+- (BOOL)isPaused {
+    return SceneManager::getInstance().isPaused();
+}
+
+- (void)setPaused:(BOOL)paused {
+    SceneManager::getInstance().setPaused(paused);
+}
+
+- (float)getTimeScale {
+    return SceneManager::getInstance().getTimeScale();
+}
+
+- (void)setTimeScale:(float)scale {
+    SceneManager::getInstance().setTimeScale(scale);
+}
+
+- (void)setViewMode:(int)mode {
+    SceneManager::ViewMode viewMode = SceneManager::ViewMode::Scene;
+    if (mode == 1) {
+        viewMode = SceneManager::ViewMode::Game;
+    }
+    SceneManager::getInstance().setViewMode(viewMode);
+}
+
+- (int)getViewMode {
+    return static_cast<int>(SceneManager::getInstance().getViewMode());
+}
+
 - (void)setAssetRootPath:(NSString *)path {
     if (!path) {
         return;
@@ -995,6 +1105,136 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         return @"";
     }
     return [NSString stringWithUTF8String:result.c_str()];
+}
+
+- (NSDictionary *)getAssetMetaAtPath:(NSString *)path {
+    if (!path) {
+        return @{};
+    }
+    AssetDatabase& db = AssetDatabase::getInstance();
+    AssetRecord record;
+    std::string pathStr = path.UTF8String;
+    if (!db.getRecordForPath(pathStr, record)) {
+        std::string guid = db.registerAsset(pathStr);
+        if (!guid.empty()) {
+            db.getRecordForPath(pathStr, record);
+        }
+    }
+    if (record.guid.empty()) {
+        return @{};
+    }
+
+    NSDictionary* model = @{
+        @"scale": @(record.modelSettings.scale),
+        @"flipUVs": @(record.modelSettings.flipUVs),
+        @"onlyLOD0": @(record.modelSettings.onlyLOD0),
+        @"mergeStaticMeshes": @(record.modelSettings.mergeStaticMeshes)
+    };
+    NSDictionary* texture = @{
+        @"srgb": @(record.textureSettings.srgb),
+        @"generateMipmaps": @(record.textureSettings.generateMipmaps),
+        @"flipY": @(record.textureSettings.flipY),
+        @"maxSize": @(record.textureSettings.maxSize),
+        @"normalMap": @(record.textureSettings.normalMap)
+    };
+    NSDictionary* hdri = @{
+        @"flipY": @(record.hdriSettings.flipY),
+        @"maxSize": @(record.hdriSettings.maxSize)
+    };
+
+    return @{
+        @"guid": [NSString stringWithUTF8String:record.guid.c_str()],
+        @"type": [NSString stringWithUTF8String:record.type.c_str()],
+        @"model": model,
+        @"texture": texture,
+        @"hdri": hdri
+    };
+}
+
+- (BOOL)updateModelImportSettings:(NSString *)guid settings:(NSDictionary *)settings {
+    if (!guid || !settings) {
+        return NO;
+    }
+    ModelImportSettings imported;
+    NSNumber* scale = settings[@"scale"];
+    NSNumber* flipUVs = settings[@"flipUVs"];
+    NSNumber* onlyLOD0 = settings[@"onlyLOD0"];
+    NSNumber* mergeStaticMeshes = settings[@"mergeStaticMeshes"];
+    if (scale) imported.scale = scale.floatValue;
+    if (flipUVs) imported.flipUVs = flipUVs.boolValue;
+    if (onlyLOD0) imported.onlyLOD0 = onlyLOD0.boolValue;
+    if (mergeStaticMeshes) imported.mergeStaticMeshes = mergeStaticMeshes.boolValue;
+    return AssetDatabase::getInstance().updateModelImportSettings(guid.UTF8String, imported);
+}
+
+- (BOOL)updateTextureImportSettings:(NSString *)guid settings:(NSDictionary *)settings {
+    if (!guid || !settings) {
+        return NO;
+    }
+    TextureImportSettings imported;
+    NSNumber* srgb = settings[@"srgb"];
+    NSNumber* generateMipmaps = settings[@"generateMipmaps"];
+    NSNumber* flipY = settings[@"flipY"];
+    NSNumber* maxSize = settings[@"maxSize"];
+    NSNumber* normalMap = settings[@"normalMap"];
+    if (srgb) imported.srgb = srgb.boolValue;
+    if (generateMipmaps) imported.generateMipmaps = generateMipmaps.boolValue;
+    if (flipY) imported.flipY = flipY.boolValue;
+    if (maxSize) imported.maxSize = maxSize.intValue;
+    if (normalMap) imported.normalMap = normalMap.boolValue;
+    return AssetDatabase::getInstance().updateTextureImportSettings(guid.UTF8String, imported);
+}
+
+- (BOOL)updateHdriImportSettings:(NSString *)guid settings:(NSDictionary *)settings {
+    if (!guid || !settings) {
+        return NO;
+    }
+    HdriImportSettings imported;
+    NSNumber* flipY = settings[@"flipY"];
+    NSNumber* maxSize = settings[@"maxSize"];
+    if (flipY) imported.flipY = flipY.boolValue;
+    if (maxSize) imported.maxSize = maxSize.intValue;
+    return AssetDatabase::getInstance().updateHdriImportSettings(guid.UTF8String, imported);
+}
+
+- (BOOL)reimportModelAsset:(NSString *)guid {
+    if (!guid) {
+        return NO;
+    }
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) {
+        return NO;
+    }
+    return SceneCommands::reimportModelAsset(scene, guid.UTF8String);
+}
+
+- (BOOL)reimportTextureAsset:(NSString *)guid {
+    if (!guid) {
+        return NO;
+    }
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) {
+        return NO;
+    }
+    return SceneCommands::reimportTextureAsset(scene, guid.UTF8String);
+}
+
+- (BOOL)reimportHdriAsset:(NSString *)guid {
+    if (!guid) {
+        return NO;
+    }
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) {
+        return NO;
+    }
+    return SceneCommands::reimportHdriAsset(scene, guid.UTF8String);
+}
+
+- (BOOL)moveAssetAtPath:(NSString *)sourcePath toPath:(NSString *)targetPath overwrite:(BOOL)overwrite {
+    if (!sourcePath || !targetPath) {
+        return NO;
+    }
+    return AssetDatabase::getInstance().moveAsset(sourcePath.UTF8String, targetPath.UTF8String, overwrite);
 }
 
 - (NSDictionary *)getProjectSettings {
@@ -2214,6 +2454,25 @@ static PhysicsCollider::ShapeType ColliderShapeFromString(NSString* value) {
     return PhysicsCollider::ShapeType::Box;
 }
 
+static NSString* CombineModeToString(PhysicsCollider::CombineMode mode) {
+    switch (mode) {
+    case PhysicsCollider::CombineMode::Min: return @"Min";
+    case PhysicsCollider::CombineMode::Multiply: return @"Multiply";
+    case PhysicsCollider::CombineMode::Max: return @"Max";
+    case PhysicsCollider::CombineMode::Average:
+    default:
+        return @"Average";
+    }
+}
+
+static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
+    if (!value) return PhysicsCollider::CombineMode::Average;
+    if ([value isEqualToString:@"Min"]) return PhysicsCollider::CombineMode::Min;
+    if ([value isEqualToString:@"Multiply"]) return PhysicsCollider::CombineMode::Multiply;
+    if ([value isEqualToString:@"Max"]) return PhysicsCollider::CombineMode::Max;
+    return PhysicsCollider::CombineMode::Average;
+}
+
 - (NSDictionary *)getRigidbodyInfo:(NSString *)uuid {
     Scene* scene = SceneManager::getInstance().getActiveScene();
     if (!scene) return @{};
@@ -2302,7 +2561,11 @@ static PhysicsCollider::ShapeType ColliderShapeFromString(NSString* value) {
         @"center": @[@(center.x), @(center.y), @(center.z)],
         @"trigger": @(collider->isTrigger()),
         @"friction": @(collider->getFriction()),
-        @"restitution": @(collider->getRestitution())
+        @"restitution": @(collider->getRestitution()),
+        @"frictionCombine": CombineModeToString(collider->getFrictionCombine()),
+        @"restitutionCombine": CombineModeToString(collider->getRestitutionCombine()),
+        @"layer": @(collider->getCollisionLayer()),
+        @"mask": @(collider->getCollisionMask())
     };
 }
 
@@ -2346,6 +2609,18 @@ static PhysicsCollider::ShapeType ColliderShapeFromString(NSString* value) {
     if (NSNumber* restitution = info[@"restitution"]) {
         collider->setRestitution(restitution.floatValue);
     }
+    if (NSString* frictionCombine = info[@"frictionCombine"]) {
+        collider->setFrictionCombine(CombineModeFromString(frictionCombine));
+    }
+    if (NSString* restitutionCombine = info[@"restitutionCombine"]) {
+        collider->setRestitutionCombine(CombineModeFromString(restitutionCombine));
+    }
+    if (NSNumber* layer = info[@"layer"]) {
+        collider->setCollisionLayer(layer.unsignedIntValue);
+    }
+    if (NSNumber* mask = info[@"mask"]) {
+        collider->setCollisionMask(mask.unsignedIntValue);
+    }
     return YES;
 }
 
@@ -2366,6 +2641,236 @@ static PhysicsCollider::ShapeType ColliderShapeFromString(NSString* value) {
     Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
     if (!entity) return;
     entity->removeComponent<PhysicsCollider>();
+}
+
+- (NSDictionary *)getCharacterControllerInfo:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return @{};
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return @{};
+    CharacterController* controller = entity->getComponent<CharacterController>();
+    if (!controller) return @{};
+    return @{
+        @"radius": @(controller->getRadius()),
+        @"height": @(controller->getHeight()),
+        @"skinWidth": @(controller->getSkinWidth()),
+        @"moveSpeed": @(controller->getMoveSpeed()),
+        @"acceleration": @(controller->getAcceleration()),
+        @"airAcceleration": @(controller->getAirAcceleration()),
+        @"jumpSpeed": @(controller->getJumpSpeed()),
+        @"gravity": @(controller->getGravity()),
+        @"maxFallSpeed": @(controller->getMaxFallSpeed()),
+        @"groundSnapSpeed": @(controller->getGroundSnapSpeed()),
+        @"stepOffset": @(controller->getStepOffset()),
+        @"slopeLimit": @(controller->getSlopeLimit()),
+        @"slopeSlideSpeed": @(controller->getSlopeSlideSpeed()),
+        @"groundCheckDistance": @(controller->getGroundCheckDistance()),
+        @"useInput": @(controller->getUseInput()),
+        @"useGravity": @(controller->getUseGravity()),
+        @"enableStep": @(controller->getEnableStep()),
+        @"enableSlopeLimit": @(controller->getEnableSlopeLimit()),
+        @"snapToGround": @(controller->getSnapToGround()),
+        @"collisionMask": @(controller->getCollisionMask())
+    };
+}
+
+- (BOOL)setCharacterControllerInfo:(NSString *)uuid info:(NSDictionary *)info {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene || !info) return NO;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return NO;
+    CharacterController* controller = entity->getComponent<CharacterController>();
+    if (!controller) {
+        controller = entity->addComponent<CharacterController>();
+    }
+
+    if (NSNumber* radius = info[@"radius"]) {
+        controller->setRadius(radius.floatValue);
+    }
+    if (NSNumber* height = info[@"height"]) {
+        controller->setHeight(height.floatValue);
+    }
+    if (NSNumber* skinWidth = info[@"skinWidth"]) {
+        controller->setSkinWidth(skinWidth.floatValue);
+    }
+    if (NSNumber* moveSpeed = info[@"moveSpeed"]) {
+        controller->setMoveSpeed(moveSpeed.floatValue);
+    }
+    if (NSNumber* acceleration = info[@"acceleration"]) {
+        controller->setAcceleration(acceleration.floatValue);
+    }
+    if (NSNumber* airAcceleration = info[@"airAcceleration"]) {
+        controller->setAirAcceleration(airAcceleration.floatValue);
+    }
+    if (NSNumber* jumpSpeed = info[@"jumpSpeed"]) {
+        controller->setJumpSpeed(jumpSpeed.floatValue);
+    }
+    if (NSNumber* gravity = info[@"gravity"]) {
+        controller->setGravity(gravity.floatValue);
+    }
+    if (NSNumber* maxFallSpeed = info[@"maxFallSpeed"]) {
+        controller->setMaxFallSpeed(maxFallSpeed.floatValue);
+    }
+    if (NSNumber* groundSnapSpeed = info[@"groundSnapSpeed"]) {
+        controller->setGroundSnapSpeed(groundSnapSpeed.floatValue);
+    }
+    if (NSNumber* stepOffset = info[@"stepOffset"]) {
+        controller->setStepOffset(stepOffset.floatValue);
+    }
+    if (NSNumber* slopeLimit = info[@"slopeLimit"]) {
+        controller->setSlopeLimit(slopeLimit.floatValue);
+    }
+    if (NSNumber* slopeSlideSpeed = info[@"slopeSlideSpeed"]) {
+        controller->setSlopeSlideSpeed(slopeSlideSpeed.floatValue);
+    }
+    if (NSNumber* groundCheckDistance = info[@"groundCheckDistance"]) {
+        controller->setGroundCheckDistance(groundCheckDistance.floatValue);
+    }
+    if (NSNumber* useInput = info[@"useInput"]) {
+        controller->setUseInput(useInput.boolValue);
+    }
+    if (NSNumber* useGravity = info[@"useGravity"]) {
+        controller->setUseGravity(useGravity.boolValue);
+    }
+    if (NSNumber* enableStep = info[@"enableStep"]) {
+        controller->setEnableStep(enableStep.boolValue);
+    }
+    if (NSNumber* enableSlopeLimit = info[@"enableSlopeLimit"]) {
+        controller->setEnableSlopeLimit(enableSlopeLimit.boolValue);
+    }
+    if (NSNumber* snapToGround = info[@"snapToGround"]) {
+        controller->setSnapToGround(snapToGround.boolValue);
+    }
+    if (NSNumber* collisionMask = info[@"collisionMask"]) {
+        controller->setCollisionMask(collisionMask.unsignedIntValue);
+    }
+    return YES;
+}
+
+- (BOOL)addCharacterController:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return NO;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return NO;
+    if (!entity->getComponent<CharacterController>()) {
+        entity->addComponent<CharacterController>();
+    }
+    return YES;
+}
+
+- (void)removeCharacterController:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return;
+    entity->removeComponent<CharacterController>();
+}
+
+- (NSDictionary *)getFirstPersonControllerInfo:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return @{};
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return @{};
+    FirstPersonController* controller = entity->getComponent<FirstPersonController>();
+    if (!controller) return @{};
+    return @{
+        @"mouseSensitivity": @(controller->getMouseSensitivity()),
+        @"invertY": @(controller->getInvertY()),
+        @"requireLookButton": @(controller->getRequireLookButton()),
+        @"lookButton": @((int)controller->getLookButton()),
+        @"minPitch": @(controller->getMinPitch()),
+        @"maxPitch": @(controller->getMaxPitch()),
+        @"walkSpeed": @(controller->getWalkSpeed()),
+        @"sprintMultiplier": @(controller->getSprintMultiplier()),
+        @"enableSprint": @(controller->getEnableSprint()),
+        @"enableCrouch": @(controller->getEnableCrouch()),
+        @"crouchHeight": @(controller->getCrouchHeight()),
+        @"crouchEyeHeight": @(controller->getCrouchEyeHeight()),
+        @"crouchSpeed": @(controller->getCrouchSpeed()),
+        @"eyeHeight": @(controller->getEyeHeight()),
+        @"useEyeHeight": @(controller->getUseEyeHeight()),
+        @"driveCharacterController": @(controller->getDriveCharacterController())
+    };
+}
+
+- (BOOL)setFirstPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene || !info) return NO;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return NO;
+    FirstPersonController* controller = entity->getComponent<FirstPersonController>();
+    if (!controller) {
+        controller = entity->addComponent<FirstPersonController>();
+    }
+
+    if (NSNumber* value = info[@"mouseSensitivity"]) {
+        controller->setMouseSensitivity(value.floatValue);
+    }
+    if (NSNumber* value = info[@"invertY"]) {
+        controller->setInvertY(value.boolValue);
+    }
+    if (NSNumber* value = info[@"requireLookButton"]) {
+        controller->setRequireLookButton(value.boolValue);
+    }
+    if (NSNumber* value = info[@"lookButton"]) {
+        controller->setLookButton(static_cast<MouseButton>(value.intValue));
+    }
+    if (NSNumber* value = info[@"minPitch"]) {
+        controller->setMinPitch(value.floatValue);
+    }
+    if (NSNumber* value = info[@"maxPitch"]) {
+        controller->setMaxPitch(value.floatValue);
+    }
+    if (NSNumber* value = info[@"walkSpeed"]) {
+        controller->setWalkSpeed(value.floatValue);
+    }
+    if (NSNumber* value = info[@"sprintMultiplier"]) {
+        controller->setSprintMultiplier(value.floatValue);
+    }
+    if (NSNumber* value = info[@"enableSprint"]) {
+        controller->setEnableSprint(value.boolValue);
+    }
+    if (NSNumber* value = info[@"enableCrouch"]) {
+        controller->setEnableCrouch(value.boolValue);
+    }
+    if (NSNumber* value = info[@"crouchHeight"]) {
+        controller->setCrouchHeight(value.floatValue);
+    }
+    if (NSNumber* value = info[@"crouchEyeHeight"]) {
+        controller->setCrouchEyeHeight(value.floatValue);
+    }
+    if (NSNumber* value = info[@"crouchSpeed"]) {
+        controller->setCrouchSpeed(value.floatValue);
+    }
+    if (NSNumber* value = info[@"eyeHeight"]) {
+        controller->setEyeHeight(value.floatValue);
+    }
+    if (NSNumber* value = info[@"useEyeHeight"]) {
+        controller->setUseEyeHeight(value.boolValue);
+    }
+    if (NSNumber* value = info[@"driveCharacterController"]) {
+        controller->setDriveCharacterController(value.boolValue);
+    }
+    return YES;
+}
+
+- (BOOL)addFirstPersonController:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return NO;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return NO;
+    if (!entity->getComponent<FirstPersonController>()) {
+        entity->addComponent<FirstPersonController>();
+    }
+    return YES;
+}
+
+- (void)removeFirstPersonController:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return;
+    entity->removeComponent<FirstPersonController>();
 }
 
 - (BOOL)getPhysicsDebugDraw {

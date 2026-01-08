@@ -78,7 +78,7 @@ Entity* Scene::createEntity(const std::string& name) {
     m_Entities.push_back(std::move(entity));
     
     if (m_IsActive) {
-        entityPtr->OnCreate();
+        entityPtr->onSceneActivated();
     }
     
     return entityPtr;
@@ -93,7 +93,7 @@ Entity* Scene::createEntityWithUUID(UUID uuid, const std::string& name) {
     m_Entities.push_back(std::move(entity));
     
     if (m_IsActive) {
-        entityPtr->OnCreate();
+        entityPtr->onSceneActivated();
     }
     
     return entityPtr;
@@ -106,9 +106,7 @@ void Scene::destroyEntity(Entity* entity) {
     UUID uuid = entity->getUUID();
     
     // Call lifecycle
-    if (m_IsActive) {
-        entity->OnDestroy();
-    }
+    entity->OnDestroy();
     
     // Remove from map
     m_EntityMap.erase(uuid);
@@ -132,15 +130,9 @@ void Scene::destroyEntity(UUID uuid) {
 }
 
 void Scene::destroyAllEntities() {
-    if (m_IsActive) {
-        for (auto& entity : m_Entities) {
-            SelectionSystem::removeEntity(entity.get());
-            entity->OnDestroy();
-        }
-    } else {
-        for (auto& entity : m_Entities) {
-            SelectionSystem::removeEntity(entity.get());
-        }
+    for (auto& entity : m_Entities) {
+        SelectionSystem::removeEntity(entity.get());
+        entity->OnDestroy();
     }
     
     m_Entities.clear();
@@ -199,7 +191,7 @@ void Scene::setActive(bool active) {
 void Scene::OnCreate() {
     for (auto& entity : m_Entities) {
         if (entity->isActive()) {
-            entity->OnCreate();
+            entity->onSceneActivated();
         }
     }
 }
@@ -207,7 +199,18 @@ void Scene::OnCreate() {
 void Scene::OnDestroy() {
     for (auto& entity : m_Entities) {
         if (entity->isActive()) {
-            entity->OnDestroy();
+            entity->onSceneDeactivated();
+        }
+    }
+}
+
+void Scene::OnStart() {
+    if (!m_IsActive) {
+        return;
+    }
+    for (auto& entity : m_Entities) {
+        if (entity->isActive() && !entity->isEditorOnly()) {
+            entity->OnStart();
         }
     }
 }
@@ -216,16 +219,47 @@ void Scene::OnUpdate(float deltaTime) {
     if (!m_IsActive) return;
     
     for (auto& entity : m_Entities) {
-        if (entity->isActive()) {
-            entity->getTransform()->capturePreviousWorldMatrix();
+        if (entity->isActive() && !entity->isEditorOnly()) {
+            entity->OnUpdate(deltaTime);
         }
     }
+}
+
+void Scene::OnFixedUpdate(float deltaTime) {
+    if (!m_IsActive) {
+        return;
+    }
     if (m_PhysicsWorld) {
-        m_PhysicsWorld->update(deltaTime, SceneManager::getInstance().isPlaying());
+        m_PhysicsWorld->update(deltaTime, true);
+    }
+    for (auto& entity : m_Entities) {
+        if (entity->isActive() && !entity->isEditorOnly()) {
+            entity->OnFixedUpdate(deltaTime);
+        }
+    }
+}
+
+void Scene::OnEditorUpdate(float deltaTime) {
+    if (!m_IsActive) {
+        return;
+    }
+    if (m_PhysicsWorld && !SceneManager::getInstance().isPlaying()) {
+        m_PhysicsWorld->update(deltaTime, false);
+    }
+    for (auto& entity : m_Entities) {
+        if (entity->isActive() && entity->isEditorOnly()) {
+            entity->OnEditorUpdate(deltaTime);
+        }
+    }
+}
+
+void Scene::beginFrame() {
+    if (!m_IsActive) {
+        return;
     }
     for (auto& entity : m_Entities) {
         if (entity->isActive()) {
-            entity->OnUpdate(deltaTime);
+            entity->getTransform()->capturePreviousWorldMatrix();
         }
     }
 }

@@ -2,6 +2,7 @@
 
 #include "../ECS/Component.hpp"
 #include "../Math/Math.hpp"
+#include <cstdint>
 
 namespace Crescent {
 
@@ -12,6 +13,16 @@ public:
         Sphere,
         Capsule
     };
+
+    enum class CombineMode {
+        Average = 0,
+        Min = 1,
+        Multiply = 2,
+        Max = 3
+    };
+
+    static constexpr uint32_t kMaxLayers = 32;
+    static constexpr uint32_t kAllLayersMask = 0xFFFFFFFFu;
 
     PhysicsCollider();
     ~PhysicsCollider() override = default;
@@ -42,6 +53,18 @@ public:
     float getRestitution() const { return m_Restitution; }
     void setRestitution(float restitution);
 
+    CombineMode getFrictionCombine() const { return m_FrictionCombine; }
+    void setFrictionCombine(CombineMode mode);
+
+    CombineMode getRestitutionCombine() const { return m_RestitutionCombine; }
+    void setRestitutionCombine(CombineMode mode);
+
+    uint32_t getCollisionLayer() const { return m_CollisionLayer; }
+    void setCollisionLayer(uint32_t layer);
+
+    uint32_t getCollisionMask() const { return m_CollisionMask; }
+    void setCollisionMask(uint32_t mask);
+
     void OnCreate() override;
     void OnDestroy() override;
 
@@ -57,6 +80,10 @@ private:
     bool m_IsTrigger;
     float m_Friction;
     float m_Restitution;
+    CombineMode m_FrictionCombine;
+    CombineMode m_RestitutionCombine;
+    uint32_t m_CollisionLayer;
+    uint32_t m_CollisionMask;
 };
 
 } // namespace Crescent

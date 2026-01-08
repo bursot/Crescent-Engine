@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Scene.hpp"
+#include "../Assets/AssetImportSettings.hpp"
 #include "../Rendering/Mesh.hpp"
 #include "../Rendering/Material.hpp"
 #include "../Components/MeshRenderer.hpp"
@@ -13,18 +14,7 @@ namespace Crescent {
 // Scene editing commands - used by editor
 class SceneCommands {
 public:
-    struct ModelImportOptions {
-        float scale;
-        bool flipUVs;
-        bool onlyLOD0;
-        bool mergeStaticMeshes;
-
-        ModelImportOptions()
-            : scale(1.0f)
-            , flipUVs(false)
-            , onlyLOD0(false)
-            , mergeStaticMeshes(false) {}
-    };
+    using ModelImportOptions = ModelImportSettings;
 
     // Create primitive objects
     static Entity* createCube(Scene* scene, const std::string& name = "Cube");
@@ -49,6 +39,11 @@ public:
 
     // Import a model file (static meshes + materials)
     static Entity* importModel(Scene* scene, const std::string& path, const ModelImportOptions& options = ModelImportOptions(), const std::string& name = "");
+
+    // Reimport assets by GUID (uses stored import settings)
+    static bool reimportModelAsset(Scene* scene, const std::string& guid);
+    static bool reimportTextureAsset(Scene* scene, const std::string& guid);
+    static bool reimportHdriAsset(Scene* scene, const std::string& guid);
     
     // Destroy entities by UUID
     static void destroyEntitiesByUUID(Scene* scene, const std::vector<std::string>& uuids);
@@ -58,6 +53,9 @@ public:
     
     // Get entity by UUID
     static Entity* getEntityByUUID(Scene* scene, const std::string& uuidStr);
+
+    // Parenting (for hierarchy view)
+    static bool setParent(Scene* scene, const std::string& childUuid, const std::string& parentUuid);
 };
 
 } // namespace Crescent

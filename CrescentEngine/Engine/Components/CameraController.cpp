@@ -160,4 +160,8 @@ void CameraController::OnUpdate(float deltaTime) {
     }
 }
 
+void CameraController::OnEditorUpdate(float deltaTime) {
+    OnUpdate(deltaTime);
+}
+
 } // namespace Crescent

@@ -45,7 +45,11 @@ public:
     // Scene lifecycle
     void OnCreate();
     void OnDestroy();
+    void OnStart();
     void OnUpdate(float deltaTime);
+    void OnFixedUpdate(float deltaTime);
+    void OnEditorUpdate(float deltaTime);
+    void beginFrame();
     
     // Scene root entities (entities without parent)
     std::vector<Entity*> getRootEntities() const;

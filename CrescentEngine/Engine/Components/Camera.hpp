@@ -50,6 +50,9 @@ public:
     
     bool getClearDepth() const { return m_ClearDepth; }
     void setClearDepth(bool clear) { m_ClearDepth = clear; }
+
+    bool isEditorCamera() const { return m_IsEditorCamera; }
+    void setEditorCamera(bool editorCamera) { m_IsEditorCamera = editorCamera; }
     
     // Matrices
     Math::Matrix4x4 getProjectionMatrix() const;
@@ -90,6 +93,7 @@ private:
     // Clear settings
     Math::Vector4 m_ClearColor;
     bool m_ClearDepth;
+    bool m_IsEditorCamera;
     
     // Cached matrices
     mutable Math::Matrix4x4 m_ProjectionMatrix;

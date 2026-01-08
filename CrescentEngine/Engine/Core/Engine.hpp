@@ -27,6 +27,12 @@ public:
     
     // Render frame
     void render();
+
+    // Render surfaces
+    void setSceneMetalLayer(void* layer);
+    void setGameMetalLayer(void* layer);
+    void resizeScene(float width, float height);
+    void resizeGame(float width, float height);
     
     // Input handling
     void handleKeyDown(unsigned short keyCode);
@@ -53,6 +59,13 @@ public:
     static Engine& getInstance();
     
 private:
+    struct RenderSurface {
+        void* layer = nullptr;
+        float width = 0.0f;
+        float height = 0.0f;
+        bool isValid() const { return layer && width > 0.0f && height > 0.0f; }
+    };
+
     std::unique_ptr<Renderer> m_renderer;
     bool m_isInitialized;
     
@@ -68,6 +81,9 @@ private:
     bool m_isLeftMouseDown;
     float m_lastMouseX;
     float m_lastMouseY;
+
+    RenderSurface m_sceneSurface;
+    RenderSurface m_gameSurface;
     
     // Singleton instance
     static Engine* s_instance;
