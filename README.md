@@ -2,6 +2,8 @@
 
 A modern, real-time 3D game engine and editor for macOS, built with Metal, C++17/20, and SwiftUI.
 
+<img width="1624" height="1001" alt="Ekran Resmi 2026-01-08 18 48 05" src="https://github.com/user-attachments/assets/44671059-f3dd-4032-8aa0-62fd67162dad" /><img width="1624" height="1001" alt="Ekran Resmi 2026-01-08 18 42 30" src="https://github.com/user-attachments/assets/8312aaac-450a-4b3b-b03e-1a00a18a4fc0" />
+
 ![CrescentEngine](https://github.com/user-attachments/assets/327431a7-0fce-49bc-b799-7cd71ba66d0c)
 
 ## Overview
