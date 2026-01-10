@@ -50,6 +50,7 @@ struct MetalView: NSViewRepresentable {
     
     func updateNSView(_ nsView: MetalDisplayView, context: Context) {
         // Handle view updates - resize if needed
+        context.coordinator.applyMetalLayerIfNeeded()
         if nsView.bounds.size.width > 0 && nsView.bounds.size.height > 0 {
             context.coordinator.handleResize(nsView.bounds.size)
         }
@@ -58,9 +59,7 @@ struct MetalView: NSViewRepresentable {
         nsView.inputDelegate = isActive ? context.coordinator : nil
         context.coordinator.setInputMonitoring(active: isActive)
         if isActive, let window = nsView.window, window.firstResponder !== nsView {
-            DispatchQueue.main.async {
-                window.makeFirstResponder(nsView)
-            }
+            window.makeFirstResponder(nsView)
         }
     }
     
@@ -152,6 +151,16 @@ struct MetalView: NSViewRepresentable {
                 case .game:
                     bridge.resizeGame(withWidth: width, height: height)
                 }
+            }
+        }
+
+        func applyMetalLayerIfNeeded() {
+            guard let bridge = bridge, let metalLayer = metalView?.metalLayer else { return }
+            switch viewKind {
+            case .scene:
+                bridge.setSceneMetalLayer(metalLayer)
+            case .game:
+                bridge.setGameMetalLayer(metalLayer)
             }
         }
         

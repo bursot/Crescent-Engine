@@ -167,48 +167,7 @@ struct EditorToolbar: View {
                 .help("Time Scale")
             }
             
-            // View toggles
             HStack(spacing: 6) {
-                Button(action: {
-                    editorState.showHierarchy.toggle()
-                }) {
-                    Image(systemName: "sidebar.left")
-                        .font(EditorTheme.fontBody)
-                }
-                .buttonStyle(.bordered)
-                .tint(editorState.showHierarchy ? .accentColor : .secondary)
-                .help("Toggle Hierarchy")
-                
-                Button(action: {
-                    editorState.showConsole.toggle()
-                }) {
-                    Image(systemName: "terminal")
-                        .font(EditorTheme.fontBody)
-                }
-                .buttonStyle(.bordered)
-                .tint(editorState.showConsole ? .accentColor : .secondary)
-                .help("Toggle Console")
-                
-                Button(action: {
-                    editorState.showAssets.toggle()
-                }) {
-                    Image(systemName: "tray.full")
-                        .font(EditorTheme.fontBody)
-                }
-                .buttonStyle(.bordered)
-                .tint(editorState.showAssets ? .accentColor : .secondary)
-                .help("Toggle Assets")
-                
-                Button(action: {
-                    editorState.showInspector.toggle()
-                }) {
-                    Image(systemName: "sidebar.right")
-                        .font(EditorTheme.fontBody)
-                }
-                .buttonStyle(.bordered)
-                .tint(editorState.showInspector ? .accentColor : .secondary)
-                .help("Toggle Inspector")
-
                 Button(action: {
                     editorState.settingsWindowRequested = true
                     openWindow(id: "settings")

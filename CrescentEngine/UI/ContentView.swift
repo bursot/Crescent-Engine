@@ -28,30 +28,24 @@ struct ContentView: View {
                 
                 Divider()
                     .overlay(EditorTheme.panelStroke)
-                
-                HSplitView {
-                    if editorState.showHierarchy {
-                        HierarchyPanel(editorState: editorState)
-                            .frame(minWidth: 220, idealWidth: 260, maxWidth: 340)
-                    }
-                    
-                    VSplitView {
+
+                HStack(spacing: 10) {
+                    HierarchyPanel(editorState: editorState)
+                        .frame(width: 260)
+
+                    VStack(spacing: 10) {
                         SceneViewport(editorState: editorState)
                             .frame(minHeight: 320)
                             .layoutPriority(1)
                         
-                        if editorState.showAssets || editorState.showConsole {
-                            DockPanel(editorState: editorState)
-                                .frame(minHeight: 240, idealHeight: 300, maxHeight: 480)
-                                .clipped()
-                        }
+                        DockPanel(editorState: editorState)
+                            .frame(height: 340)
+                            .clipped()
                     }
-                    .frame(minWidth: 560)
-                    
-                    if editorState.showInspector {
-                        InspectorPanel(editorState: editorState)
-                            .frame(minWidth: 260, idealWidth: 320, maxWidth: 460)
-                    }
+                    .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
+
+                    InspectorPanel(editorState: editorState)
+                        .frame(width: 320)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding([.horizontal, .bottom], 10)
@@ -64,6 +58,10 @@ struct ContentView: View {
         .environment(\.colorScheme, .dark)
         .onAppear {
             EditorTheme.isDark = true
+            editorState.showHierarchy = true
+            editorState.showInspector = true
+            editorState.showAssets = true
+            editorState.showConsole = true
             syncDockSelection()
             editorState.refreshProjectInfo()
         }
