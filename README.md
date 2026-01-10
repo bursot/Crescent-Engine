@@ -558,7 +558,9 @@ See `THIRD_PARTY_NOTICES.md` for full attributions.
 ![Scene View](https://github.com/user-attachments/assets/f5b25593-c6cc-4106-845d-795bf60e95cf)
 ![Inspector](https://github.com/user-attachments/assets/93e7e722-b712-44dc-b601-b63545284a53)
 ![Asset Browser](https://github.com/user-attachments/assets/93e7e722-b712-44dc-b601-b63545284a53)
-![Animation](https://github.com/user-attachments/assets/5a966dd5-6295-4298-86c6-15bf35c8661f)
+
+## Demo Video
+[![Video: 5NDLy1gafPQ](https://img.youtube.com/vi/5NDLy1gafPQ/0.jpg)](https://www.youtube.com/watch?v=5NDLy1gafPQ)
 
 ---
 
