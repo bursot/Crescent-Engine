@@ -69,6 +69,9 @@ struct MetalView: NSViewRepresentable {
         var bridge: CrescentEngineBridge?
         var metalView: MetalDisplayView?
         private var displayLink: Any? // Can be CVDisplayLink or CADisplayLink
+        private weak var lastAppliedMetalLayer: CAMetalLayer?
+        private var lastDrawableWidth: Float = 0
+        private var lastDrawableHeight: Float = 0
         private var lastTime: CFTimeInterval = 0
         private var isEngineInitialized = false
         private let viewKind: RenderViewKind
@@ -114,6 +117,7 @@ struct MetalView: NSViewRepresentable {
                     case .game:
                         bridge.setGameMetalLayer(metalLayer)
                     }
+                    lastAppliedMetalLayer = metalLayer
                 }
                 
                 self.bridge = bridge
@@ -144,18 +148,28 @@ struct MetalView: NSViewRepresentable {
             let width = Float(drawableSize.width > 0 ? drawableSize.width : size.width * scale)
             let height = Float(drawableSize.height > 0 ? drawableSize.height : size.height * scale)
 
-            if width > 0 && height > 0 {
-                switch viewKind {
-                case .scene:
-                    bridge.resizeScene(withWidth: width, height: height)
-                case .game:
-                    bridge.resizeGame(withWidth: width, height: height)
-                }
+            guard width > 0 && height > 0 else { return }
+            if abs(width - lastDrawableWidth) < 0.5, abs(height - lastDrawableHeight) < 0.5 {
+                return
+            }
+            lastDrawableWidth = width
+            lastDrawableHeight = height
+            switch viewKind {
+            case .scene:
+                bridge.resizeScene(withWidth: width, height: height)
+            case .game:
+                bridge.resizeGame(withWidth: width, height: height)
             }
         }
 
         func applyMetalLayerIfNeeded() {
             guard let bridge = bridge, let metalLayer = metalView?.metalLayer else { return }
+            if lastAppliedMetalLayer === metalLayer {
+                return
+            }
+            lastAppliedMetalLayer = metalLayer
+            lastDrawableWidth = 0
+            lastDrawableHeight = 0
             switch viewKind {
             case .scene:
                 bridge.setSceneMetalLayer(metalLayer)
@@ -209,6 +223,7 @@ struct MetalView: NSViewRepresentable {
         }
         
         deinit {
+            removeInputMonitors()
             if #available(macOS 15.0, *) {
                 if let link = displayLink as? CADisplayLink {
                     link.invalidate()

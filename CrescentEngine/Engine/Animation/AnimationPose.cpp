@@ -72,12 +72,13 @@ static Math::Vector3 SampleVectorKeys(const std::vector<VectorKeyframe>& keys,
     if (time >= keys.back().time) {
         return keys.back().value;
     }
+    auto upper = std::upper_bound(keys.begin(), keys.end(), time,
+                                  [](float value, const VectorKeyframe& key) {
+                                      return value < key.time;
+                                  });
     size_t index = 0;
-    for (size_t i = 0; i + 1 < keys.size(); ++i) {
-        if (time < keys[i + 1].time) {
-            index = i;
-            break;
-        }
+    if (upper != keys.begin()) {
+        index = static_cast<size_t>(std::distance(keys.begin(), upper) - 1);
     }
     const auto& a = keys[index];
     const auto& b = keys[index + 1];
@@ -101,12 +102,13 @@ static Math::Quaternion SampleRotationKeys(const std::vector<QuaternionKeyframe>
     if (time >= keys.back().time) {
         return keys.back().value;
     }
+    auto upper = std::upper_bound(keys.begin(), keys.end(), time,
+                                  [](float value, const QuaternionKeyframe& key) {
+                                      return value < key.time;
+                                  });
     size_t index = 0;
-    for (size_t i = 0; i + 1 < keys.size(); ++i) {
-        if (time < keys[i + 1].time) {
-            index = i;
-            break;
-        }
+    if (upper != keys.begin()) {
+        index = static_cast<size_t>(std::distance(keys.begin(), upper) - 1);
     }
     const auto& a = keys[index];
     const auto& b = keys[index + 1];
@@ -201,6 +203,7 @@ void BuildSkinMatrices(const Skeleton& skeleton,
         outMatrices.clear();
         return;
     }
+    const Math::Matrix4x4& globalInverse = skeleton.getGlobalInverse();
 
     std::vector<Math::Matrix4x4> localPose(boneCount);
     std::vector<Math::Matrix4x4> globalPose(boneCount);
@@ -221,7 +224,7 @@ void BuildSkinMatrices(const Skeleton& skeleton,
 
     outMatrices.resize(boneCount);
     for (size_t i = 0; i < boneCount; ++i) {
-        outMatrices[i] = globalPose[i] * bones[i].inverseBind;
+        outMatrices[i] = globalInverse * globalPose[i] * bones[i].inverseBind;
     }
 }
 

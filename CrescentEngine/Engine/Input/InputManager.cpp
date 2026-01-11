@@ -70,6 +70,7 @@ KeyCode InputManager::stringToKeyCode(const std::string& keyString) {
     if (keyString == "d" || keyString == "D") return KeyCode::D;
     if (keyString == "q" || keyString == "Q") return KeyCode::Q;
     if (keyString == "e" || keyString == "E") return KeyCode::E;
+    if (keyString == "r" || keyString == "R") return KeyCode::R;
     if (keyString == " " || keyString == "Space" || keyString == "space") return KeyCode::Space;
     if (keyString == "Shift" || keyString == "shift") return KeyCode::Shift;
     if (keyString == "Control" || keyString == "control" || keyString == "Ctrl" || keyString == "ctrl") return KeyCode::Control;

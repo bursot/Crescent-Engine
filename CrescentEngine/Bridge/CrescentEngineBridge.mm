@@ -12,6 +12,7 @@
 #include "../Engine/Components/PhysicsCollider.hpp"
 #include "../Engine/Components/CharacterController.hpp"
 #include "../Engine/Components/FirstPersonController.hpp"
+#include "../Engine/Components/AudioSource.hpp"
 #include "../Engine/ECS/Transform.hpp"
 #include "../Engine/Assets/AssetDatabase.hpp"
 #include "../Engine/Animation/AnimationClip.hpp"
@@ -62,6 +63,20 @@ static Animator* GetAnimatorByUUID(const std::string& entityUUID) {
     return entity->getComponent<Animator>();
 }
 
+static Animator* FindAnimatorInParents(Entity* entity) {
+    Transform* current = entity ? entity->getTransform() : nullptr;
+    while (current) {
+        Entity* currentEntity = current->getEntity();
+        if (currentEntity) {
+            if (auto* animator = currentEntity->getComponent<Animator>()) {
+                return animator;
+            }
+        }
+        current = current->getParent();
+    }
+    return nullptr;
+}
+
 static IKConstraint* GetIKByUUID(const std::string& entityUUID) {
     Scene* scene = SceneManager::getInstance().getActiveScene();
     if (!scene) return nullptr;
@@ -103,14 +118,18 @@ static bool ResolveAnimatorAndSkinned(const std::string& uuid,
                                       SkinnedMeshRenderer*& outSkinned) {
     outAnimator = GetAnimatorByUUID(uuid);
     if (!outAnimator) {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, uuid) : nullptr;
+        outAnimator = FindAnimatorInParents(entity);
+    }
+    if (!outAnimator) {
         outSkinned = GetSkinnedByUUID(uuid);
         return outSkinned != nullptr;
     }
     outSkinned = GetSkinnedByUUID(uuid);
     if (!outSkinned) {
-        Scene* scene = SceneManager::getInstance().getActiveScene();
-        Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, uuid) : nullptr;
-        outSkinned = FindSkinnedInHierarchy(entity, outAnimator);
+        Entity* animatorEntity = outAnimator->getEntity();
+        outSkinned = FindSkinnedInHierarchy(animatorEntity, outAnimator);
     }
     return outSkinned != nullptr;
 }
@@ -1914,15 +1933,11 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
 // MARK: - Skinned Mesh / Animation
 
 - (NSDictionary *)getSkinnedMeshInfo:(NSString *)uuid {
-    Animator* animator = GetAnimatorByUUID(uuid.UTF8String);
-    if (!animator) return @{};
-    SkinnedMeshRenderer* skinned = GetSkinnedByUUID(uuid.UTF8String);
-    if (!skinned) {
-        Scene* scene = SceneManager::getInstance().getActiveScene();
-        Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, uuid.UTF8String) : nullptr;
-        skinned = FindSkinnedInHierarchy(entity, animator);
+    Animator* animator = nullptr;
+    SkinnedMeshRenderer* skinned = nullptr;
+    if (!ResolveAnimatorAndSkinned(uuid.UTF8String, animator, skinned) || !skinned) {
+        return @{};
     }
-    if (!skinned) return @{};
     
     NSMutableArray* clipNames = [NSMutableArray array];
     const auto& clips = skinned->getAnimationClips();
@@ -1992,15 +2007,11 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
 }
 
 - (BOOL)setSkinnedMeshInfo:(NSString *)uuid info:(NSDictionary *)info {
-    Animator* animator = GetAnimatorByUUID(uuid.UTF8String);
-    if (!animator) return NO;
-    SkinnedMeshRenderer* skinned = GetSkinnedByUUID(uuid.UTF8String);
-    if (!skinned) {
-        Scene* scene = SceneManager::getInstance().getActiveScene();
-        Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, uuid.UTF8String) : nullptr;
-        skinned = FindSkinnedInHierarchy(entity, animator);
+    Animator* animator = nullptr;
+    SkinnedMeshRenderer* skinned = nullptr;
+    if (!ResolveAnimatorAndSkinned(uuid.UTF8String, animator, skinned) || !skinned) {
+        return NO;
     }
-    if (!skinned) return NO;
     
     bool appliedState = false;
     if (animator) {
@@ -2789,7 +2800,11 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
         @"crouchSpeed": @(controller->getCrouchSpeed()),
         @"eyeHeight": @(controller->getEyeHeight()),
         @"useEyeHeight": @(controller->getUseEyeHeight()),
-        @"driveCharacterController": @(controller->getDriveCharacterController())
+        @"driveCharacterController": @(controller->getDriveCharacterController()),
+        @"fireCooldown": @(controller->getFireCooldown()),
+        @"muzzleTexture": controller->getMuzzleTexturePath().empty()
+            ? @""
+            : [NSString stringWithUTF8String: controller->getMuzzleTexturePath().c_str()]
     };
 }
 
@@ -2851,6 +2866,12 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
     if (NSNumber* value = info[@"driveCharacterController"]) {
         controller->setDriveCharacterController(value.boolValue);
     }
+    if (NSNumber* value = info[@"fireCooldown"]) {
+        controller->setFireCooldown(value.floatValue);
+    }
+    if (NSString* value = info[@"muzzleTexture"]) {
+        controller->setMuzzleTexturePath(value.UTF8String);
+    }
     return YES;
 }
 
@@ -2871,6 +2892,90 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
     Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
     if (!entity) return;
     entity->removeComponent<FirstPersonController>();
+}
+
+- (NSDictionary *)getAudioSourceInfo:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return @{};
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return @{};
+    AudioSource* audio = entity->getComponent<AudioSource>();
+    if (!audio) return @{};
+    NSString* path = audio->getFilePath().empty() ? @"" : [NSString stringWithUTF8String: audio->getFilePath().c_str()];
+    return @{
+        @"filePath": path,
+        @"volume": @(audio->getVolume()),
+        @"pitch": @(audio->getPitch()),
+        @"looping": @(audio->isLooping()),
+        @"playOnStart": @(audio->getPlayOnStart()),
+        @"spatial": @(audio->isSpatial()),
+        @"stream": @(audio->isStreaming()),
+        @"minDistance": @(audio->getMinDistance()),
+        @"maxDistance": @(audio->getMaxDistance()),
+        @"rolloff": @(audio->getRolloff())
+    };
+}
+
+- (BOOL)setAudioSourceInfo:(NSString *)uuid info:(NSDictionary *)info {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene || !info) return NO;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return NO;
+    AudioSource* audio = entity->getComponent<AudioSource>();
+    if (!audio) {
+        audio = entity->addComponent<AudioSource>();
+    }
+
+    if (NSString* path = info[@"filePath"]) {
+        audio->setFilePath(path.UTF8String);
+    }
+    if (NSNumber* volume = info[@"volume"]) {
+        audio->setVolume(volume.floatValue);
+    }
+    if (NSNumber* pitch = info[@"pitch"]) {
+        audio->setPitch(pitch.floatValue);
+    }
+    if (NSNumber* looping = info[@"looping"]) {
+        audio->setLooping(looping.boolValue);
+    }
+    if (NSNumber* playOnStart = info[@"playOnStart"]) {
+        audio->setPlayOnStart(playOnStart.boolValue);
+    }
+    if (NSNumber* spatial = info[@"spatial"]) {
+        audio->setSpatial(spatial.boolValue);
+    }
+    if (NSNumber* stream = info[@"stream"]) {
+        audio->setStreaming(stream.boolValue);
+    }
+    if (NSNumber* minDistance = info[@"minDistance"]) {
+        audio->setMinDistance(minDistance.floatValue);
+    }
+    if (NSNumber* maxDistance = info[@"maxDistance"]) {
+        audio->setMaxDistance(maxDistance.floatValue);
+    }
+    if (NSNumber* rolloff = info[@"rolloff"]) {
+        audio->setRolloff(rolloff.floatValue);
+    }
+    return YES;
+}
+
+- (BOOL)addAudioSource:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return NO;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return NO;
+    if (!entity->getComponent<AudioSource>()) {
+        entity->addComponent<AudioSource>();
+    }
+    return YES;
+}
+
+- (void)removeAudioSource:(NSString *)uuid {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return;
+    Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+    if (!entity) return;
+    entity->removeComponent<AudioSource>();
 }
 
 - (BOOL)getPhysicsDebugDraw {

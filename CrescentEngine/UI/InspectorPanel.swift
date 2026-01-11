@@ -31,6 +31,7 @@ struct InspectorPanel: View {
                     let animationSection = AnimationInspectorSection(uuid: selectedEntity.uuid)
                     let decalSection = DecalInspectorSection(uuid: selectedEntity.uuid)
                     let physicsSection = PhysicsInspectorSection(uuid: selectedEntity.uuid)
+                    let audioSection = AudioInspectorSection(uuid: selectedEntity.uuid)
                     VStack(alignment: .leading, spacing: 14) {
                         InspectorSummaryCard(
                             entityUUID: selectedEntity.uuid,
@@ -54,6 +55,10 @@ struct InspectorPanel: View {
 
                         if let physicsView = physicsSection {
                             physicsView
+                        }
+
+                        if let audioView = audioSection {
+                            audioView
                         }
                         
                         if let animationView = animationSection {
@@ -240,6 +245,14 @@ func PhysicsInspectorSection(uuid: String) -> AnyView? {
     return AnyView(
         ComponentSection(title: "Physics", icon: "atom") {
             PhysicsInspector(entityUUID: uuid)
+        }
+    )
+}
+
+func AudioInspectorSection(uuid: String) -> AnyView? {
+    return AnyView(
+        ComponentSection(title: "Audio", icon: "speaker.wave.2.fill") {
+            AudioInspector(entityUUID: uuid)
         }
     )
 }
@@ -852,11 +865,17 @@ struct PhysicsInspector: View {
     @State private var fpsEyeHeight: Float = 1.6
     @State private var fpsUseEyeHeight: Bool = true
     @State private var fpsDriveCharacter: Bool = true
+    @State private var fpsFireCooldown: Float = 0.12
+    @State private var fpsMuzzleTexturePath: String = ""
+    @State private var showMuzzleFileImporter: Bool = false
 
     private let timer = Timer.publish(every: 0.8, on: .main, in: .common).autoconnect()
     private let bodyTypes = ["Static", "Dynamic", "Kinematic"]
     private let shapeTypes = ["Box", "Sphere", "Capsule"]
     private let combineModes = ["Average", "Min", "Multiply", "Max"]
+    private let textureExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "tga", "bmp", "gif", "tif", "tiff", "ktx", "ktx2", "dds", "cube"
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -880,6 +899,14 @@ struct PhysicsInspector: View {
             firstPersonControllerSection
         }
         .onAppear { refresh() }
+        .fileImporter(isPresented: $showMuzzleFileImporter, allowedContentTypes: [.image]) { result in
+            switch result {
+            case .success(let url):
+                applyMuzzleTextureURL(url)
+            case .failure(let error):
+                print("Muzzle texture import failed: \(error.localizedDescription)")
+            }
+        }
         .onReceive(timer) { _ in refresh() }
     }
 
@@ -1293,6 +1320,20 @@ struct PhysicsInspector: View {
                 SliderRow(title: "Sprint Multiplier", value: $fpsSprintMultiplier, range: 1...3, step: 0.05) { _ in
                     pushFirstPersonController()
                 }
+                SliderRow(title: "Fire Cooldown", value: $fpsFireCooldown, range: 0...0.5, step: 0.01) { _ in
+                    pushFirstPersonController()
+                }
+                TextureSlotRow(
+                    title: "Muzzle Texture",
+                    path: fpsMuzzleTexturePath
+                ) {
+                    showMuzzleFileImporter = true
+                } onDrop: { url in
+                    applyMuzzleTextureURL(url)
+                } onClear: {
+                    fpsMuzzleTexturePath = ""
+                    pushFirstPersonController()
+                }
 
                 Toggle("Enable Sprint", isOn: Binding(
                     get: { fpsEnableSprint },
@@ -1427,6 +1468,8 @@ struct PhysicsInspector: View {
             fpsEyeHeight = (info["eyeHeight"] as? NSNumber)?.floatValue ?? fpsEyeHeight
             fpsUseEyeHeight = (info["useEyeHeight"] as? NSNumber)?.boolValue ?? fpsUseEyeHeight
             fpsDriveCharacter = (info["driveCharacterController"] as? NSNumber)?.boolValue ?? fpsDriveCharacter
+            fpsFireCooldown = (info["fireCooldown"] as? NSNumber)?.floatValue ?? fpsFireCooldown
+            fpsMuzzleTexturePath = info["muzzleTexture"] as? String ?? fpsMuzzleTexturePath
         } else {
             hasFpsController = false
         }
@@ -1523,7 +1566,9 @@ struct PhysicsInspector: View {
             "crouchSpeed": fpsCrouchSpeed,
             "eyeHeight": fpsEyeHeight,
             "useEyeHeight": fpsUseEyeHeight,
-            "driveCharacterController": fpsDriveCharacter
+            "driveCharacterController": fpsDriveCharacter,
+            "fireCooldown": fpsFireCooldown,
+            "muzzleTexture": fpsMuzzleTexturePath
         ]
         _ = CrescentEngineBridge.shared().setFirstPersonControllerInfo(uuid: entityUUID, info: info)
     }
@@ -1531,6 +1576,273 @@ struct PhysicsInspector: View {
     private func removeFirstPersonController() {
         CrescentEngineBridge.shared().removeFirstPersonController(uuid: entityUUID)
         hasFpsController = false
+    }
+
+    private func applyMuzzleTextureURL(_ url: URL) {
+        var resolvedURL = url
+        let accessed = resolvedURL.startAccessingSecurityScopedResource()
+        if accessed {
+            resolvedURL = resolvedURL.standardizedFileURL
+        }
+
+        defer {
+            if accessed {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let ext = resolvedURL.pathExtension.lowercased()
+        if !textureExtensions.contains(ext) {
+            print("Unsupported muzzle texture type: \(resolvedURL.lastPathComponent)")
+            return
+        }
+
+        var path = resolvedURL.path
+        let imported = CrescentEngineBridge.shared().importAsset(path: path, type: "texture")
+        if !imported.isEmpty {
+            path = imported
+        }
+
+        fpsMuzzleTexturePath = path
+        pushFirstPersonController()
+    }
+}
+
+struct AudioInspector: View {
+    let entityUUID: String
+
+    @State private var hasAudioSource: Bool = false
+    @State private var audioPath: String = ""
+    @State private var volume: Float = 1.0
+    @State private var pitch: Float = 1.0
+    @State private var looping: Bool = false
+    @State private var playOnStart: Bool = false
+    @State private var spatial: Bool = true
+    @State private var stream: Bool = false
+    @State private var minDistance: Float = 1.0
+    @State private var maxDistance: Float = 50.0
+    @State private var rolloff: Float = 1.0
+    @State private var showFileImporter: Bool = false
+    @State private var isDropping: Bool = false
+
+    private let audioExtensions = ["wav", "mp3", "ogg", "flac"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Audio Source")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                if hasAudioSource {
+                    Button(action: removeAudioSource) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if !hasAudioSource {
+                Button("Add Audio Source") {
+                    let _ = CrescentEngineBridge.shared().addAudioSource(uuid: entityUUID)
+                    refresh()
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Clip")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                        Spacer()
+                        Button("Load") {
+                            showFileImporter = true
+                        }
+                        .buttonStyle(.borderless)
+                        Button("Clear") {
+                            audioPath = ""
+                            pushAudioSource()
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.red.opacity(0.9))
+                    }
+                    Text(audioPath.isEmpty ? "No clip assigned" : audioPath)
+                        .font(EditorTheme.mono(size: 10))
+                        .foregroundColor(audioPath.isEmpty ? EditorTheme.textMuted : EditorTheme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .padding(8)
+                .background(EditorTheme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(isDropping ? EditorTheme.textAccent : EditorTheme.panelStroke, lineWidth: 1)
+                )
+                .cornerRadius(6)
+                .onDrop(of: [UTType.fileURL], isTargeted: $isDropping) { providers in
+                    for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                            DispatchQueue.main.async {
+                                if let data = item as? Data,
+                                   let url = URL(dataRepresentation: data, relativeTo: nil) {
+                                    applyAudioURL(url)
+                                } else if let url = item as? URL {
+                                    applyAudioURL(url)
+                                }
+                            }
+                        }
+                    }
+                    return true
+                }
+
+                SliderRow(title: "Volume", value: $volume, range: 0...2, step: 0.01) { _ in
+                    pushAudioSource()
+                }
+                SliderRow(title: "Pitch", value: $pitch, range: 0.5...2, step: 0.01) { _ in
+                    pushAudioSource()
+                }
+
+                Toggle("Loop", isOn: Binding(
+                    get: { looping },
+                    set: { newVal in
+                        looping = newVal
+                        pushAudioSource()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Play On Start", isOn: Binding(
+                    get: { playOnStart },
+                    set: { newVal in
+                        playOnStart = newVal
+                        pushAudioSource()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("3D Spatial", isOn: Binding(
+                    get: { spatial },
+                    set: { newVal in
+                        spatial = newVal
+                        pushAudioSource()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Stream From Disk", isOn: Binding(
+                    get: { stream },
+                    set: { newVal in
+                        stream = newVal
+                        pushAudioSource()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                if spatial {
+                    SliderRow(title: "Min Distance", value: $minDistance, range: 0.1...50, step: 0.1) { _ in
+                        minDistance = min(minDistance, maxDistance)
+                        pushAudioSource()
+                    }
+                    SliderRow(title: "Max Distance", value: $maxDistance, range: 0.1...200, step: 0.5) { _ in
+                        maxDistance = max(minDistance, maxDistance)
+                        pushAudioSource()
+                    }
+                    SliderRow(title: "Rolloff", value: $rolloff, range: 0...4, step: 0.05) { _ in
+                        pushAudioSource()
+                    }
+                }
+            }
+        }
+        .onAppear { refresh() }
+        .onChange(of: entityUUID) { _ in refresh() }
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.audio]) { result in
+            handleAudioImport(result)
+        }
+    }
+
+    private func refresh() {
+        let bridge = CrescentEngineBridge.shared()
+        if let info = bridge.getAudioSourceInfo(uuid: entityUUID) as? [String: Any],
+           !info.isEmpty {
+            hasAudioSource = true
+            audioPath = info["filePath"] as? String ?? audioPath
+            volume = (info["volume"] as? NSNumber)?.floatValue ?? volume
+            pitch = (info["pitch"] as? NSNumber)?.floatValue ?? pitch
+            looping = (info["looping"] as? NSNumber)?.boolValue ?? looping
+            playOnStart = (info["playOnStart"] as? NSNumber)?.boolValue ?? playOnStart
+            spatial = (info["spatial"] as? NSNumber)?.boolValue ?? spatial
+            stream = (info["stream"] as? NSNumber)?.boolValue ?? stream
+            minDistance = (info["minDistance"] as? NSNumber)?.floatValue ?? minDistance
+            maxDistance = (info["maxDistance"] as? NSNumber)?.floatValue ?? maxDistance
+            rolloff = (info["rolloff"] as? NSNumber)?.floatValue ?? rolloff
+        } else {
+            hasAudioSource = false
+            audioPath = ""
+            volume = 1.0
+            pitch = 1.0
+            looping = false
+            playOnStart = false
+            spatial = true
+            stream = false
+            minDistance = 1.0
+            maxDistance = 50.0
+            rolloff = 1.0
+        }
+    }
+
+    private func pushAudioSource() {
+        let info: [String: Any] = [
+            "filePath": audioPath,
+            "volume": volume,
+            "pitch": pitch,
+            "looping": looping,
+            "playOnStart": playOnStart,
+            "spatial": spatial,
+            "stream": stream,
+            "minDistance": minDistance,
+            "maxDistance": maxDistance,
+            "rolloff": rolloff
+        ]
+        _ = CrescentEngineBridge.shared().setAudioSourceInfo(uuid: entityUUID, info: info)
+    }
+
+    private func removeAudioSource() {
+        CrescentEngineBridge.shared().removeAudioSource(uuid: entityUUID)
+        hasAudioSource = false
+    }
+
+    private func handleAudioImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            applyAudioURL(url)
+        case .failure(let error):
+            print("Audio import failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func applyAudioURL(_ url: URL) {
+        var resolvedURL = url
+        let accessed = resolvedURL.startAccessingSecurityScopedResource()
+        if accessed {
+            resolvedURL = resolvedURL.standardizedFileURL
+        }
+
+        defer {
+            if accessed {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let ext = resolvedURL.pathExtension.lowercased()
+        if !audioExtensions.contains(ext) {
+            print("Unsupported audio type: \(resolvedURL.lastPathComponent)")
+            return
+        }
+
+        var path = resolvedURL.path
+        let imported = CrescentEngineBridge.shared().importAsset(path: path, type: "audio")
+        if !imported.isEmpty {
+            path = imported
+        }
+
+        audioPath = path
+        pushAudioSource()
     }
 }
 

@@ -170,6 +170,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setFirstPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setFirstPersonControllerInfo(uuid:info:));
 - (BOOL)addFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(addFirstPersonController(uuid:));
 - (void)removeFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(removeFirstPersonController(uuid:));
+- (NSDictionary *)getAudioSourceInfo:(NSString *)uuid NS_SWIFT_NAME(getAudioSourceInfo(uuid:));
+- (BOOL)setAudioSourceInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setAudioSourceInfo(uuid:info:));
+- (BOOL)addAudioSource:(NSString *)uuid NS_SWIFT_NAME(addAudioSource(uuid:));
+- (void)removeAudioSource:(NSString *)uuid NS_SWIFT_NAME(removeAudioSource(uuid:));
 - (BOOL)getPhysicsDebugDraw NS_SWIFT_NAME(getPhysicsDebugDraw());
 - (void)setPhysicsDebugDraw:(BOOL)enabled NS_SWIFT_NAME(setPhysicsDebugDraw(enabled:));
 

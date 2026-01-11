@@ -35,6 +35,8 @@ public:
     uint32_t getBoneCount() const { return static_cast<uint32_t>(m_Bones.size()); }
     uint32_t getRootIndex() const { return m_RootIndex; }
     void setRootIndex(uint32_t index) { m_RootIndex = index; }
+    const Math::Matrix4x4& getGlobalInverse() const { return m_GlobalInverse; }
+    void setGlobalInverse(const Math::Matrix4x4& inverse) { m_GlobalInverse = inverse; }
 
     const std::vector<Bone>& getBones() const { return m_Bones; }
     const Bone* getBone(uint32_t index) const;
@@ -44,6 +46,7 @@ private:
     std::vector<Bone> m_Bones;
     std::unordered_map<std::string, uint32_t> m_BoneLookup;
     uint32_t m_RootIndex;
+    Math::Matrix4x4 m_GlobalInverse;
 };
 
 } // namespace Crescent

@@ -19,6 +19,7 @@ struct AssetInfo: Identifiable, Hashable {
         case model
         case texture
         case hdri
+        case audio
         case material
         case scene
     }
@@ -722,6 +723,9 @@ class EditorState: ObservableObject {
     }
 
     func setViewMode(_ mode: ViewMode) {
+        if viewMode == mode {
+            return
+        }
         viewMode = mode
         CrescentEngineBridge.shared().setViewMode(Int32(mode.rawValue))
     }
@@ -853,6 +857,9 @@ class EditorState: ObservableObject {
         if textureExtensions.contains(ext) {
             return .texture
         }
+        if audioExtensions.contains(ext) {
+            return .audio
+        }
         if sceneExtensions.contains(ext) {
             return .scene
         }
@@ -882,6 +889,10 @@ class EditorState: ObservableObject {
     
     private let hdriExtensions: Set<String> = [
         "hdr", "exr"
+    ]
+
+    private let audioExtensions: Set<String> = [
+        "wav", "mp3", "ogg", "flac"
     ]
 
     private let sceneExtensions: Set<String> = [

@@ -352,6 +352,9 @@ struct ViewportPanel: View {
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .onTapGesture {
+                    if editorState.isPlaying {
+                        return
+                    }
                     switch viewKind {
                     case .scene:
                         editorState.setViewMode(.scene)

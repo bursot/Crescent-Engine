@@ -113,6 +113,7 @@ void SceneManager::update(float deltaTime) {
     if (!m_ActiveScene) {
         return;
     }
+    deltaTime = std::max(0.0f, std::min(deltaTime, 0.1f));
 
     Camera::setMainCamera(findPreferredCamera(m_ActiveScene, m_ViewMode == ViewMode::Scene));
     m_ActiveScene->beginFrame();
@@ -135,6 +136,10 @@ void SceneManager::update(float deltaTime) {
             fixedStep = physics->getFixedTimeStep();
         }
         m_FixedAccumulator += Time::deltaTime();
+        float maxAccumulator = fixedStep * 4.0f;
+        if (m_FixedAccumulator > maxAccumulator) {
+            m_FixedAccumulator = maxAccumulator;
+        }
         int steps = 0;
         while (m_FixedAccumulator >= fixedStep && steps < 8) {
             m_ActiveScene->OnFixedUpdate(fixedStep);

@@ -7,7 +7,7 @@
 namespace Crescent {
 
 enum class KeyCode {
-    W, A, S, D, Q, E,
+    W, A, S, D, Q, E, R,
     Shift, Control, Alt, Command,
     Space, Escape,
     Up, Down, Left, Right,

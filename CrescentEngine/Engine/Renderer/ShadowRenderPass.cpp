@@ -11,6 +11,12 @@
 #include <array>
 #include <cstring>
 
+namespace {
+constexpr bool kShadowDebug = false;
+}
+
+#define SHADOW_DEBUG_LOG(expr) do { if (kShadowDebug) { std::cout << expr << std::endl; } } while (0)
+
 namespace Crescent {
 
 namespace {
@@ -186,21 +192,21 @@ void ShadowRenderPass::execute(MTL::CommandBuffer* cmdBuffer,
 void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* scene, const LightingSystem& lighting) {
     const auto& cascades = lighting.getCascades();
     if (cascades.empty()) {
-        std::cout << "[SHADOW DEBUG] No cascades!" << std::endl;
+        SHADOW_DEBUG_LOG("[SHADOW DEBUG] No cascades!");
         return;
     }
     
-    std::cout << "[SHADOW DEBUG] Rendering " << cascades.size() << " cascades" << std::endl;
+    SHADOW_DEBUG_LOG("[SHADOW DEBUG] Rendering " << cascades.size() << " cascades");
     
     for (size_t i = 0; i < cascades.size(); ++i) {
         const auto& slice = cascades[i];
         if (!slice.atlas.valid) {
-            std::cout << "[SHADOW DEBUG] Cascade " << i << " atlas invalid!" << std::endl;
+            SHADOW_DEBUG_LOG("[SHADOW DEBUG] Cascade " << i << " atlas invalid!");
             continue;
         }
         
-        std::cout << "[SHADOW DEBUG] Cascade " << i << " atlas: x=" << slice.atlas.x 
-                  << " y=" << slice.atlas.y << " size=" << slice.atlas.size << std::endl;
+        SHADOW_DEBUG_LOG("[SHADOW DEBUG] Cascade " << i << " atlas: x=" << slice.atlas.x
+                         << " y=" << slice.atlas.y << " size=" << slice.atlas.size);
         
         MTL::RenderPassDescriptor* rp = MTL::RenderPassDescriptor::alloc()->init();
         rp->depthAttachment()->setTexture(m_shadowAtlas);
@@ -226,16 +232,16 @@ void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* s
             MeshRenderer* mr = e->getComponent<MeshRenderer>();
             if (!mr || !mr->isEnabled()) continue;
             if (!mr->getCastShadows()) {
-                std::cout << "[SHADOW DEBUG] Entity '" << e->getName() << "' doesn't cast shadows" << std::endl;
+                SHADOW_DEBUG_LOG("[SHADOW DEBUG] Entity '" << e->getName() << "' doesn't cast shadows");
                 continue;
             }
             std::shared_ptr<Mesh> mesh = mr->getMesh();
             if (!mesh) {
-                std::cout << "[SHADOW DEBUG] Entity '" << e->getName() << "' has no mesh" << std::endl;
+                SHADOW_DEBUG_LOG("[SHADOW DEBUG] Entity '" << e->getName() << "' has no mesh");
                 continue;
             }
             if (!mesh->isUploaded()) {
-                std::cout << "[SHADOW DEBUG] Entity '" << e->getName() << "' mesh not uploaded" << std::endl;
+                SHADOW_DEBUG_LOG("[SHADOW DEBUG] Entity '" << e->getName() << "' mesh not uploaded");
                 continue;
             }
             
@@ -282,7 +288,7 @@ void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* s
                                        0);
         }
         
-        std::cout << "[SHADOW DEBUG] Cascade " << i << " rendered " << meshCount << " meshes" << std::endl;
+        SHADOW_DEBUG_LOG("[SHADOW DEBUG] Cascade " << i << " rendered " << meshCount << " meshes");
         
         enc->endEncoding();
         rp->release();
@@ -295,7 +301,7 @@ void ShadowRenderPass::renderLocal(MTL::CommandBuffer* cmdBuffer, Scene* scene, 
     const auto& tiles = lighting.getShadowAtlas().getTiles();
     (void)tiles; // reserved for debugging
     
-    std::cout << "[SHADOW DEBUG] renderLocal: " << lights.size() << " lights, " << shadows.size() << " shadows" << std::endl;
+    SHADOW_DEBUG_LOG("[SHADOW DEBUG] renderLocal: " << lights.size() << " lights, " << shadows.size() << " shadows");
     
     for (size_t i = 0; i < lights.size(); ++i) {
         const LightGPUData& lgpu = lights[i];
@@ -308,7 +314,7 @@ void ShadowRenderPass::renderLocal(MTL::CommandBuffer* cmdBuffer, Scene* scene, 
             continue; // point handled in renderPointCubes
         }
         
-        std::cout << "[SHADOW DEBUG] Light " << i << " type=" << type << " shadowIdx=" << shadowIdx << std::endl;
+        SHADOW_DEBUG_LOG("[SHADOW DEBUG] Light " << i << " type=" << type << " shadowIdx=" << shadowIdx);
         
         MTL::RenderPipelineState* pipeline = nullptr;
         switch (type) {
@@ -344,11 +350,11 @@ void ShadowRenderPass::renderLightRange(MTL::CommandBuffer* cmdBuffer,
                                         MTL::RenderPipelineState* pipeline,
                                         MTL::RenderPipelineState* pipelineSkinned) {
     if (!tile.valid || !pipeline) {
-        std::cout << "[SHADOW DEBUG] renderLightRange: tile invalid or no pipeline" << std::endl;
+        SHADOW_DEBUG_LOG("[SHADOW DEBUG] renderLightRange: tile invalid or no pipeline");
         return;
     }
     
-    std::cout << "[SHADOW DEBUG] renderLightRange: tile x=" << tile.x << " y=" << tile.y << " size=" << tile.size << std::endl;
+    SHADOW_DEBUG_LOG("[SHADOW DEBUG] renderLightRange: tile x=" << tile.x << " y=" << tile.y << " size=" << tile.size);
     
     MTL::RenderPassDescriptor* rp = MTL::RenderPassDescriptor::alloc()->init();
     rp->depthAttachment()->setTexture(m_shadowAtlas);

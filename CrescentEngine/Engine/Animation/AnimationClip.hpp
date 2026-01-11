@@ -66,6 +66,7 @@ private:
     float m_TicksPerSecond;
     std::vector<AnimationChannel> m_Channels;
     std::vector<AnimationEvent> m_Events;
+    std::vector<int> m_ChannelIndexByBone;
 };
 
 } // namespace Crescent

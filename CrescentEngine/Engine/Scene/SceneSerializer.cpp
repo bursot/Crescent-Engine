@@ -12,6 +12,7 @@
 #include "../Components/PhysicsCollider.hpp"
 #include "../Components/CharacterController.hpp"
 #include "../Components/FirstPersonController.hpp"
+#include "../Components/AudioSource.hpp"
 #include "../Input/InputManager.hpp"
 #include "../Animation/AnimationClip.hpp"
 #include "../Components/ModelMeshReference.hpp"
@@ -1137,8 +1138,34 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"crouchSpeed", controller->getCrouchSpeed()},
                 {"eyeHeight", controller->getEyeHeight()},
                 {"useEyeHeight", controller->getUseEyeHeight()},
-                {"driveCharacterController", controller->getDriveCharacterController()}
+                {"driveCharacterController", controller->getDriveCharacterController()},
+                {"fireCooldown", controller->getFireCooldown()}
             };
+            json muzzleRef = SerializeAssetPath(controller->getMuzzleTexturePath(), "texture");
+            if (!muzzleRef.is_null() && !muzzleRef.empty()) {
+                components["FirstPersonController"]["muzzleTexture"] = muzzleRef;
+            }
+        }
+
+        if (auto* audio = entity->getComponent<AudioSource>()) {
+            json audioData = {
+                {"volume", audio->getVolume()},
+                {"pitch", audio->getPitch()},
+                {"looping", audio->isLooping()},
+                {"playOnStart", audio->getPlayOnStart()},
+                {"spatial", audio->isSpatial()},
+                {"stream", audio->isStreaming()},
+                {"minDistance", audio->getMinDistance()},
+                {"maxDistance", audio->getMaxDistance()},
+                {"rolloff", audio->getRolloff()}
+            };
+            json pathRef = SerializeAssetPath(audio->getFilePath(), "audio");
+            if (!pathRef.is_null() && !pathRef.empty()) {
+                audioData["file"] = pathRef;
+            } else if (!audio->getFilePath().empty()) {
+                audioData["file"] = audio->getFilePath();
+            }
+            components["AudioSource"] = audioData;
         }
 
         if (auto* light = entity->getComponent<Light>()) {
@@ -1803,6 +1830,40 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
             controller->setEyeHeight(c.value("eyeHeight", controller->getEyeHeight()));
             controller->setUseEyeHeight(c.value("useEyeHeight", controller->getUseEyeHeight()));
             controller->setDriveCharacterController(c.value("driveCharacterController", controller->getDriveCharacterController()));
+            controller->setFireCooldown(c.value("fireCooldown", controller->getFireCooldown()));
+            if (c.contains("muzzleTexture")) {
+                std::string resolved = ResolveTextureEntryPath(c["muzzleTexture"]);
+                if (!resolved.empty()) {
+                    controller->setMuzzleTexturePath(resolved);
+                } else if (c["muzzleTexture"].is_string()) {
+                    controller->setMuzzleTexturePath(c["muzzleTexture"].get<std::string>());
+                }
+            }
+        }
+
+        if (components.contains("AudioSource")) {
+            const json& a = components["AudioSource"];
+            AudioSource* audio = entity->getComponent<AudioSource>();
+            if (!audio) {
+                audio = entity->addComponent<AudioSource>();
+            }
+            audio->setStreaming(a.value("stream", audio->isStreaming()));
+            if (a.contains("file")) {
+                std::string resolved = ResolveTextureEntryPath(a["file"]);
+                if (!resolved.empty()) {
+                    audio->setFilePath(resolved);
+                } else if (a["file"].is_string()) {
+                    audio->setFilePath(a["file"].get<std::string>());
+                }
+            }
+            audio->setVolume(a.value("volume", audio->getVolume()));
+            audio->setPitch(a.value("pitch", audio->getPitch()));
+            audio->setLooping(a.value("looping", audio->isLooping()));
+            audio->setPlayOnStart(a.value("playOnStart", audio->getPlayOnStart()));
+            audio->setSpatial(a.value("spatial", audio->isSpatial()));
+            audio->setMinDistance(a.value("minDistance", audio->getMinDistance()));
+            audio->setMaxDistance(a.value("maxDistance", audio->getMaxDistance()));
+            audio->setRolloff(a.value("rolloff", audio->getRolloff()));
         }
 
         if (components.contains("Light")) {

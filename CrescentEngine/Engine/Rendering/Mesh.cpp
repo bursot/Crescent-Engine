@@ -1,4 +1,5 @@
 #include "Mesh.hpp"
+#include <Metal/Metal.hpp>
 #include <limits>
 #include <cmath>
 #include <unordered_set>
@@ -20,7 +21,18 @@ Mesh::Mesh()
 }
 
 Mesh::~Mesh() {
-    // GPU resources are managed by Renderer
+    if (m_VertexBuffer) {
+        static_cast<MTL::Buffer*>(m_VertexBuffer)->release();
+        m_VertexBuffer = nullptr;
+    }
+    if (m_IndexBuffer) {
+        static_cast<MTL::Buffer*>(m_IndexBuffer)->release();
+        m_IndexBuffer = nullptr;
+    }
+    if (m_SkinWeightBuffer) {
+        static_cast<MTL::Buffer*>(m_SkinWeightBuffer)->release();
+        m_SkinWeightBuffer = nullptr;
+    }
 }
 
 void Mesh::setVertices(const std::vector<Vertex>& vertices) {

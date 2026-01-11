@@ -2576,6 +2576,15 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             if (!mesh) {
                 continue;
             }
+
+            std::shared_ptr<Material> material = meshRenderer->getMaterial(0);
+            if (material) {
+                bool isTransparent = material->getRenderMode() == Material::RenderMode::Transparent
+                    || material->getAlpha() < 0.999f;
+                if (isTransparent) {
+                    continue;
+                }
+            }
             
             MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(mesh->getVertexBuffer());
             MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(mesh->getIndexBuffer());
@@ -2620,7 +2629,6 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
 
             MaterialUniformsGPU matUniforms{};
-            std::shared_ptr<Material> material = meshRenderer->getMaterial(0);
             if (material) {
                 matUniforms.albedo = material->getAlbedo();
                 matUniforms.properties = Math::Vector4(
@@ -3108,7 +3116,13 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         bool isSkinned = wantsSkin && (skinBuffer != nullptr);
 
         renderMeshRenderer(meshRenderer, camera, lights);
-        PipelineStateKey pipelineKey{true, true, true, false, isSkinned, m_outputHDR, static_cast<uint8_t>(m_msaaSamples)};
+        std::shared_ptr<Material> material = meshRenderer->getMaterial(0);
+        bool isTransparent = false;
+        if (material) {
+            isTransparent = material->getRenderMode() == Material::RenderMode::Transparent
+                || material->getAlpha() < 0.999f;
+        }
+        PipelineStateKey pipelineKey{true, true, true, isTransparent, isSkinned, m_outputHDR, static_cast<uint8_t>(m_msaaSamples)};
         MTL::RenderPipelineState* pipelineState = getPipelineState(pipelineKey);
         if (!pipelineState) {
             continue;
@@ -3121,7 +3135,6 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         modelUniforms.normalMatrix = modelUniforms.modelMatrix.inversed().transposed();
         
         // Setup material uniforms
-        std::shared_ptr<Material> material = meshRenderer->getMaterial(0);
         if (material) {
             MaterialUniformsGPU matUniforms;
             matUniforms.albedo = material->getAlbedo();

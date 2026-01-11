@@ -30,6 +30,10 @@ struct AssetBrowserPanel: View {
     private let hdriExtensions = [
         "hdr", "exr"
     ]
+
+    private let audioExtensions = [
+        "wav", "mp3", "ogg", "flac"
+    ]
     
     private var projectRootURL: URL? {
         editorState.projectRootURL ?? editorState.assetRootURL
@@ -280,7 +284,7 @@ struct AssetBrowserPanel: View {
     
     private func isSupportedAssetFile(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return textureExtensions.contains(ext) || hdriExtensions.contains(ext)
+        return textureExtensions.contains(ext) || hdriExtensions.contains(ext) || audioExtensions.contains(ext)
     }
     
     private func isDirectory(_ url: URL) -> Bool {
@@ -342,6 +346,8 @@ struct AssetBrowserPanel: View {
             type = "texture"
         } else if hdriExtensions.contains(url.pathExtension.lowercased()) {
             type = "hdri"
+        } else if audioExtensions.contains(url.pathExtension.lowercased()) {
+            type = "audio"
         } else {
             type = ""
         }
@@ -790,6 +796,7 @@ private enum AssetFilter: String, CaseIterable, Identifiable {
     case model
     case texture
     case hdri
+    case audio
     case material
     case scene
     
@@ -805,6 +812,8 @@ private enum AssetFilter: String, CaseIterable, Identifiable {
             return "Textures"
         case .hdri:
             return "HDRIs"
+        case .audio:
+            return "Audio"
         case .material:
             return "Materials"
         case .scene:
@@ -822,6 +831,8 @@ private enum AssetFilter: String, CaseIterable, Identifiable {
             return .texture
         case .hdri:
             return .hdri
+        case .audio:
+            return .audio
         case .material:
             return .material
         case .scene:
@@ -1288,6 +1299,8 @@ private struct AssetThumbnail: View {
             return "photo.fill"
         case .hdri:
             return "sparkles"
+        case .audio:
+            return "speaker.wave.2.fill"
         case .material:
             return "paintpalette.fill"
         case .scene:

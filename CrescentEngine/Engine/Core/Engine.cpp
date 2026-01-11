@@ -8,11 +8,16 @@
 #include "../Components/CameraController.hpp"
 #include "../Components/MeshRenderer.hpp"
 #include "../Components/Light.hpp"
+#include "../Audio/AudioSystem.hpp"
 #include "../Physics/PhysicsWorld.hpp"
 #include "../ECS/Entity.hpp"
 #include "../ECS/Transform.hpp"
 #include "../Input/InputManager.hpp"
 #include <iostream>
+
+namespace {
+constexpr bool kInputDebug = false;
+}
 
 namespace Crescent {
 
@@ -54,6 +59,10 @@ bool Engine::initialize() {
     if (!m_renderer->initialize()) {
         std::cerr << "Failed to initialize renderer!" << std::endl;
         return false;
+    }
+
+    if (!AudioSystem::getInstance().initialize()) {
+        std::cerr << "Failed to initialize audio system!" << std::endl;
     }
     
     // Create default scene
@@ -105,6 +114,8 @@ void Engine::shutdown() {
     
     // Destroy all scenes
     SceneManager::getInstance().destroyAllScenes();
+
+    AudioSystem::getInstance().shutdown();
     
     // Shutdown renderer
     if (m_renderer) {
@@ -144,6 +155,16 @@ void Engine::update(float deltaTime) {
     
     // Update active scene - Components read input here
     SceneManager::getInstance().update(deltaTime);
+
+    Camera* listenerCamera = nullptr;
+    SceneManager& sceneManager = SceneManager::getInstance();
+    if (sceneManager.isPlaying()) {
+        listenerCamera = sceneManager.getGameCamera();
+    }
+    if (!listenerCamera) {
+        listenerCamera = sceneManager.getSceneCamera();
+    }
+    AudioSystem::getInstance().updateListenerFromCamera(listenerCamera);
     
     // Clear frame-based input (mouse delta, etc.) for next frame
     // Previous key/button states are preserved for isKeyDown/isKeyUp
@@ -280,6 +301,7 @@ void Engine::handleKeyDown(unsigned short keyCode) {
         case 2:  key = KeyCode::D; break;
         case 12: key = KeyCode::Q; break;
         case 14: key = KeyCode::E; break;
+        case 15: key = KeyCode::R; break;
         case 49: key = KeyCode::Space; break;
         case 56: key = KeyCode::Shift; break;
         case 60: key = KeyCode::Shift; break;
@@ -312,6 +334,7 @@ void Engine::handleKeyUp(unsigned short keyCode) {
         case 2:  key = KeyCode::D; break;
         case 12: key = KeyCode::Q; break;
         case 14: key = KeyCode::E; break;
+        case 15: key = KeyCode::R; break;
         case 49: key = KeyCode::Space; break;
         case 56: key = KeyCode::Shift; break;
         case 60: key = KeyCode::Shift; break;
@@ -338,13 +361,14 @@ void Engine::handleMouseMove(float deltaX, float deltaY) {
     Math::Vector2 currentDelta = input.getMouseDelta();
     input.setMouseDelta(Math::Vector2(currentDelta.x + deltaX, currentDelta.y + deltaY));
     
-    // Debug - first 10 mouse events at Engine level
-    static int debugCount = 0;
-    if (debugCount < 10 && (deltaX != 0.0f || deltaY != 0.0f)) {
-        std::cout << "[ENGINE] Mouse delta: (" << deltaX << ", " << deltaY 
-                  << ") | Total accumulated: (" << (currentDelta.x + deltaX) 
-                  << ", " << (currentDelta.y + deltaY) << ")" << std::endl;
-        debugCount++;
+    if (kInputDebug) {
+        static int debugCount = 0;
+        if (debugCount < 10 && (deltaX != 0.0f || deltaY != 0.0f)) {
+            std::cout << "[ENGINE] Mouse delta: (" << deltaX << ", " << deltaY
+                      << ") | Total accumulated: (" << (currentDelta.x + deltaX)
+                      << ", " << (currentDelta.y + deltaY) << ")" << std::endl;
+            debugCount++;
+        }
     }
 }
 
@@ -361,12 +385,13 @@ void Engine::handleMouseButton(int button, bool pressed) {
     
     input.setMouseButtonPressed(mouseBtn, pressed);
     
-    // Debug
-    static int buttonDebugCount = 0;
-    if (buttonDebugCount < 5) {
-        std::cout << "[ENGINE] Mouse button " << button << " " 
-                  << (pressed ? "PRESSED" : "RELEASED") << std::endl;
-        buttonDebugCount++;
+    if (kInputDebug) {
+        static int buttonDebugCount = 0;
+        if (buttonDebugCount < 5) {
+            std::cout << "[ENGINE] Mouse button " << button << " "
+                      << (pressed ? "PRESSED" : "RELEASED") << std::endl;
+            buttonDebugCount++;
+        }
     }
 }
 
@@ -378,12 +403,17 @@ void Engine::handleMouseClick(float x, float y, float screenWidth, float screenH
     if (!SceneManager::getInstance().isSceneView()) {
         return;
     }
+    if (SceneManager::getInstance().isPlaying()) {
+        return;
+    }
     Scene* activeScene = SceneManager::getInstance().getActiveScene();
     Camera* mainCamera = Camera::getMainCamera();
     
     if (!activeScene || !mainCamera) return;
     
-    std::cout << "\n[MOUSE CLICK] x=" << x << " y=" << y << " screen=(" << screenWidth << "," << screenHeight << ")" << std::endl;
+    if (kInputDebug) {
+        std::cout << "\n[MOUSE CLICK] x=" << x << " y=" << y << " screen=(" << screenWidth << "," << screenHeight << ")" << std::endl;
+    }
     
     m_isLeftMouseDown = true;
     m_lastMouseX = x;
@@ -401,7 +431,9 @@ void Engine::handleMouseClick(float x, float y, float screenWidth, float screenH
         // If gizmo was activated, clear mouse delta and don't do selection
         if (m_gizmoSystem->isManipulating()) {
             InputManager::getInstance().setMouseDelta(Math::Vector2::Zero);
-            std::cout << "Gizmo interaction started - mouse delta cleared" << std::endl;
+            if (kInputDebug) {
+                std::cout << "Gizmo interaction started - mouse delta cleared" << std::endl;
+            }
             return;
         }
     }
@@ -413,12 +445,16 @@ void Engine::handleMouseClick(float x, float y, float screenWidth, float screenH
         mainCamera
     );
     
-    std::cout << "[RAY] origin=(" << ray.origin.x << "," << ray.origin.y << "," << ray.origin.z << ")" 
-              << " dir=(" << ray.direction.x << "," << ray.direction.y << "," << ray.direction.z << ")" << std::endl;
+    if (kInputDebug) {
+        std::cout << "[RAY] origin=(" << ray.origin.x << "," << ray.origin.y << "," << ray.origin.z << ")"
+                  << " dir=(" << ray.direction.x << "," << ray.direction.y << "," << ray.direction.z << ")" << std::endl;
+    }
     
     // Get all entities from scene
     std::vector<Entity*> entities = SceneCommands::getAllEntities(activeScene);
-    std::cout << "[RAYCAST] Testing against " << entities.size() << " entities" << std::endl;
+    if (kInputDebug) {
+        std::cout << "[RAYCAST] Testing against " << entities.size() << " entities" << std::endl;
+    }
     
     // Raycast
     RaycastHit hit = SelectionSystem::raycastAll(ray, entities);
@@ -429,16 +465,23 @@ void Engine::handleMouseClick(float x, float y, float screenWidth, float screenH
         } else {
             SelectionSystem::setSelectedEntity(hit.entity);
         }
-        std::cout << "[HIT SUCCESS] Selected: " << hit.entity->getName() 
-                  << " at distance: " << hit.distance << std::endl;
+        if (kInputDebug) {
+            std::cout << "[HIT SUCCESS] Selected: " << hit.entity->getName()
+                      << " at distance: " << hit.distance << std::endl;
+        }
     } else {
-        std::cout << "[HIT FAILED] No entity hit, clearing selection" << std::endl;
+        if (kInputDebug) {
+            std::cout << "[HIT FAILED] No entity hit, clearing selection" << std::endl;
+        }
         SelectionSystem::clearSelection();
     }
 }
 
 void Engine::handleMouseDrag(float x, float y, float screenWidth, float screenHeight) {
     if (!SceneManager::getInstance().isSceneView()) {
+        return;
+    }
+    if (SceneManager::getInstance().isPlaying()) {
         return;
     }
     if (!m_isLeftMouseDown) return;
@@ -462,6 +505,10 @@ void Engine::handleMouseDrag(float x, float y, float screenWidth, float screenHe
 }
 
 void Engine::handleMouseUp() {
+    if (SceneManager::getInstance().isPlaying()) {
+        m_isLeftMouseDown = false;
+        return;
+    }
     m_isLeftMouseDown = false;
     if (m_gizmoSystem) {
         m_gizmoSystem->handleMouseUp();

@@ -23,3 +23,7 @@ This project uses third-party software. License texts are included where noted.
 ## stb_image_write
 - Source: https://github.com/nothings/stb
 - License: Public domain or MIT (see `CrescentEngine/Engine/Rendering/stb_image_write.h`)
+
+## miniaudio
+- Source: https://github.com/mackron/miniaudio
+- License: Public domain or MIT (see `ThirdParty/miniaudio/miniaudio.h`)

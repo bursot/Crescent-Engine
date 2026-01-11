@@ -10,6 +10,10 @@
 
 namespace Crescent {
 
+namespace {
+constexpr bool kSelectionDebug = false;
+}
+
 std::vector<Entity*> SelectionSystem::s_selectedEntities;
 
 SelectionSystem::SelectionSystem() {
@@ -88,12 +92,14 @@ bool SelectionSystem::raycastEntity(const Ray& ray, Entity* entity, RaycastHit& 
     
     AABB bounds = getEntityBounds(entity);
     
-    static int raycastDebugCount = 0;
-    if (raycastDebugCount < 3) {
-        std::cout << "[RAYCAST ENTITY] Testing: " << entity->getName() 
-                  << " AABB min=(" << bounds.min.x << "," << bounds.min.y << "," << bounds.min.z << ")" 
-                  << " max=(" << bounds.max.x << "," << bounds.max.y << "," << bounds.max.z << ")" << std::endl;
-        raycastDebugCount++;
+    if (kSelectionDebug) {
+        static int raycastDebugCount = 0;
+        if (raycastDebugCount < 3) {
+            std::cout << "[RAYCAST ENTITY] Testing: " << entity->getName()
+                      << " AABB min=(" << bounds.min.x << "," << bounds.min.y << "," << bounds.min.z << ")"
+                      << " max=(" << bounds.max.x << "," << bounds.max.y << "," << bounds.max.z << ")" << std::endl;
+            raycastDebugCount++;
+        }
     }
     
     float distance;
@@ -103,8 +109,12 @@ bool SelectionSystem::raycastEntity(const Ray& ray, Entity* entity, RaycastHit& 
         hit.point = ray.getPoint(distance);
         hit.entity = entity;
         
-        if (raycastDebugCount < 3) {
-            std::cout << "[RAYCAST HIT] " << entity->getName() << " at distance " << distance << std::endl;
+        if (kSelectionDebug) {
+            static int raycastHitDebugCount = 0;
+            if (raycastHitDebugCount < 3) {
+                std::cout << "[RAYCAST HIT] " << entity->getName() << " at distance " << distance << std::endl;
+                raycastHitDebugCount++;
+            }
         }
         return true;
     }
@@ -127,7 +137,7 @@ RaycastHit SelectionSystem::raycastAll(const Ray& ray, const std::vector<Entity*
         // CRITICAL: Skip scene entities - they should never be selectable!
         std::string entityName = entity->getName();
         if (entityName == "Main Camera" || entityName == "Directional Light" || entityName == "Editor Gizmo") {
-            if (skipDebugCount < 3) {
+            if (kSelectionDebug && skipDebugCount < 3) {
                 std::cout << "[RAYCAST] Skipping scene entity: " << entityName << std::endl;
                 skipDebugCount++;
             }
@@ -136,7 +146,7 @@ RaycastHit SelectionSystem::raycastAll(const Ray& ray, const std::vector<Entity*
         
         // Also skip by component check
         if (entity->hasComponent<Camera>()) {
-            if (skipDebugCount < 3) {
+            if (kSelectionDebug && skipDebugCount < 3) {
                 std::cout << "[RAYCAST] Skipping camera: " << entityName << std::endl;
             }
             continue;
@@ -144,7 +154,7 @@ RaycastHit SelectionSystem::raycastAll(const Ray& ray, const std::vector<Entity*
         
         // Optional: Skip light entities (no visual representation)
         if (entity->hasComponent<Light>() && !entity->hasComponent<MeshRenderer>()) {
-            if (skipDebugCount < 3) {
+            if (kSelectionDebug && skipDebugCount < 3) {
                 std::cout << "[RAYCAST] Skipping light: " << entityName << std::endl;
             }
             continue;
@@ -211,15 +221,19 @@ void SelectionSystem::setSelectedEntity(Entity* entity) {
     if (entity) {
         s_selectedEntities.push_back(entity);
         
-        std::cout << "\n=== SELECTED ENTITY ===" << std::endl;
-        std::cout << "  Name: " << entity->getName() << std::endl;
-        std::cout << "  UUID: " << entity->getUUID().toString() << std::endl;
-        std::cout << "  Position: (" << entity->getTransform()->getPosition().x << ", "
-                  << entity->getTransform()->getPosition().y << ", "
-                  << entity->getTransform()->getPosition().z << ")" << std::endl;
-        std::cout << "========================\n" << std::endl;
+        if (kSelectionDebug) {
+            std::cout << "\n=== SELECTED ENTITY ===" << std::endl;
+            std::cout << "  Name: " << entity->getName() << std::endl;
+            std::cout << "  UUID: " << entity->getUUID().toString() << std::endl;
+            std::cout << "  Position: (" << entity->getTransform()->getPosition().x << ", "
+                      << entity->getTransform()->getPosition().y << ", "
+                      << entity->getTransform()->getPosition().z << ")" << std::endl;
+            std::cout << "========================\n" << std::endl;
+        }
     } else {
-        std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
+        if (kSelectionDebug) {
+            std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
+        }
     }
 }
 
@@ -227,13 +241,17 @@ void SelectionSystem::setSelection(const std::vector<Entity*>& entities) {
     s_selectedEntities = entities;
     if (!s_selectedEntities.empty()) {
         Entity* first = s_selectedEntities.front();
-        std::cout << "\n=== SELECTED ENTITY ===" << std::endl;
-        std::cout << "  Name: " << first->getName() << " (+"
-                  << (s_selectedEntities.size() - 1) << " more)" << std::endl;
-        std::cout << "  UUID: " << first->getUUID().toString() << std::endl;
-        std::cout << "========================\n" << std::endl;
+        if (kSelectionDebug) {
+            std::cout << "\n=== SELECTED ENTITY ===" << std::endl;
+            std::cout << "  Name: " << first->getName() << " (+"
+                      << (s_selectedEntities.size() - 1) << " more)" << std::endl;
+            std::cout << "  UUID: " << first->getUUID().toString() << std::endl;
+            std::cout << "========================\n" << std::endl;
+        }
     } else {
-        std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
+        if (kSelectionDebug) {
+            std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
+        }
     }
 }
 
@@ -254,7 +272,7 @@ void SelectionSystem::removeEntity(Entity* entity) {
     auto it = std::remove(s_selectedEntities.begin(), s_selectedEntities.end(), entity);
     if (it != s_selectedEntities.end()) {
         s_selectedEntities.erase(it, s_selectedEntities.end());
-        if (s_selectedEntities.empty()) {
+        if (kSelectionDebug && s_selectedEntities.empty()) {
             std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
         }
     }
@@ -271,7 +289,9 @@ const std::vector<Entity*>& SelectionSystem::getSelection() {
 
 void SelectionSystem::clearSelection() {
     s_selectedEntities.clear();
-    std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
+    if (kSelectionDebug) {
+        std::cout << "\n=== SELECTION CLEARED ===\n" << std::endl;
+    }
 }
 
 } // namespace Crescent

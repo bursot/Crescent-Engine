@@ -744,6 +744,8 @@ static std::shared_ptr<Skeleton> BuildSkeleton(const aiScene* scene) {
     }
 
     auto skeleton = std::make_shared<Skeleton>();
+    Math::Matrix4x4 rootTransform = ToMatrix(scene->mRootNode->mTransformation);
+    skeleton->setGlobalInverse(rootTransform.inversed());
     NodeNameCache nameCache;
     BuildSkeletonRecursive(scene->mRootNode, requiredNodes, inverseBindByName, nameCache, *skeleton, -1);
     return skeleton;

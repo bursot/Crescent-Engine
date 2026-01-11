@@ -3,7 +3,8 @@
 namespace Crescent {
 
 Skeleton::Skeleton()
-    : m_RootIndex(InvalidIndex) {
+    : m_RootIndex(InvalidIndex)
+    , m_GlobalInverse(Math::Matrix4x4::Identity) {
 }
 
 uint32_t Skeleton::addBone(const std::string& name,
