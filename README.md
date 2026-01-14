@@ -561,6 +561,7 @@ See `THIRD_PARTY_NOTICES.md` for full attributions.
 
 ## Demo Video
 [![Video: 5NDLy1gafPQ](https://img.youtube.com/vi/5NDLy1gafPQ/0.jpg)](https://www.youtube.com/watch?v=5NDLy1gafPQ)
+[![Video: PbiNGClqRY8](https://img.youtube.com/vi/PbiNGClqRY8/0.jpg)](https://www.youtube.com/watch?v=PbiNGClqRY8)
 
 ---
 
