@@ -1,5 +1,5 @@
 //
-//  Use this file to import your target's public headers that you would like to expose to Swift.
+//  Do not change this file. It is target specific bridging header.
 //
 
 #import "Bridge/CrescentEngineBridge.h"
