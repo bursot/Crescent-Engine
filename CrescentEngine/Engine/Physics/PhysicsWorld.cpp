@@ -1,3 +1,11 @@
+// Crescent Engine - Jolt Physics Integration Layer
+//
+//
+// NOTE: This is not a direct wrapper of Jolt — it adapts the physics API to Crescent's ECS,
+// transform system, collider definitions, and runtime event model.
+//
+
+
 #include "PhysicsWorld.hpp"
 #include "../Scene/Scene.hpp"
 #include "../ECS/Entity.hpp"
