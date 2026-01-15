@@ -273,6 +273,10 @@ void Scene::serialize(const std::string& filepath) {
 void Scene::deserialize(const std::string& filepath) {
     if (!SceneSerializer::LoadScene(this, filepath)) {
         std::cout << "Scene deserialization failed: " << filepath << std::endl;
+        return;
+    }
+    if (m_IsActive) {
+        applySettings();
     }
 }
 

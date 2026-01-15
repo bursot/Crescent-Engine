@@ -1990,8 +1990,6 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
         }
     }
 
-    scene->applySettings();
-
     return true;
 }
 

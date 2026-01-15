@@ -1,6 +1,7 @@
 #include "Transform.hpp"
 #include "Entity.hpp"
 #include <algorithm>
+#include <cmath>
 
 namespace Crescent {
 
@@ -220,10 +221,17 @@ void Transform::setParent(Transform* parent, bool worldPositionStays) {
             setRotation(worldRot);
             // Note: scale is not perfectly preserved in all cases with non-uniform parent scales
             Math::Vector3 parentScale = m_Parent->getScale();
+            auto safeDivide = [](float numerator, float denominator) {
+                constexpr float kMinScale = 1e-6f;
+                if (std::abs(denominator) <= kMinScale) {
+                    return 0.0f;
+                }
+                return numerator / denominator;
+            };
             m_LocalScale = Math::Vector3(
-                worldScale.x / parentScale.x,
-                worldScale.y / parentScale.y,
-                worldScale.z / parentScale.z
+                safeDivide(worldScale.x, parentScale.x),
+                safeDivide(worldScale.y, parentScale.y),
+                safeDivide(worldScale.z, parentScale.z)
             );
         }
     } else {
