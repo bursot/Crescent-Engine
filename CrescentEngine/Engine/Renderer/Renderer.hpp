@@ -88,6 +88,11 @@ struct PipelineStateKeyHash {
 
 class Renderer {
 public:
+    enum class RenderTargetPool {
+        Scene,
+        Game
+    };
+
     Renderer();
     ~Renderer();
     
@@ -111,6 +116,8 @@ public:
         bool updateHistory = true;
     };
     void renderScene(Scene* scene, Camera* cameraOverride, const RenderOptions& options);
+
+    void setRenderTargetPool(RenderTargetPool pool);
     
     // Get Metal device (return as void* to avoid type conflicts)
     void* getDevice() const;
@@ -225,6 +232,56 @@ private:
     void setupUniforms(Camera* camera, Light* light);
     
 private:
+    struct RenderTargetState {
+        MTL::Texture* depthTexture = nullptr;
+        MTL::Texture* msaaDepthTexture = nullptr;
+        MTL::Texture* normalTexture = nullptr;
+        MTL::Texture* ssaoTexture = nullptr;
+        MTL::Texture* ssaoBlurTexture = nullptr;
+        MTL::Texture* ssaoNoiseTexture = nullptr;
+        MTL::Texture* velocityTexture = nullptr;
+        MTL::Texture* dofTexture = nullptr;
+        MTL::Texture* fogTexture = nullptr;
+        MTL::Texture* fogVolumeTexture = nullptr;
+        MTL::Texture* fogVolumeHistoryTexture = nullptr;
+        uint32_t fogVolumeWidth = 0;
+        uint32_t fogVolumeHeight = 0;
+        uint32_t fogVolumeDepth = 0;
+        int fogVolumeQuality = 1;
+        bool fogVolumeHistoryValid = false;
+        bool fogHistoryInitialized = false;
+        Math::Vector3 prevFogCameraPos = Math::Vector3(0.0f);
+        Math::Vector3 prevFogCameraForward = Math::Vector3(0.0f, 0.0f, -1.0f);
+        Math::Vector3 prevFogSunDir = Math::Vector3(0.0f, -1.0f, 0.0f);
+        float prevFogSunIntensity = 0.0f;
+        MTL::Texture* postColorTexture = nullptr;
+        MTL::Texture* decalAlbedoTexture = nullptr;
+        MTL::Texture* decalNormalTexture = nullptr;
+        MTL::Texture* decalOrmTexture = nullptr;
+        MTL::Texture* motionBlurTexture = nullptr;
+        std::vector<MTL::Texture*> bloomMipTextures;
+        uint32_t bloomMipCount = 0;
+        MTL::Texture* taaHistoryTexture = nullptr;
+        MTL::Texture* taaCurrentTexture = nullptr;
+        MTL::Texture* colorTexture = nullptr;
+        MTL::Texture* msaaColorTexture = nullptr;
+        int sceneColorFormat = 0;
+        bool taaHistoryValid = false;
+        bool motionHistoryValid = false;
+        uint32_t taaFrameIndex = 0;
+        Math::Matrix4x4 prevViewProjection;
+        Math::Matrix4x4 prevViewProjectionNoJitter;
+        uint32_t renderTargetWidth = 0;
+        uint32_t renderTargetHeight = 0;
+        uint32_t msaaSamples = 1;
+    };
+
+    RenderTargetState& getRenderTargetState(RenderTargetPool pool);
+    void storeRenderTargetState(RenderTargetState& state);
+    void loadRenderTargetState(const RenderTargetState& state);
+    void releaseRenderTargetState(RenderTargetState& state);
+    void invalidateRenderTargetState(RenderTargetState& state, uint32_t msaaSamples);
+
     // Metal objects
     MTL::Device* m_device;
     MTL::CommandQueue* m_commandQueue;
@@ -379,8 +436,12 @@ private:
     
     // Statistics
     RenderStats m_stats;
-    
+
     bool m_isInitialized;
+
+    RenderTargetState m_sceneTargets;
+    RenderTargetState m_gameTargets;
+    RenderTargetPool m_activePool;
 };
 
 } // namespace Crescent

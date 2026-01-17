@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)shutdown;
 - (void)update:(float)deltaTime;
 - (void)render;
+- (BOOL)tick:(float)deltaTime NS_SWIFT_NAME(tick(deltaTime:));
 - (void)setMetalLayer:(CAMetalLayer *)layer;
 - (void)resizeWithWidth:(float)width height:(float)height;
 - (void)setSceneMetalLayer:(CAMetalLayer *)layer;

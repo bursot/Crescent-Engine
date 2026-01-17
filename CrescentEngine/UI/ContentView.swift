@@ -321,6 +321,7 @@ struct ViewportPanel: View {
                             .font(EditorTheme.fontCaption)
                             .foregroundColor(EditorTheme.textAccent)
                     }
+
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)

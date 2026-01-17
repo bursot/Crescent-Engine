@@ -413,10 +413,14 @@ Renderer::Renderer()
     , m_isInitialized(false)
     , m_debugDrawShadowAtlas(false)
     , m_debugDrawCascades(false)
-    , m_debugDrawPointFrusta(false) {
+    , m_debugDrawPointFrusta(false)
+    , m_activePool(RenderTargetPool::Scene) {
     m_lightingSystem = std::make_unique<LightingSystem>();
     m_shadowPass = std::make_unique<ShadowRenderPass>();
     m_clusterPass = std::make_unique<ClusteredLightingPass>();
+    m_sceneTargets.sceneColorFormat = m_sceneColorFormat;
+    m_gameTargets.sceneColorFormat = m_sceneColorFormat;
+    storeRenderTargetState(m_sceneTargets);
 }
 
 Renderer::~Renderer() {
@@ -1666,6 +1670,226 @@ void Renderer::setMetalLayer(void* layer, bool applySize) {
     }
 }
 
+Renderer::RenderTargetState& Renderer::getRenderTargetState(RenderTargetPool pool) {
+    return pool == RenderTargetPool::Scene ? m_sceneTargets : m_gameTargets;
+}
+
+void Renderer::storeRenderTargetState(RenderTargetState& state) {
+    state.depthTexture = m_depthTexture;
+    state.msaaDepthTexture = m_msaaDepthTexture;
+    state.normalTexture = m_normalTexture;
+    state.ssaoTexture = m_ssaoTexture;
+    state.ssaoBlurTexture = m_ssaoBlurTexture;
+    state.ssaoNoiseTexture = m_ssaoNoiseTexture;
+    state.velocityTexture = m_velocityTexture;
+    state.dofTexture = m_dofTexture;
+    state.fogTexture = m_fogTexture;
+    state.fogVolumeTexture = m_fogVolumeTexture;
+    state.fogVolumeHistoryTexture = m_fogVolumeHistoryTexture;
+    state.fogVolumeWidth = m_fogVolumeWidth;
+    state.fogVolumeHeight = m_fogVolumeHeight;
+    state.fogVolumeDepth = m_fogVolumeDepth;
+    state.fogVolumeQuality = m_fogVolumeQuality;
+    state.fogVolumeHistoryValid = m_fogVolumeHistoryValid;
+    state.fogHistoryInitialized = m_fogHistoryInitialized;
+    state.prevFogCameraPos = m_prevFogCameraPos;
+    state.prevFogCameraForward = m_prevFogCameraForward;
+    state.prevFogSunDir = m_prevFogSunDir;
+    state.prevFogSunIntensity = m_prevFogSunIntensity;
+    state.postColorTexture = m_postColorTexture;
+    state.decalAlbedoTexture = m_decalAlbedoTexture;
+    state.decalNormalTexture = m_decalNormalTexture;
+    state.decalOrmTexture = m_decalOrmTexture;
+    state.motionBlurTexture = m_motionBlurTexture;
+    state.bloomMipTextures = m_bloomMipTextures;
+    state.bloomMipCount = m_bloomMipCount;
+    state.taaHistoryTexture = m_taaHistoryTexture;
+    state.taaCurrentTexture = m_taaCurrentTexture;
+    state.colorTexture = m_colorTexture;
+    state.msaaColorTexture = m_msaaColorTexture;
+    state.sceneColorFormat = m_sceneColorFormat;
+    state.taaHistoryValid = m_taaHistoryValid;
+    state.motionHistoryValid = m_motionHistoryValid;
+    state.taaFrameIndex = m_taaFrameIndex;
+    state.prevViewProjection = m_prevViewProjection;
+    state.prevViewProjectionNoJitter = m_prevViewProjectionNoJitter;
+    state.renderTargetWidth = m_renderTargetWidth;
+    state.renderTargetHeight = m_renderTargetHeight;
+    state.msaaSamples = m_msaaSamples;
+}
+
+void Renderer::loadRenderTargetState(const RenderTargetState& state) {
+    m_depthTexture = state.depthTexture;
+    m_msaaDepthTexture = state.msaaDepthTexture;
+    m_normalTexture = state.normalTexture;
+    m_ssaoTexture = state.ssaoTexture;
+    m_ssaoBlurTexture = state.ssaoBlurTexture;
+    m_ssaoNoiseTexture = state.ssaoNoiseTexture;
+    m_velocityTexture = state.velocityTexture;
+    m_dofTexture = state.dofTexture;
+    m_fogTexture = state.fogTexture;
+    m_fogVolumeTexture = state.fogVolumeTexture;
+    m_fogVolumeHistoryTexture = state.fogVolumeHistoryTexture;
+    m_fogVolumeWidth = state.fogVolumeWidth;
+    m_fogVolumeHeight = state.fogVolumeHeight;
+    m_fogVolumeDepth = state.fogVolumeDepth;
+    m_fogVolumeQuality = state.fogVolumeQuality;
+    m_fogVolumeHistoryValid = state.fogVolumeHistoryValid;
+    m_fogHistoryInitialized = state.fogHistoryInitialized;
+    m_prevFogCameraPos = state.prevFogCameraPos;
+    m_prevFogCameraForward = state.prevFogCameraForward;
+    m_prevFogSunDir = state.prevFogSunDir;
+    m_prevFogSunIntensity = state.prevFogSunIntensity;
+    m_postColorTexture = state.postColorTexture;
+    m_decalAlbedoTexture = state.decalAlbedoTexture;
+    m_decalNormalTexture = state.decalNormalTexture;
+    m_decalOrmTexture = state.decalOrmTexture;
+    m_motionBlurTexture = state.motionBlurTexture;
+    m_bloomMipTextures = state.bloomMipTextures;
+    m_bloomMipCount = state.bloomMipCount;
+    m_taaHistoryTexture = state.taaHistoryTexture;
+    m_taaCurrentTexture = state.taaCurrentTexture;
+    m_colorTexture = state.colorTexture;
+    m_msaaColorTexture = state.msaaColorTexture;
+    m_sceneColorFormat = state.sceneColorFormat;
+    m_taaHistoryValid = state.taaHistoryValid;
+    m_motionHistoryValid = state.motionHistoryValid;
+    m_taaFrameIndex = state.taaFrameIndex;
+    m_prevViewProjection = state.prevViewProjection;
+    m_prevViewProjectionNoJitter = state.prevViewProjectionNoJitter;
+    m_renderTargetWidth = state.renderTargetWidth;
+    m_renderTargetHeight = state.renderTargetHeight;
+    m_msaaSamples = state.msaaSamples;
+}
+
+void Renderer::releaseRenderTargetState(RenderTargetState& state) {
+    if (state.depthTexture) {
+        state.depthTexture->release();
+        state.depthTexture = nullptr;
+    }
+    if (state.msaaDepthTexture) {
+        state.msaaDepthTexture->release();
+        state.msaaDepthTexture = nullptr;
+    }
+    if (state.colorTexture) {
+        state.colorTexture->release();
+        state.colorTexture = nullptr;
+    }
+    if (state.msaaColorTexture) {
+        state.msaaColorTexture->release();
+        state.msaaColorTexture = nullptr;
+    }
+    if (state.postColorTexture) {
+        state.postColorTexture->release();
+        state.postColorTexture = nullptr;
+    }
+    if (state.decalAlbedoTexture) {
+        state.decalAlbedoTexture->release();
+        state.decalAlbedoTexture = nullptr;
+    }
+    if (state.decalNormalTexture) {
+        state.decalNormalTexture->release();
+        state.decalNormalTexture = nullptr;
+    }
+    if (state.decalOrmTexture) {
+        state.decalOrmTexture->release();
+        state.decalOrmTexture = nullptr;
+    }
+    if (state.motionBlurTexture) {
+        state.motionBlurTexture->release();
+        state.motionBlurTexture = nullptr;
+    }
+    if (state.taaHistoryTexture) {
+        state.taaHistoryTexture->release();
+        state.taaHistoryTexture = nullptr;
+    }
+    if (state.taaCurrentTexture) {
+        state.taaCurrentTexture->release();
+        state.taaCurrentTexture = nullptr;
+    }
+    if (state.normalTexture) {
+        state.normalTexture->release();
+        state.normalTexture = nullptr;
+    }
+    if (state.ssaoTexture) {
+        state.ssaoTexture->release();
+        state.ssaoTexture = nullptr;
+    }
+    if (state.ssaoBlurTexture) {
+        state.ssaoBlurTexture->release();
+        state.ssaoBlurTexture = nullptr;
+    }
+    if (state.ssaoNoiseTexture) {
+        state.ssaoNoiseTexture->release();
+        state.ssaoNoiseTexture = nullptr;
+    }
+    if (state.velocityTexture) {
+        state.velocityTexture->release();
+        state.velocityTexture = nullptr;
+    }
+    if (state.dofTexture) {
+        state.dofTexture->release();
+        state.dofTexture = nullptr;
+    }
+    if (state.fogTexture) {
+        state.fogTexture->release();
+        state.fogTexture = nullptr;
+    }
+    if (state.fogVolumeTexture) {
+        state.fogVolumeTexture->release();
+        state.fogVolumeTexture = nullptr;
+    }
+    if (state.fogVolumeHistoryTexture) {
+        state.fogVolumeHistoryTexture->release();
+        state.fogVolumeHistoryTexture = nullptr;
+    }
+    for (MTL::Texture* tex : state.bloomMipTextures) {
+        if (tex) {
+            tex->release();
+        }
+    }
+    state.bloomMipTextures.clear();
+    state.bloomMipCount = 0;
+    state.renderTargetWidth = 0;
+    state.renderTargetHeight = 0;
+    state.msaaSamples = 1;
+    state.taaHistoryValid = false;
+    state.motionHistoryValid = false;
+    state.taaFrameIndex = 0;
+    state.fogVolumeWidth = 0;
+    state.fogVolumeHeight = 0;
+    state.fogVolumeDepth = 0;
+    state.fogVolumeHistoryValid = false;
+    state.fogHistoryInitialized = false;
+    state.prevFogCameraPos = Math::Vector3(0.0f);
+    state.prevFogCameraForward = Math::Vector3(0.0f, 0.0f, -1.0f);
+    state.prevFogSunDir = Math::Vector3(0.0f, -1.0f, 0.0f);
+    state.prevFogSunIntensity = 0.0f;
+}
+
+void Renderer::invalidateRenderTargetState(RenderTargetState& state, uint32_t msaaSamples) {
+    state.renderTargetWidth = 0;
+    state.renderTargetHeight = 0;
+    state.msaaSamples = msaaSamples;
+    state.taaHistoryValid = false;
+    state.motionHistoryValid = false;
+    state.taaFrameIndex = 0;
+    state.fogVolumeHistoryValid = false;
+    state.fogHistoryInitialized = false;
+    state.fogVolumeWidth = 0;
+    state.fogVolumeHeight = 0;
+    state.fogVolumeDepth = 0;
+}
+
+void Renderer::setRenderTargetPool(RenderTargetPool pool) {
+    if (pool == m_activePool) {
+        return;
+    }
+    storeRenderTargetState(getRenderTargetState(m_activePool));
+    loadRenderTargetState(getRenderTargetState(pool));
+    m_activePool = pool;
+}
+
 void Renderer::resize(float width, float height) {
     // Validate dimensions
     if (width <= 0 || height <= 0) {
@@ -2173,6 +2397,13 @@ void Renderer::applyQualitySettings(const SceneQualitySettings& quality) {
     if (renderScaleChanged) {
         m_renderTargetWidth = 0;
         m_renderTargetHeight = 0;
+    }
+
+    if (msaaChanged || renderScaleChanged) {
+        storeRenderTargetState(getRenderTargetState(m_activePool));
+        invalidateRenderTargetState(m_sceneTargets, msaaSamples);
+        invalidateRenderTargetState(m_gameTargets, msaaSamples);
+        loadRenderTargetState(getRenderTargetState(m_activePool));
     }
     
     if (shadowResolutionChanged) {
@@ -4283,56 +4514,11 @@ void Renderer::shutdown() {
         m_depthReadState->release();
         m_depthReadState = nullptr;
     }
-    
-    // Release depth texture
-    if (m_depthTexture) {
-        m_depthTexture->release();
-        m_depthTexture = nullptr;
-    }
-    if (m_msaaDepthTexture) {
-        m_msaaDepthTexture->release();
-        m_msaaDepthTexture = nullptr;
-    }
-    if (m_colorTexture) {
-        m_colorTexture->release();
-        m_colorTexture = nullptr;
-    }
-    if (m_postColorTexture) {
-        m_postColorTexture->release();
-        m_postColorTexture = nullptr;
-    }
-    if (m_decalAlbedoTexture) {
-        m_decalAlbedoTexture->release();
-        m_decalAlbedoTexture = nullptr;
-    }
-    if (m_decalNormalTexture) {
-        m_decalNormalTexture->release();
-        m_decalNormalTexture = nullptr;
-    }
-    if (m_decalOrmTexture) {
-        m_decalOrmTexture->release();
-        m_decalOrmTexture = nullptr;
-    }
-    if (m_velocityTexture) {
-        m_velocityTexture->release();
-        m_velocityTexture = nullptr;
-    }
-    if (m_dofTexture) {
-        m_dofTexture->release();
-        m_dofTexture = nullptr;
-    }
-    if (m_fogTexture) {
-        m_fogTexture->release();
-        m_fogTexture = nullptr;
-    }
-    if (m_fogVolumeTexture) {
-        m_fogVolumeTexture->release();
-        m_fogVolumeTexture = nullptr;
-    }
-    if (m_msaaColorTexture) {
-        m_msaaColorTexture->release();
-        m_msaaColorTexture = nullptr;
-    }
+
+    storeRenderTargetState(getRenderTargetState(m_activePool));
+    releaseRenderTargetState(m_sceneTargets);
+    releaseRenderTargetState(m_gameTargets);
+    loadRenderTargetState(getRenderTargetState(m_activePool));
     
     // Release uniform buffers
     if (m_modelUniformBuffer) {

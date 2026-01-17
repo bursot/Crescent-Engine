@@ -184,6 +184,7 @@ void Engine::render() {
     bool hasSceneSurface = m_sceneSurface.isValid();
     bool hasGameSurface = m_gameSurface.isValid();
     if (!hasSceneSurface && !hasGameSurface) {
+        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
         m_renderer->render();
         return;
     }
@@ -198,6 +199,7 @@ void Engine::render() {
 
     // Scene view render (editor camera)
     if (renderSceneSurface) {
+        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
         m_renderer->setMetalLayer(m_sceneSurface.layer, false);
         m_renderer->setViewportSize(m_sceneSurface.width, m_sceneSurface.height, true);
         if (debugRenderer) {
@@ -244,6 +246,7 @@ void Engine::render() {
 
     // Game view render (runtime camera)
     if (renderGameSurface) {
+        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Game);
         m_renderer->setMetalLayer(m_gameSurface.layer, false);
         m_renderer->setViewportSize(m_gameSurface.width, m_gameSurface.height, true);
         if (debugRenderer) {
@@ -263,6 +266,7 @@ void Engine::render() {
 void Engine::setSceneMetalLayer(void* layer) {
     m_sceneSurface.layer = layer;
     if (m_renderer && layer) {
+        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
         m_renderer->setMetalLayer(layer, true);
     }
 }
@@ -270,6 +274,7 @@ void Engine::setSceneMetalLayer(void* layer) {
 void Engine::setGameMetalLayer(void* layer) {
     m_gameSurface.layer = layer;
     if (m_renderer && layer) {
+        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Game);
         m_renderer->setMetalLayer(layer, true);
     }
 }

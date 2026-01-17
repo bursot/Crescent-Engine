@@ -215,11 +215,11 @@ struct MetalView: NSViewRepresentable {
             
             let currentTime = CACurrentMediaTime()
             let deltaTime = lastTime == 0 ? 0.016 : Float(currentTime - lastTime)
-            lastTime = currentTime
             
             // Update and render
-            bridge.update(deltaTime)
-            bridge.render()
+            if bridge.tick(deltaTime: deltaTime) {
+                lastTime = currentTime
+            }
         }
         
         deinit {
