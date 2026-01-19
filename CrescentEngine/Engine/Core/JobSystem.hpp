@@ -9,6 +9,10 @@
 #include <thread>
 #include <vector>
 
+#ifdef __APPLE__
+#include <Foundation/Foundation.hpp>
+#endif
+
 namespace Crescent {
 
 class JobSystem {
@@ -129,6 +133,9 @@ private:
                 item = std::move(m_queue.front());
                 m_queue.pop();
             }
+#ifdef __APPLE__
+            NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+#endif
             if (item.job) {
                 item.job();
             }
@@ -138,6 +145,9 @@ private:
                     item.fence->cv.notify_all();
                 }
             }
+#ifdef __APPLE__
+            pool->release();
+#endif
         }
     }
 

@@ -13,6 +13,7 @@
 #include "../Renderer/DebugRenderer.hpp"
 #include "../Components/Rigidbody.hpp"
 #include "../Components/PhysicsCollider.hpp"
+#include "../Components/MeshRenderer.hpp"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/Memory.h>
@@ -32,6 +33,8 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
@@ -40,7 +43,9 @@
 #include <Jolt/Core/HashCombine.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <iostream>
 #include <mutex>
 #include <thread>
 
@@ -119,6 +124,215 @@ Math::Vector3 ToCrescent(const JPH::Vec3& v) {
 
 Math::Quaternion ToCrescent(const JPH::Quat& q) {
     return Math::Quaternion(q.GetX(), q.GetY(), q.GetZ(), q.GetW());
+}
+
+std::string ToLower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool HasColliderToken(const std::string& name) {
+    if (name.empty()) {
+        return false;
+    }
+    std::string lower = ToLower(name);
+    return lower.find("collider") != std::string::npos
+        || lower.find("collision") != std::string::npos
+        || lower.find("_col") != std::string::npos;
+}
+
+MeshRenderer* FindMeshRendererForCollider(const Entity* entity) {
+    if (!entity) {
+        return nullptr;
+    }
+    MeshRenderer* direct = entity->getComponent<MeshRenderer>();
+    Transform* root = entity->getTransform();
+    if (!root) {
+        return (direct && direct->getMesh()) ? direct : nullptr;
+    }
+    MeshRenderer* first = (direct && direct->getMesh()) ? direct : nullptr;
+    MeshRenderer* preferred = nullptr;
+    if (direct && direct->getMesh()) {
+        if (HasColliderToken(entity->getName()) || HasColliderToken(direct->getMesh()->getName())) {
+            preferred = direct;
+        }
+    }
+    std::vector<Transform*> stack;
+    stack.reserve(8);
+    stack.push_back(root);
+    while (!stack.empty()) {
+        Transform* node = stack.back();
+        stack.pop_back();
+        if (!node) {
+            continue;
+        }
+        Entity* current = node->getEntity();
+        if (current) {
+            if (auto* renderer = current->getComponent<MeshRenderer>()) {
+                if (renderer->getMesh()) {
+                    if (!first) {
+                        first = renderer;
+                    }
+                    std::string name = current->getName();
+                    std::string meshName = renderer->getMesh()->getName();
+                    if (!preferred && (HasColliderToken(name) || HasColliderToken(meshName))) {
+                        preferred = renderer;
+                    }
+                }
+            }
+        }
+        for (Transform* child : node->getChildren()) {
+            stack.push_back(child);
+        }
+    }
+    return preferred ? preferred : first;
+}
+
+bool BuildMeshTransform(const Entity* entity,
+                        const MeshRenderer* renderer,
+                        Math::Matrix4x4& outTransform) {
+    if (!entity || !renderer) {
+        return false;
+    }
+    const Entity* meshEntity = renderer->getEntity();
+    if (!meshEntity) {
+        return false;
+    }
+    Transform* entityTransform = entity->getTransform();
+    Transform* meshTransform = meshEntity->getTransform();
+    if (!entityTransform || !meshTransform) {
+        return false;
+    }
+    Math::Matrix4x4 entityWorld = entityTransform->getWorldMatrix();
+    Math::Matrix4x4 meshWorld = meshTransform->getWorldMatrix();
+    Math::Matrix4x4 meshToEntity = entityWorld.inversed() * meshWorld;
+    outTransform = meshToEntity;
+    return true;
+}
+
+bool BuildMeshTriangles(const Mesh& mesh,
+                        const Math::Matrix4x4& transform,
+                        JPH::TriangleList& outTriangles) {
+    const auto& vertices = mesh.getVertices();
+    const auto& indices = mesh.getIndices();
+    if (vertices.empty()) {
+        return false;
+    }
+    if (indices.size() >= 3) {
+        outTriangles.reserve(indices.size() / 3);
+        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+            uint32_t i0 = indices[i];
+            uint32_t i1 = indices[i + 1];
+            uint32_t i2 = indices[i + 2];
+            if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+                continue;
+            }
+            Math::Vector3 p0 = transform.transformPoint(vertices[i0].position);
+            Math::Vector3 p1 = transform.transformPoint(vertices[i1].position);
+            Math::Vector3 p2 = transform.transformPoint(vertices[i2].position);
+            outTriangles.emplace_back(JPH::Float3(p0.x, p0.y, p0.z),
+                                      JPH::Float3(p1.x, p1.y, p1.z),
+                                      JPH::Float3(p2.x, p2.y, p2.z));
+        }
+    } else {
+        outTriangles.reserve(vertices.size() / 3);
+        for (size_t i = 0; i + 2 < vertices.size(); i += 3) {
+            Math::Vector3 p0 = transform.transformPoint(vertices[i].position);
+            Math::Vector3 p1 = transform.transformPoint(vertices[i + 1].position);
+            Math::Vector3 p2 = transform.transformPoint(vertices[i + 2].position);
+            outTriangles.emplace_back(JPH::Float3(p0.x, p0.y, p0.z),
+                                      JPH::Float3(p1.x, p1.y, p1.z),
+                                      JPH::Float3(p2.x, p2.y, p2.z));
+        }
+    }
+    return !outTriangles.empty();
+}
+
+bool BuildMeshIndexed(const Mesh& mesh,
+                      const Math::Matrix4x4& transform,
+                      JPH::VertexList& outVertices,
+                      JPH::IndexedTriangleList& outTriangles) {
+    const auto& vertices = mesh.getVertices();
+    const auto& indices = mesh.getIndices();
+    if (vertices.empty() || indices.size() < 3) {
+        return false;
+    }
+    outVertices.reserve(vertices.size());
+    for (const auto& v : vertices) {
+        Math::Vector3 p = transform.transformPoint(v.position);
+        outVertices.emplace_back(p.x, p.y, p.z);
+    }
+    outTriangles.reserve(indices.size() / 3);
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        uint32_t i0 = indices[i];
+        uint32_t i1 = indices[i + 1];
+        uint32_t i2 = indices[i + 2];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+            continue;
+        }
+        outTriangles.emplace_back(i0, i1, i2, 0);
+    }
+    return !outTriangles.empty();
+}
+
+bool BuildConvexPoints(const Mesh& mesh,
+                       const Math::Matrix4x4& transform,
+                       std::vector<JPH::Vec3>& outPoints,
+                       size_t maxPoints) {
+    const auto& vertices = mesh.getVertices();
+    if (vertices.empty()) {
+        return false;
+    }
+    size_t count = vertices.size();
+    if (maxPoints > 0 && count > maxPoints) {
+        outPoints.reserve(maxPoints);
+        size_t step = std::max<size_t>(1, count / maxPoints);
+        for (size_t i = 0; i < count && outPoints.size() < maxPoints; i += step) {
+            Math::Vector3 p = transform.transformPoint(vertices[i].position);
+            outPoints.emplace_back(p.x, p.y, p.z);
+        }
+    } else {
+        outPoints.reserve(count);
+        for (const auto& v : vertices) {
+            Math::Vector3 p = transform.transformPoint(v.position);
+            outPoints.emplace_back(p.x, p.y, p.z);
+        }
+    }
+    return !outPoints.empty();
+}
+
+bool ComputeMeshBounds(const Mesh& mesh,
+                       const Math::Matrix4x4& transform,
+                       Math::Vector3& outMin,
+                       Math::Vector3& outMax) {
+    Math::Vector3 min = mesh.getBoundsMin();
+    Math::Vector3 max = mesh.getBoundsMax();
+    Math::Vector3 corners[8] = {
+        {min.x, min.y, min.z},
+        {max.x, min.y, min.z},
+        {min.x, max.y, min.z},
+        {max.x, max.y, min.z},
+        {min.x, min.y, max.z},
+        {max.x, min.y, max.z},
+        {min.x, max.y, max.z},
+        {max.x, max.y, max.z}
+    };
+
+    Math::Vector3 t = transform.transformPoint(corners[0]);
+    outMin = t;
+    outMax = t;
+    for (int i = 1; i < 8; ++i) {
+        Math::Vector3 p = transform.transformPoint(corners[i]);
+        outMin.x = std::min(outMin.x, p.x);
+        outMin.y = std::min(outMin.y, p.y);
+        outMin.z = std::min(outMin.z, p.z);
+        outMax.x = std::max(outMax.x, p.x);
+        outMax.y = std::max(outMax.y, p.y);
+        outMax.z = std::max(outMax.z, p.z);
+    }
+    return true;
 }
 
 struct BodyPairKey {
@@ -579,6 +793,30 @@ void PhysicsWorld::debugDraw(DebugRenderer* renderer) {
             renderer->drawLine(top - Math::Vector3(0, 0, radius), bottom - Math::Vector3(0, 0, radius), color);
             break;
         }
+        case PhysicsCollider::ShapeType::Mesh: {
+            MeshRenderer* meshRenderer = FindMeshRendererForCollider(entity);
+            if (meshRenderer && meshRenderer->getMesh()) {
+                Math::Matrix4x4 meshTransform;
+                if (BuildMeshTransform(entity, meshRenderer, meshTransform)) {
+                    Math::Vector3 boundsMin;
+                    Math::Vector3 boundsMax;
+                    Math::Matrix4x4 scaledTransform = Math::Matrix4x4::Scale(absScale) * meshTransform;
+                    if (ComputeMeshBounds(*meshRenderer->getMesh(), scaledTransform, boundsMin, boundsMax)) {
+                        Math::Vector3 center = (boundsMin + boundsMax) * 0.5f;
+                        Math::Vector3 size = boundsMax - boundsMin;
+                        center += collider->getCenter();
+                        Math::Matrix4x4 worldNoScale = Math::Matrix4x4::TRS(transform->getPosition(),
+                                                                            transform->getRotation(),
+                                                                            Math::Vector3::One);
+                        Math::Vector3 worldCenter = worldNoScale.transformPoint(center);
+                        renderer->drawBox(worldCenter, size, color);
+                        break;
+                    }
+                }
+            }
+            renderer->drawBox(pos, collider->getSize(), color);
+            break;
+        }
         case PhysicsCollider::ShapeType::Box:
         default: {
             Math::Vector3 size = collider->getSize();
@@ -640,7 +878,7 @@ void PhysicsWorld::rebuildBody(Entity* entity) {
     Math::Quaternion rot = transform->getRotation();
     Math::Vector3 scale = transform->getScale();
 
-    JPH::RefConst<JPH::Shape> shape = buildShape(*collider, scale);
+    JPH::RefConst<JPH::Shape> shape = buildShape(*collider, scale, entity, type);
     if (!shape) {
         return;
     }
@@ -821,8 +1059,11 @@ void PhysicsWorld::updateBodyTransform(BodyRecord& record, Entity* entity) {
 }
 
 JPH::RefConst<JPH::Shape> PhysicsWorld::buildShape(const PhysicsCollider& collider,
-                                                   const Math::Vector3& scale) const {
+                                                   const Math::Vector3& scale,
+                                                   const Entity* entity,
+                                                   RigidbodyType bodyType) const {
     Math::Vector3 absScale(std::abs(scale.x), std::abs(scale.y), std::abs(scale.z));
+    Math::Vector3 shapeOffset(0.0f, 0.0f, 0.0f);
     JPH::RefConst<JPH::Shape> shape;
 
     switch (collider.getShapeType()) {
@@ -837,6 +1078,78 @@ JPH::RefConst<JPH::Shape> PhysicsWorld::buildShape(const PhysicsCollider& collid
         shape = new JPH::CapsuleShape(halfHeight, radius);
         break;
     }
+    case PhysicsCollider::ShapeType::Mesh: {
+        MeshRenderer* renderer = FindMeshRendererForCollider(entity);
+        if (!renderer || !renderer->getMesh()) {
+            std::cout << "[Physics] Mesh collider missing MeshRenderer on entity: "
+                      << (entity ? entity->getName() : "Unknown") << std::endl;
+            break;
+        }
+        const Mesh& mesh = *renderer->getMesh();
+        Math::Matrix4x4 meshTransform;
+        if (!BuildMeshTransform(entity, renderer, meshTransform)) {
+            std::cout << "[Physics] Mesh collider failed to compute transform for entity: "
+                      << (entity ? entity->getName() : "Unknown") << std::endl;
+            break;
+        }
+        Math::Matrix4x4 scaledTransform = Math::Matrix4x4::Scale(absScale) * meshTransform;
+
+        if (bodyType == RigidbodyType::Static) {
+            JPH::VertexList vertices;
+            JPH::IndexedTriangleList indexedTriangles;
+            if (BuildMeshIndexed(mesh, scaledTransform, vertices, indexedTriangles)) {
+                JPH::MeshShapeSettings settings(std::move(vertices), std::move(indexedTriangles));
+                auto result = settings.Create();
+                if (result.HasError()) {
+                    std::cout << "[Physics] Mesh collider error: "
+                              << result.GetError() << std::endl;
+                } else {
+                    shape = result.Get();
+                }
+            } else {
+                JPH::TriangleList triangles;
+                if (BuildMeshTriangles(mesh, scaledTransform, triangles)) {
+                    JPH::MeshShapeSettings settings(triangles);
+                    auto result = settings.Create();
+                    if (result.HasError()) {
+                        std::cout << "[Physics] Mesh collider error: "
+                                  << result.GetError() << std::endl;
+                    } else {
+                        shape = result.Get();
+                    }
+                }
+            }
+        } else {
+            std::vector<JPH::Vec3> points;
+            constexpr size_t kMaxHullPoints = 1024;
+            if (BuildConvexPoints(mesh, scaledTransform, points, kMaxHullPoints)) {
+                JPH::ConvexHullShapeSettings settings(points.data(),
+                                                      static_cast<int>(points.size()),
+                                                      JPH::cDefaultConvexRadius);
+                auto result = settings.Create();
+                if (result.HasError()) {
+                    std::cout << "[Physics] Convex hull collider error: "
+                              << result.GetError() << std::endl;
+                } else {
+                    shape = result.Get();
+                }
+            }
+        }
+
+        if (!shape) {
+            Math::Vector3 boundsMin;
+            Math::Vector3 boundsMax;
+            if (ComputeMeshBounds(mesh, scaledTransform, boundsMin, boundsMax)) {
+                Math::Vector3 size = boundsMax - boundsMin;
+                Math::Vector3 half(size.x * 0.5f, size.y * 0.5f, size.z * 0.5f);
+                if (half.x > 0.0f && half.y > 0.0f && half.z > 0.0f) {
+                    shape = new JPH::BoxShape(JPH::Vec3(half.x, half.y, half.z));
+                    shapeOffset = (boundsMin + boundsMax) * 0.5f;
+                }
+            }
+        }
+        break;
+    }
     case PhysicsCollider::ShapeType::Box:
     default: {
         Math::Vector3 half = collider.getSize() * 0.5f;
@@ -848,7 +1161,7 @@ JPH::RefConst<JPH::Shape> PhysicsWorld::buildShape(const PhysicsCollider& collid
     }
     }
 
-    Math::Vector3 center = collider.getCenter();
+    Math::Vector3 center = collider.getCenter() + shapeOffset;
     if (shape && (center.x != 0.0f || center.y != 0.0f || center.z != 0.0f)) {
         shape = new JPH::RotatedTranslatedShape(JPH::Vec3(center.x, center.y, center.z),
                                                 JPH::Quat::sIdentity(),

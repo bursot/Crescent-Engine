@@ -11,7 +11,8 @@ public:
     enum class ShapeType {
         Box,
         Sphere,
-        Capsule
+        Capsule,
+        Mesh
     };
 
     enum class CombineMode {

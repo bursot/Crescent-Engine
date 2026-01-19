@@ -871,7 +871,7 @@ struct PhysicsInspector: View {
 
     private let timer = Timer.publish(every: 0.8, on: .main, in: .common).autoconnect()
     private let bodyTypes = ["Static", "Dynamic", "Kinematic"]
-    private let shapeTypes = ["Box", "Sphere", "Capsule"]
+    private let shapeTypes = ["Box", "Sphere", "Capsule", "Mesh"]
     private let combineModes = ["Average", "Min", "Multiply", "Max"]
     private let textureExtensions: Set<String> = [
         "png", "jpg", "jpeg", "tga", "bmp", "gif", "tif", "tiff", "ktx", "ktx2", "dds", "cube"
@@ -1029,13 +1029,17 @@ struct PhysicsInspector: View {
                     SliderRow(title: "Radius", value: $radius, range: 0.01...10, step: 0.01) { _ in
                         pushCollider()
                     }
-                } else {
+                } else if shapeType == "Capsule" {
                     SliderRow(title: "Radius", value: $radius, range: 0.01...10, step: 0.01) { _ in
                         pushCollider()
                     }
                     SliderRow(title: "Height", value: $height, range: 0.1...20, step: 0.05) { _ in
                         pushCollider()
                     }
+                } else {
+                    Text("Mesh collider uses the MeshRenderer on this entity or a child named with 'collider'.")
+                        .font(EditorTheme.font(size: 10, weight: .medium))
+                        .foregroundColor(EditorTheme.textMuted)
                 }
 
                 Vector3InputRow(title: "Center", values: $center) {

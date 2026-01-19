@@ -18,6 +18,7 @@ class Entity;
 class DebugRenderer;
 class Rigidbody;
 class PhysicsCollider;
+enum class RigidbodyType;
 
 class PhysicsWorld {
 public:
@@ -131,7 +132,9 @@ private:
     Entity* resolveEntity(const JPH::BodyID& bodyID) const;
 
     JPH::RefConst<JPH::Shape> buildShape(const PhysicsCollider& collider,
-                                         const Math::Vector3& scale) const;
+                                         const Math::Vector3& scale,
+                                         const Entity* entity,
+                                         RigidbodyType bodyType) const;
     void updateBodyTransform(BodyRecord& record, Entity* entity);
 
 private:

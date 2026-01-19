@@ -2872,6 +2872,7 @@ static NSString* ColliderShapeToString(PhysicsCollider::ShapeType type) {
     switch (type) {
     case PhysicsCollider::ShapeType::Sphere: return @"Sphere";
     case PhysicsCollider::ShapeType::Capsule: return @"Capsule";
+    case PhysicsCollider::ShapeType::Mesh: return @"Mesh";
     case PhysicsCollider::ShapeType::Box:
     default:
         return @"Box";
@@ -2882,6 +2883,7 @@ static PhysicsCollider::ShapeType ColliderShapeFromString(NSString* value) {
     if (!value) return PhysicsCollider::ShapeType::Box;
     if ([value isEqualToString:@"Sphere"]) return PhysicsCollider::ShapeType::Sphere;
     if ([value isEqualToString:@"Capsule"]) return PhysicsCollider::ShapeType::Capsule;
+    if ([value isEqualToString:@"Mesh"]) return PhysicsCollider::ShapeType::Mesh;
     return PhysicsCollider::ShapeType::Box;
 }
 

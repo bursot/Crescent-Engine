@@ -111,6 +111,7 @@ std::string ColliderShapeToString(PhysicsCollider::ShapeType type) {
     switch (type) {
     case PhysicsCollider::ShapeType::Sphere: return "Sphere";
     case PhysicsCollider::ShapeType::Capsule: return "Capsule";
+    case PhysicsCollider::ShapeType::Mesh: return "Mesh";
     case PhysicsCollider::ShapeType::Box:
     default:
         return "Box";
@@ -131,6 +132,7 @@ std::string CombineModeToString(PhysicsCollider::CombineMode mode) {
 PhysicsCollider::ShapeType ColliderShapeFromString(const std::string& value) {
     if (value == "Sphere") return PhysicsCollider::ShapeType::Sphere;
     if (value == "Capsule") return PhysicsCollider::ShapeType::Capsule;
+    if (value == "Mesh") return PhysicsCollider::ShapeType::Mesh;
     return PhysicsCollider::ShapeType::Box;
 }
 
