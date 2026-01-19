@@ -7,6 +7,7 @@
 #include "../Rendering/Mesh.hpp"
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <algorithm>
 #include <iostream>
 #include <array>
 #include <cstring>
@@ -56,6 +57,7 @@ ShadowRenderPass::ShadowRenderPass()
     , m_areaPipelineSkinned(nullptr)
     , m_skinningBuffer(nullptr)
     , m_skinningBufferCapacity(0)
+    , m_skinningBufferOffset(0)
     , m_atlasResolution(4096)
     , m_atlasLayers(1) {
 }
@@ -113,6 +115,7 @@ void ShadowRenderPass::shutdown() {
     if (m_areaPipelineSkinned) { m_areaPipelineSkinned->release(); m_areaPipelineSkinned = nullptr; }
     if (m_skinningBuffer) { m_skinningBuffer->release(); m_skinningBuffer = nullptr; }
     m_skinningBufferCapacity = 0;
+    m_skinningBufferOffset = 0;
 }
 
 void ShadowRenderPass::buildDepthState() {
@@ -121,6 +124,28 @@ void ShadowRenderPass::buildDepthState() {
     depthDesc->setDepthWriteEnabled(true);
     m_depthState = m_device->newDepthStencilState(depthDesc);
     depthDesc->release();
+}
+
+bool ShadowRenderPass::allocateSkinningSlice(size_t bytes, size_t& outOffset) {
+    constexpr size_t kAlignment = 256;
+    size_t alignedOffset = (m_skinningBufferOffset + (kAlignment - 1)) & ~(kAlignment - 1);
+    size_t required = alignedOffset + bytes;
+    if (!m_skinningBuffer || required > m_skinningBufferCapacity) {
+        size_t newCapacity = std::max(required, m_skinningBufferCapacity > 0 ? m_skinningBufferCapacity * 2 : required);
+        if (m_skinningBuffer) {
+            m_skinningBuffer->release();
+        }
+        m_skinningBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
+        m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
+        alignedOffset = 0;
+        required = bytes;
+    }
+    if (!m_skinningBuffer || m_skinningBufferCapacity < required) {
+        return false;
+    }
+    outOffset = alignedOffset;
+    m_skinningBufferOffset = alignedOffset + bytes;
+    return true;
 }
 
 void ShadowRenderPass::buildPipelines() {
@@ -171,6 +196,8 @@ void ShadowRenderPass::execute(MTL::CommandBuffer* cmdBuffer,
     if (!cmdBuffer || !scene || !camera || !m_shadowAtlas) {
         return;
     }
+
+    m_skinningBufferOffset = 0;
     
     // Clear atlas once
     {
@@ -268,16 +295,12 @@ void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* s
                 enc->setVertexBuffer(skinBuffer, 0, 4);
                 const auto& boneMatrices = skinned->getBoneMatrices();
                 size_t bytes = boneMatrices.size() * sizeof(Math::Matrix4x4);
-                if (!m_skinningBuffer || m_skinningBufferCapacity < bytes) {
-                    if (m_skinningBuffer) {
-                        m_skinningBuffer->release();
-                    }
-                    m_skinningBuffer = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
-                    m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
-                }
-                if (m_skinningBuffer) {
-                    std::memcpy(m_skinningBuffer->contents(), boneMatrices.data(), bytes);
-                    enc->setVertexBuffer(m_skinningBuffer, 0, 2);
+                size_t bufferOffset = 0;
+                if (allocateSkinningSlice(bytes, bufferOffset)) {
+                    std::memcpy(static_cast<char*>(m_skinningBuffer->contents()) + bufferOffset,
+                                boneMatrices.data(),
+                                bytes);
+                    enc->setVertexBuffer(m_skinningBuffer, bufferOffset, 2);
                 }
             }
             enc->setVertexBytes(&mvp, sizeof(Math::Matrix4x4), 1);
@@ -398,16 +421,12 @@ void ShadowRenderPass::renderLightRange(MTL::CommandBuffer* cmdBuffer,
             enc->setVertexBuffer(skinBuffer, 0, 4);
             const auto& boneMatrices = skinned->getBoneMatrices();
             size_t bytes = boneMatrices.size() * sizeof(Math::Matrix4x4);
-            if (!m_skinningBuffer || m_skinningBufferCapacity < bytes) {
-                if (m_skinningBuffer) {
-                    m_skinningBuffer->release();
-                }
-                m_skinningBuffer = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
-                m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
-            }
-            if (m_skinningBuffer) {
-                std::memcpy(m_skinningBuffer->contents(), boneMatrices.data(), bytes);
-                enc->setVertexBuffer(m_skinningBuffer, 0, 2);
+            size_t bufferOffset = 0;
+            if (allocateSkinningSlice(bytes, bufferOffset)) {
+                std::memcpy(static_cast<char*>(m_skinningBuffer->contents()) + bufferOffset,
+                            boneMatrices.data(),
+                            bytes);
+                enc->setVertexBuffer(m_skinningBuffer, bufferOffset, 2);
             }
         }
         enc->setVertexBytes(&mvp, sizeof(Math::Matrix4x4), 1);
@@ -545,16 +564,12 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
                     enc->setVertexBuffer(skinBuffer, 0, 4);
                     const auto& boneMatrices = skinned->getBoneMatrices();
                     size_t bytes = boneMatrices.size() * sizeof(Math::Matrix4x4);
-                    if (!m_skinningBuffer || m_skinningBufferCapacity < bytes) {
-                        if (m_skinningBuffer) {
-                            m_skinningBuffer->release();
-                        }
-                        m_skinningBuffer = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
-                        m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
-                    }
-                    if (m_skinningBuffer) {
-                        std::memcpy(m_skinningBuffer->contents(), boneMatrices.data(), bytes);
-                        enc->setVertexBuffer(m_skinningBuffer, 0, 2);
+                    size_t bufferOffset = 0;
+                    if (allocateSkinningSlice(bytes, bufferOffset)) {
+                        std::memcpy(static_cast<char*>(m_skinningBuffer->contents()) + bufferOffset,
+                                    boneMatrices.data(),
+                                    bytes);
+                        enc->setVertexBuffer(m_skinningBuffer, bufferOffset, 2);
                     }
                 }
                 enc->setVertexBytes(&mvp, sizeof(Math::Matrix4x4), 1);

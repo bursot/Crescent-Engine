@@ -1343,6 +1343,7 @@ Entity* SceneCommands::importModel(Scene* scene, const std::string& path, const 
     }
     
     Assimp::Importer importer;
+    importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
     if (options.scale > 0.0f && options.scale != 1.0f) {
         importer.SetPropertyFloat(AI_CONFIG_GLOBAL_SCALE_FACTOR_KEY, options.scale);
     }

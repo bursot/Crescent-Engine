@@ -101,10 +101,24 @@ Entity* Scene::createEntityWithUUID(UUID uuid, const std::string& name) {
 
 void Scene::destroyEntity(Entity* entity) {
     if (!entity) return;
-    
+
+    Transform* transform = entity->getTransform();
+    if (transform) {
+        std::vector<Transform*> children = transform->getChildren();
+        for (Transform* child : children) {
+            if (!child) {
+                continue;
+            }
+            Entity* childEntity = child->getEntity();
+            if (childEntity) {
+                destroyEntity(childEntity);
+            }
+        }
+    }
+
     SelectionSystem::removeEntity(entity);
     UUID uuid = entity->getUUID();
-    
+
     // Call lifecycle
     entity->OnDestroy();
     

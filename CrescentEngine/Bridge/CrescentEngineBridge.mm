@@ -38,6 +38,108 @@
 using namespace Crescent;
 static const void* kEngineQueueKey = &kEngineQueueKey;
 
+struct MaterialBinding {
+    Entity* entity = nullptr;
+    MeshRenderer* renderer = nullptr;
+    SkinnedMeshRenderer* skinned = nullptr;
+    std::shared_ptr<Material> material;
+};
+
+static MaterialBinding GetMaterialBindingForEntityUUID(const std::string& entityUUID) {
+    MaterialBinding binding;
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) return binding;
+
+    Entity* entity = SceneCommands::getEntityByUUID(scene, entityUUID);
+    if (!entity) return binding;
+
+    binding.entity = entity;
+    binding.renderer = entity->getComponent<MeshRenderer>();
+    binding.skinned = entity->getComponent<SkinnedMeshRenderer>();
+
+    if (binding.renderer) {
+        binding.material = binding.renderer->getMaterial(0);
+    }
+    if (!binding.material && binding.skinned) {
+        binding.material = binding.skinned->getMaterial(0);
+    }
+    return binding;
+}
+
+static bool IsMaterialShared(Scene* scene,
+                             const std::shared_ptr<Material>& material,
+                             const Entity* owner) {
+    if (!scene || !material) {
+        return false;
+    }
+    for (const auto& entry : scene->getAllEntities()) {
+        const Entity* entity = entry.get();
+        if (!entity || entity == owner) {
+            continue;
+        }
+        if (const auto* renderer = entity->getComponent<MeshRenderer>()) {
+            const auto& materials = renderer->getMaterials();
+            for (const auto& current : materials) {
+                if (current == material) {
+                    return true;
+                }
+            }
+        }
+        if (const auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            const auto& materials = skinned->getMaterials();
+            for (const auto& current : materials) {
+                if (current == material) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static std::shared_ptr<Material> CloneMaterial(const std::shared_ptr<Material>& source) {
+    if (!source) {
+        return nullptr;
+    }
+    auto clone = std::make_shared<Material>(*source);
+    if (!source->getName().empty()) {
+        clone->setName(source->getName() + " (Instance)");
+    }
+    return clone;
+}
+
+static std::shared_ptr<Material> EnsureUniqueMaterialForEntity(MaterialBinding& binding) {
+    if (!binding.material || !binding.entity) {
+        return binding.material;
+    }
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!IsMaterialShared(scene, binding.material, binding.entity)) {
+        return binding.material;
+    }
+    auto clone = CloneMaterial(binding.material);
+    if (!clone) {
+        return binding.material;
+    }
+    if (binding.renderer) {
+        const auto& materials = binding.renderer->getMaterials();
+        for (size_t i = 0; i < materials.size(); ++i) {
+            if (materials[i] == binding.material) {
+                binding.renderer->setMaterial(static_cast<uint32_t>(i), clone);
+            }
+        }
+    }
+    if (binding.skinned) {
+        const auto& materials = binding.skinned->getMaterials();
+        for (size_t i = 0; i < materials.size(); ++i) {
+            if (materials[i] == binding.material) {
+                binding.skinned->setMaterial(static_cast<uint32_t>(i), clone);
+            }
+        }
+    }
+    binding.material = clone;
+    return binding.material;
+}
+
 static std::shared_ptr<Material> GetPrimaryMaterialForEntityUUID(const std::string& entityUUID) {
     Scene* scene = SceneManager::getInstance().getActiveScene();
     if (!scene) return nullptr;
@@ -46,9 +148,13 @@ static std::shared_ptr<Material> GetPrimaryMaterialForEntityUUID(const std::stri
     if (!entity) return nullptr;
     
     MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
-    if (!renderer) return nullptr;
-    
-    return renderer->getMaterial(0);
+    if (renderer) {
+        return renderer->getMaterial(0);
+    }
+    if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+        return skinned->getMaterial(0);
+    }
+    return nullptr;
 }
 
 static SkinnedMeshRenderer* GetSkinnedByUUID(const std::string& entityUUID) {
@@ -1091,7 +1197,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (void)setMaterialScalarForEntity:(NSString *)uuid property:(NSString *)property value:(float)value {
     [self performAsync:^{
-        auto material = GetPrimaryMaterialForEntityUUID([uuid UTF8String]);
+        auto binding = GetMaterialBindingForEntityUUID([uuid UTF8String]);
+        auto material = EnsureUniqueMaterialForEntity(binding);
         if (!material) return;
         
         std::string prop = [property UTF8String];
@@ -1125,7 +1232,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (void)setMaterialColorForEntity:(NSString *)uuid property:(NSString *)property r:(float)r g:(float)g b:(float)b a:(float)a {
     [self performAsync:^{
-        auto material = GetPrimaryMaterialForEntityUUID([uuid UTF8String]);
+        auto binding = GetMaterialBindingForEntityUUID([uuid UTF8String]);
+        auto material = EnsureUniqueMaterialForEntity(binding);
         if (!material) return;
         
         std::string prop = [property UTF8String];
@@ -1143,7 +1251,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             return NO;
         }
         
-        auto material = GetPrimaryMaterialForEntityUUID([uuid UTF8String]);
+        auto binding = GetMaterialBindingForEntityUUID([uuid UTF8String]);
+        auto material = EnsureUniqueMaterialForEntity(binding);
         if (!material) return NO;
         
         std::string slotStr = [slot UTF8String];
@@ -1168,7 +1277,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (void)clearTextureForEntity:(NSString *)uuid slot:(NSString *)slot {
     [self performAsync:^{
-        auto material = GetPrimaryMaterialForEntityUUID([uuid UTF8String]);
+        auto binding = GetMaterialBindingForEntityUUID([uuid UTF8String]);
+        auto material = EnsureUniqueMaterialForEntity(binding);
         if (!material) return;
         
         std::string slotStr = [slot UTF8String];

@@ -43,6 +43,7 @@ public:
 private:
     void buildPipelines();
     void buildDepthState();
+    bool allocateSkinningSlice(size_t bytes, size_t& outOffset);
     void renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* scene, const LightingSystem& lighting);
     void renderLocal(MTL::CommandBuffer* cmdBuffer, Scene* scene, const LightingSystem& lighting);
     void renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* scene, const LightingSystem& lighting);
@@ -69,6 +70,7 @@ private:
     MTL::RenderPipelineState* m_areaPipelineSkinned;
     MTL::Buffer* m_skinningBuffer;
     size_t m_skinningBufferCapacity;
+    size_t m_skinningBufferOffset;
     
     uint32_t m_atlasResolution;
     uint32_t m_atlasLayers;
