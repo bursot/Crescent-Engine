@@ -40,6 +40,14 @@ public:
     
     // Update active scene
     void update(float deltaTime);
+    void beginFrame();
+    void updateStart();
+    void updateEditor(float deltaTime);
+    void updateFixed(float fixedStep, int steps);
+    void updateFixedPhysics(float fixedStep, int steps);
+    void updateFixedComponents(float fixedStep, int steps);
+    void updateVariable(float deltaTime);
+    float getFixedTimeStep() const;
 
     // Play mode
     bool isPlaying() const { return m_IsPlaying; }

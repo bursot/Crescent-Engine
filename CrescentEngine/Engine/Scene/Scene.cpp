@@ -229,13 +229,19 @@ void Scene::OnFixedUpdate(float deltaTime) {
     if (!m_IsActive) {
         return;
     }
-    if (m_PhysicsWorld) {
-        m_PhysicsWorld->update(deltaTime, true);
-    }
     for (auto& entity : m_Entities) {
         if (entity->isActive() && !entity->isEditorOnly()) {
             entity->OnFixedUpdate(deltaTime);
         }
+    }
+}
+
+void Scene::OnFixedPhysicsUpdate(float deltaTime) {
+    if (!m_IsActive) {
+        return;
+    }
+    if (m_PhysicsWorld) {
+        m_PhysicsWorld->update(deltaTime, true);
     }
 }
 

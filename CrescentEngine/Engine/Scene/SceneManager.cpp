@@ -109,32 +109,93 @@ Camera* SceneManager::getGameCamera() const {
     return findPreferredCamera(m_ActiveScene, false);
 }
 
+void SceneManager::beginFrame() {
+    if (!m_ActiveScene) {
+        return;
+    }
+    Camera::setMainCamera(findPreferredCamera(m_ActiveScene, m_ViewMode == ViewMode::Scene));
+    m_ActiveScene->beginFrame();
+}
+
+void SceneManager::updateStart() {
+    if (!m_ActiveScene || !m_IsPlaying) {
+        return;
+    }
+    m_ActiveScene->OnStart();
+}
+
+void SceneManager::updateEditor(float deltaTime) {
+    if (!m_ActiveScene) {
+        return;
+    }
+    m_ActiveScene->OnEditorUpdate(deltaTime);
+}
+
+void SceneManager::updateFixed(float fixedStep, int steps) {
+    if (!m_ActiveScene || !m_IsPlaying) {
+        return;
+    }
+    updateStart();
+    updateFixedPhysics(fixedStep, steps);
+    updateFixedComponents(fixedStep, steps);
+}
+
+void SceneManager::updateFixedPhysics(float fixedStep, int steps) {
+    if (!m_ActiveScene || !m_IsPlaying || steps <= 0) {
+        return;
+    }
+    for (int i = 0; i < steps; ++i) {
+        m_ActiveScene->OnFixedPhysicsUpdate(fixedStep);
+    }
+}
+
+void SceneManager::updateFixedComponents(float fixedStep, int steps) {
+    if (!m_ActiveScene || !m_IsPlaying || steps <= 0) {
+        return;
+    }
+    for (int i = 0; i < steps; ++i) {
+        m_ActiveScene->OnFixedUpdate(fixedStep);
+    }
+}
+
+void SceneManager::updateVariable(float deltaTime) {
+    if (!m_ActiveScene || !m_IsPlaying) {
+        return;
+    }
+    m_ActiveScene->OnUpdate(deltaTime);
+}
+
+float SceneManager::getFixedTimeStep() const {
+    if (!m_ActiveScene) {
+        return Time::fixedDeltaTime();
+    }
+    if (auto* physics = m_ActiveScene->getPhysicsWorld()) {
+        return physics->getFixedTimeStep();
+    }
+    return Time::fixedDeltaTime();
+}
+
 void SceneManager::update(float deltaTime) {
     if (!m_ActiveScene) {
         return;
     }
     deltaTime = std::max(0.0f, std::min(deltaTime, 0.1f));
 
-    Camera::setMainCamera(findPreferredCamera(m_ActiveScene, m_ViewMode == ViewMode::Scene));
-    m_ActiveScene->beginFrame();
+    beginFrame();
 
     if (m_IsPlaying && m_ViewMode == ViewMode::Scene) {
-        m_ActiveScene->OnEditorUpdate(deltaTime);
+        updateEditor(deltaTime);
     }
 
     if (!m_IsPlaying) {
-        m_ActiveScene->OnEditorUpdate(deltaTime);
+        updateEditor(deltaTime);
         return;
     }
 
     Time::update(deltaTime);
-    m_ActiveScene->OnStart();
-
+    updateStart();
+    float fixedStep = getFixedTimeStep();
     if (!Time::isPaused()) {
-        float fixedStep = Time::fixedDeltaTime();
-        if (auto* physics = m_ActiveScene->getPhysicsWorld()) {
-            fixedStep = physics->getFixedTimeStep();
-        }
         m_FixedAccumulator += Time::deltaTime();
         float maxAccumulator = fixedStep * 4.0f;
         if (m_FixedAccumulator > maxAccumulator) {
@@ -142,13 +203,17 @@ void SceneManager::update(float deltaTime) {
         }
         int steps = 0;
         while (m_FixedAccumulator >= fixedStep && steps < 8) {
-            m_ActiveScene->OnFixedUpdate(fixedStep);
             m_FixedAccumulator -= fixedStep;
             steps++;
         }
+        updateFixedPhysics(fixedStep, steps);
+        updateFixedComponents(fixedStep, steps);
+    } else {
+        updateFixedPhysics(fixedStep, 0);
+        updateFixedComponents(fixedStep, 0);
     }
 
-    m_ActiveScene->OnUpdate(Time::deltaTime());
+    updateVariable(Time::deltaTime());
 }
 
 void SceneManager::enterPlayMode() {

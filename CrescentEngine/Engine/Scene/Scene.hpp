@@ -47,6 +47,7 @@ public:
     void OnDestroy();
     void OnStart();
     void OnUpdate(float deltaTime);
+    void OnFixedPhysicsUpdate(float deltaTime);
     void OnFixedUpdate(float deltaTime);
     void OnEditorUpdate(float deltaTime);
     void beginFrame();

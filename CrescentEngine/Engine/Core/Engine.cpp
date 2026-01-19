@@ -1,5 +1,7 @@
 #include "Engine.hpp"
 #include "SelectionSystem.hpp"
+#include "TaskGraph.hpp"
+#include "Time.hpp"
 #include "../Renderer/Renderer.hpp"
 #include "../Renderer/DebugRenderer.hpp"
 #include "../Scene/SceneManager.hpp"
@@ -96,6 +98,17 @@ bool Engine::initialize() {
         m_gizmoSystem->setSpace(m_currentGizmoSpace);
         std::cout << "Gizmo system initialized (Translate, World space)" << std::endl;
     }
+
+    m_updateJobs.start();
+    m_physicsJobs.start(1);
+    m_audioJobs.start(1);
+    m_renderJobs.start(1);
+    m_framePacer.setMaxDelta(0.05f);
+    m_framePacer.setMaxSteps(5);
+    m_framePacer.setMaxAccumulatorMultiplier(2.0f);
+    m_framePacer.setSmoothing(0.1f);
+    m_framePacer.reset();
+    m_lastPlaying = false;
     
     m_isInitialized = true;
     std::cout << "============================================" << std::endl;
@@ -111,6 +124,11 @@ void Engine::shutdown() {
     }
     
     std::cout << "Shutting down Crescent Engine..." << std::endl;
+
+    m_renderJobs.stop();
+    m_audioJobs.stop();
+    m_physicsJobs.stop();
+    m_updateJobs.stop();
     
     // Destroy all scenes
     SceneManager::getInstance().destroyAllScenes();
@@ -149,26 +167,87 @@ void Engine::update(float deltaTime) {
         }
     }
     
-    // CRITICAL FIX: Update scene FIRST (to read input from previous frame)
-    // Then clear input state for next frame
-    // This fixes the mouse delta timing issue
-    
-    // Update active scene - Components read input here
-    SceneManager::getInstance().update(deltaTime);
-
-    Camera* listenerCamera = nullptr;
     SceneManager& sceneManager = SceneManager::getInstance();
-    if (sceneManager.isPlaying()) {
-        listenerCamera = sceneManager.getGameCamera();
+    if (!sceneManager.getActiveScene()) {
+        input.update();
+        return;
     }
-    if (!listenerCamera) {
-        listenerCamera = sceneManager.getSceneCamera();
+
+    bool isPlaying = sceneManager.isPlaying();
+    if (isPlaying != m_lastPlaying) {
+        m_framePacer.reset();
+        m_lastPlaying = isPlaying;
     }
-    AudioSystem::getInstance().updateListenerFromCamera(listenerCamera);
-    
-    // Clear frame-based input (mouse delta, etc.) for next frame
-    // Previous key/button states are preserved for isKeyDown/isKeyUp
-    InputManager::getInstance().update();
+
+    float unscaledDelta = m_framePacer.prepareDelta(deltaTime);
+    sceneManager.beginFrame();
+
+    if (isPlaying && sceneManager.isSceneView()) {
+        sceneManager.updateEditor(unscaledDelta);
+    }
+
+    if (!isPlaying) {
+        sceneManager.updateEditor(unscaledDelta);
+        JobSystem::JobHandle handle = m_audioJobs.createHandle();
+        m_audioJobs.submit([&sceneManager]() {
+            Camera* listenerCamera = sceneManager.getSceneCamera();
+            AudioSystem::getInstance().updateListenerFromCamera(listenerCamera);
+        }, handle);
+        m_audioJobs.wait(handle);
+        input.update();
+        return;
+    }
+
+    Time::update(unscaledDelta);
+
+    float fixedStep = sceneManager.getFixedTimeStep();
+    FramePacer::Result pacing = m_framePacer.advance(Time::deltaTime(), fixedStep);
+    float scaledDelta = Time::deltaTime();
+
+    TaskGraph graph;
+    auto startTask = graph.addTask("Start", [&sceneManager]() {
+        sceneManager.updateStart();
+    });
+    auto physicsTask = graph.addTask("FixedPhysics", [this, &sceneManager, pacing]() {
+        if (pacing.fixedSteps <= 0) {
+            return;
+        }
+        JobSystem::JobHandle handle = m_physicsJobs.createHandle();
+        m_physicsJobs.submit([&sceneManager, pacing]() {
+            sceneManager.updateFixedPhysics(pacing.fixedStep, pacing.fixedSteps);
+        }, handle);
+        m_physicsJobs.wait(handle);
+    });
+    auto fixedComponentsTask = graph.addTask("FixedUpdate", [&sceneManager, pacing]() {
+        sceneManager.updateFixedComponents(pacing.fixedStep, pacing.fixedSteps);
+    });
+    auto updateTask = graph.addTask("Update", [&sceneManager, scaledDelta]() {
+        sceneManager.updateVariable(scaledDelta);
+    });
+    graph.addDependency(physicsTask, startTask);
+    graph.addDependency(fixedComponentsTask, physicsTask);
+    graph.addDependency(updateTask, fixedComponentsTask);
+
+    auto audioTask = graph.addTask("Audio", [this, &sceneManager]() {
+        JobSystem::JobHandle handle = m_audioJobs.createHandle();
+        m_audioJobs.submit([&sceneManager]() {
+            Camera* listenerCamera = nullptr;
+            if (sceneManager.isPlaying()) {
+                listenerCamera = sceneManager.getGameCamera();
+            }
+            if (!listenerCamera) {
+                listenerCamera = sceneManager.getSceneCamera();
+            }
+            AudioSystem::getInstance().updateListenerFromCamera(listenerCamera);
+        }, handle);
+        m_audioJobs.wait(handle);
+    });
+    graph.addDependency(audioTask, updateTask);
+
+    JobSystem::JobHandle handle = graph.run(m_updateJobs);
+    m_updateJobs.wait(handle);
+
+    input.update();
 }
 
 void Engine::render() {
@@ -176,91 +255,94 @@ void Engine::render() {
         return;
     }
     
-    Scene* activeScene = SceneManager::getInstance().getActiveScene();
-    if (!activeScene) {
-        return;
-    }
-
-    bool hasSceneSurface = m_sceneSurface.isValid();
-    bool hasGameSurface = m_gameSurface.isValid();
-    if (!hasSceneSurface && !hasGameSurface) {
-        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
-        m_renderer->render();
-        return;
-    }
-
-    auto viewMode = SceneManager::getInstance().getViewMode();
-    bool renderSceneSurface = hasSceneSurface && (viewMode == SceneManager::ViewMode::Scene || !hasGameSurface);
-    bool renderGameSurface = hasGameSurface && (viewMode == SceneManager::ViewMode::Game || !hasSceneSurface);
-
-    auto* debugRenderer = m_renderer->getDebugRenderer();
-    const auto& selection = SelectionSystem::getSelection();
-    static int renderDebugCount = 0;
-
-    // Scene view render (editor camera)
-    if (renderSceneSurface) {
-        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
-        m_renderer->setMetalLayer(m_sceneSurface.layer, false);
-        m_renderer->setViewportSize(m_sceneSurface.width, m_sceneSurface.height, true);
-        if (debugRenderer) {
-            debugRenderer->clear();
+    JobSystem::JobHandle handle = m_renderJobs.submit([this]() {
+        Scene* activeScene = SceneManager::getInstance().getActiveScene();
+        if (!activeScene) {
+            return;
         }
 
-        if (renderDebugCount < 5) {
-            if (!selection.empty()) {
-                std::cout << "[RENDER] Drawing gizmo for " << selection.size() << " entities" << std::endl;
-            } else {
-                std::cout << "[RENDER] No selection, skipping gizmo" << std::endl;
+        bool hasSceneSurface = m_sceneSurface.isValid();
+        bool hasGameSurface = m_gameSurface.isValid();
+        if (!hasSceneSurface && !hasGameSurface) {
+            m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
+            m_renderer->render();
+            return;
+        }
+
+        auto viewMode = SceneManager::getInstance().getViewMode();
+        bool renderSceneSurface = hasSceneSurface && (viewMode == SceneManager::ViewMode::Scene || !hasGameSurface);
+        bool renderGameSurface = hasGameSurface && (viewMode == SceneManager::ViewMode::Game || !hasSceneSurface);
+
+        auto* debugRenderer = m_renderer->getDebugRenderer();
+        const auto& selection = SelectionSystem::getSelection();
+        static int renderDebugCount = 0;
+
+        // Scene view render (editor camera)
+        if (renderSceneSurface) {
+            m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
+            m_renderer->setMetalLayer(m_sceneSurface.layer, false);
+            m_renderer->setViewportSize(m_sceneSurface.width, m_sceneSurface.height, true);
+            if (debugRenderer) {
+                debugRenderer->clear();
             }
-            renderDebugCount++;
-        }
 
-        Camera* sceneCamera = SceneManager::getInstance().getSceneCamera();
-        if (sceneCamera && m_gizmoSystem) {
-            float viewportWidth = m_renderer->getViewportWidth();
-            float viewportHeight = m_renderer->getViewportHeight();
-            Math::Vector2 screenSize(viewportWidth, viewportHeight);
-
-            if (!selection.empty()) {
-                for (Entity* entity : selection) {
-                    m_gizmoSystem->drawSelectionBox(entity);
+            if (renderDebugCount < 5) {
+                if (!selection.empty()) {
+                    std::cout << "[RENDER] Drawing gizmo for " << selection.size() << " entities" << std::endl;
+                } else {
+                    std::cout << "[RENDER] No selection, skipping gizmo" << std::endl;
                 }
-                Entity* primarySelection = selection.front();
-                m_gizmoSystem->drawGizmo(primarySelection, sceneCamera, screenSize);
-            } else {
-                m_gizmoSystem->hideGizmoMesh();
+                renderDebugCount++;
+            }
+
+            Camera* sceneCamera = SceneManager::getInstance().getSceneCamera();
+            if (sceneCamera && m_gizmoSystem) {
+                float viewportWidth = m_renderer->getViewportWidth();
+                float viewportHeight = m_renderer->getViewportHeight();
+                Math::Vector2 screenSize(viewportWidth, viewportHeight);
+
+                if (!selection.empty()) {
+                    for (Entity* entity : selection) {
+                        m_gizmoSystem->drawSelectionBox(entity);
+                    }
+                    Entity* primarySelection = selection.front();
+                    m_gizmoSystem->drawGizmo(primarySelection, sceneCamera, screenSize);
+                } else {
+                    m_gizmoSystem->hideGizmoMesh();
+                }
+            }
+
+            if (activeScene && debugRenderer) {
+                if (auto* physics = activeScene->getPhysicsWorld()) {
+                    physics->debugDraw(debugRenderer);
+                }
+            }
+
+            Renderer::RenderOptions sceneOptions;
+            sceneOptions.allowTemporal = false;
+            sceneOptions.updateHistory = false;
+            m_renderer->renderScene(activeScene, sceneCamera, sceneOptions);
+        }
+
+        // Game view render (runtime camera)
+        if (renderGameSurface) {
+            m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Game);
+            m_renderer->setMetalLayer(m_gameSurface.layer, false);
+            m_renderer->setViewportSize(m_gameSurface.width, m_gameSurface.height, true);
+            if (debugRenderer) {
+                debugRenderer->clear();
+            }
+
+            Camera* gameCamera = SceneManager::getInstance().getGameCamera();
+            if (gameCamera) {
+                Renderer::RenderOptions gameOptions;
+                gameOptions.allowTemporal = true;
+                gameOptions.updateHistory = true;
+                m_renderer->renderScene(activeScene, gameCamera, gameOptions);
             }
         }
-
-        if (activeScene && debugRenderer) {
-            if (auto* physics = activeScene->getPhysicsWorld()) {
-                physics->debugDraw(debugRenderer);
-            }
-        }
-
-        Renderer::RenderOptions sceneOptions;
-        sceneOptions.allowTemporal = false;
-        sceneOptions.updateHistory = false;
-        m_renderer->renderScene(activeScene, sceneCamera, sceneOptions);
-    }
-
-    // Game view render (runtime camera)
-    if (renderGameSurface) {
-        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Game);
-        m_renderer->setMetalLayer(m_gameSurface.layer, false);
-        m_renderer->setViewportSize(m_gameSurface.width, m_gameSurface.height, true);
-        if (debugRenderer) {
-            debugRenderer->clear();
-        }
-
-        Camera* gameCamera = SceneManager::getInstance().getGameCamera();
-        if (gameCamera) {
-            Renderer::RenderOptions gameOptions;
-            gameOptions.allowTemporal = true;
-            gameOptions.updateHistory = true;
-            m_renderer->renderScene(activeScene, gameCamera, gameOptions);
-        }
-    }
+    });
+    m_renderJobs.wait(handle);
 }
 
 void Engine::setSceneMetalLayer(void* layer) {

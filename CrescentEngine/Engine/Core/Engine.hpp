@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 #include "GizmoSystem.hpp"
+#include "JobSystem.hpp"
+#include "FramePacer.hpp"
 
 namespace Crescent {
 
@@ -84,6 +86,13 @@ private:
 
     RenderSurface m_sceneSurface;
     RenderSurface m_gameSurface;
+
+    JobSystem m_updateJobs;
+    JobSystem m_physicsJobs;
+    JobSystem m_audioJobs;
+    JobSystem m_renderJobs;
+    FramePacer m_framePacer;
+    bool m_lastPlaying = false;
     
     // Singleton instance
     static Engine* s_instance;
