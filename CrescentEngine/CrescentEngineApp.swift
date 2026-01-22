@@ -70,7 +70,7 @@ struct CrescentEngineApp: App {
                 Divider()
                 
                 Button("Duplicate") {
-                    // TODO: Duplicate selected object
+                    editorState.duplicateSelected()
                 }
                 .keyboardShortcut("d", modifiers: [.command])
                 

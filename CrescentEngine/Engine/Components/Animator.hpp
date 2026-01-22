@@ -170,6 +170,12 @@ private:
     float m_PrevRootTime;
     Math::Vector3 m_PrevRootPos;
     Math::Quaternion m_PrevRootRot;
+    float m_SmoothedDelta;
+    float m_AnimAccumulator = 0.0f;
+    bool m_HasPose = false;
+    AnimationLocalPose m_PrevPose;
+    AnimationLocalPose m_CurrentPose;
+    AnimationLocalPose m_RenderPose;
     AnimationLocalPose m_StatePose;
     AnimationLocalPose m_NextPose;
     AnimationLocalPose m_BlendPose;

@@ -8,9 +8,15 @@ struct LightInspector: View {
     @State private var color: [Float] = [1,1,1]
     @State private var temperature: Float = 6500
     @State private var intensity: Float = 10
+    @State private var typeIndex: Int = 0
     @State private var unitIndex: Int = 0
     @State private var range: Float = 10
     @State private var falloff: Int = 1
+    @State private var spotAngle: Float = 45.0
+    @State private var innerSpotAngle: Float = 30.0
+    @State private var areaSize: [Float] = [1.0, 1.0]
+    @State private var sourceRadius: Float = 0.0
+    @State private var sourceLength: Float = 0.0
     @State private var castsShadows: Bool = true
     @State private var softShadows: Bool = true
     @State private var shadowRes: Int = 512
@@ -27,6 +33,7 @@ struct LightInspector: View {
     private let resOptions = [256, 512, 1024, 2048]
     private let unitOptions = ["Lumens", "Lux", "Nits"]
     private let falloffOptions = ["Linear", "Inverse Square"]
+    private let typeOptions = ["Directional", "Point", "Spot", "Area Rect", "Area Disk", "Emissive Mesh"]
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -35,6 +42,12 @@ struct LightInspector: View {
                     .font(EditorTheme.font(size: 12, weight: .semibold))
                 Spacer()
             }
+            Picker("Type", selection: Binding(get: { typeIndex }, set: { typeIndex = $0; push(["type": $0]) })) {
+                ForEach(0..<typeOptions.count, id: \.self) { idx in
+                    Text(typeOptions[idx]).tag(idx)
+                }
+            }
+            .pickerStyle(.menu)
             ColorPicker("Color", selection: Binding(
                 get: { Color(.sRGB, red: Double(color[0]), green: Double(color[1]), blue: Double(color[2]), opacity: 1) },
                 set: { newCol in
@@ -43,7 +56,7 @@ struct LightInspector: View {
                     push(["color": color])
                 }), supportsOpacity: false)
             SliderWithValue(label: "Temperature (K)", value: $temperature, range: 1000...20000, step: 100) { push(["temperatureK": $0]) }
-            SliderWithValue(label: "Intensity", value: $intensity, range: 0...100, step: 0.1) { push(["intensity": $0]) }
+            SliderWithValue(label: "Intensity", value: $intensity, range: 0...5000, step: 1) { push(["intensity": $0]) }
             Picker("Unit", selection: Binding(get: { unitIndex }, set: { unitIndex = $0; push(["intensityUnit": $0]) })) {
                 ForEach(0..<unitOptions.count, id: \.self) { idx in
                     Text(unitOptions[idx]).tag(idx)
@@ -55,6 +68,40 @@ struct LightInspector: View {
                     Text(falloffOptions[idx]).tag(idx)
                 }
             }.pickerStyle(.segmented)
+            if typeIndex == 2 {
+                SliderWithValue(label: "Spot Angle", value: $spotAngle, range: 1...179, step: 1) {
+                    spotAngle = max($0, innerSpotAngle)
+                    push(["spotAngle": spotAngle])
+                }
+                SliderWithValue(label: "Inner Angle", value: $innerSpotAngle, range: 0...spotAngle, step: 1) {
+                    innerSpotAngle = min($0, spotAngle)
+                    push(["innerSpotAngle": innerSpotAngle])
+                }
+            }
+            if typeIndex == 3 {
+                SliderWithValue(label: "Area Width", value: Binding(
+                    get: { areaSize[0] },
+                    set: { areaSize[0] = $0; push(["areaSize": areaSize]) }
+                ), range: 0.05...10, step: 0.05)
+                SliderWithValue(label: "Area Height", value: Binding(
+                    get: { areaSize[1] },
+                    set: { areaSize[1] = $0; push(["areaSize": areaSize]) }
+                ), range: 0.05...10, step: 0.05)
+            }
+            if typeIndex == 4 {
+                SliderWithValue(label: "Area Radius", value: Binding(
+                    get: { areaSize[0] },
+                    set: {
+                        areaSize[0] = $0
+                        areaSize[1] = $0
+                        push(["areaSize": areaSize])
+                    }
+                ), range: 0.05...10, step: 0.05)
+            }
+            if typeIndex == 2 || typeIndex == 3 || typeIndex == 4 {
+                SliderWithValue(label: "Source Radius", value: $sourceRadius, range: 0...2, step: 0.01) { push(["sourceRadius": $0]) }
+                SliderWithValue(label: "Source Length", value: $sourceLength, range: 0...4, step: 0.01) { push(["sourceLength": $0]) }
+            }
             Toggle("Cast Shadows", isOn: Binding(get: { castsShadows }, set: { castsShadows = $0; push(["castsShadows": $0]) }))
             if castsShadows {
                 Picker("Shadow Resolution", selection: Binding(get: { shadowRes }, set: { shadowRes = $0; push(["shadowResolution": $0]) })) {
@@ -95,12 +142,20 @@ struct LightInspector: View {
         let bridge = CrescentEngineBridge.shared()
         guard let info = bridge.getLightInfo(uuid) as? [String: Any], !info.isEmpty else { return }
         lightData = info
+        typeIndex = (info["type"] as? NSNumber)?.intValue ?? typeIndex
         if let col = info["color"] as? [NSNumber], col.count == 3 { color = col.map { $0.floatValue } }
         temperature = (info["temperatureK"] as? NSNumber)?.floatValue ?? temperature
         intensity = (info["intensity"] as? NSNumber)?.floatValue ?? intensity
         unitIndex = (info["intensityUnit"] as? NSNumber)?.intValue ?? unitIndex
         range = (info["range"] as? NSNumber)?.floatValue ?? range
         falloff = (info["falloff"] as? NSNumber)?.intValue ?? falloff
+        spotAngle = (info["spotAngle"] as? NSNumber)?.floatValue ?? spotAngle
+        innerSpotAngle = (info["innerSpotAngle"] as? NSNumber)?.floatValue ?? innerSpotAngle
+        if let size = info["areaSize"] as? [NSNumber], size.count >= 2 {
+            areaSize = [size[0].floatValue, size[1].floatValue]
+        }
+        sourceRadius = (info["sourceRadius"] as? NSNumber)?.floatValue ?? sourceRadius
+        sourceLength = (info["sourceLength"] as? NSNumber)?.floatValue ?? sourceLength
         castsShadows = (info["castsShadows"] as? NSNumber)?.boolValue ?? castsShadows
         shadowRes = (info["shadowResolution"] as? NSNumber)?.intValue ?? shadowRes
         bias = (info["shadowBias"] as? NSNumber)?.floatValue ?? bias

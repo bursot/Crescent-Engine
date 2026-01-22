@@ -81,6 +81,13 @@ private:
     
     std::vector<std::unique_ptr<Entity>> m_Entities;
     std::unordered_map<UUID, Entity*> m_EntityMap;
+    std::vector<Entity*> m_PendingDestroy;
+    int m_IterationDepth = 0;
+
+    void queueDestroyEntity(Entity* entity);
+    void flushPendingDestroys();
+    void beginIteration() { ++m_IterationDepth; }
+    void endIteration();
 };
 
 } // namespace Crescent

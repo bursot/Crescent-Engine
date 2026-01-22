@@ -826,6 +826,11 @@ struct PhysicsInspector: View {
     @State private var collisionMask: Int = Int(UInt32.max)
     @State private var debugDraw: Bool = false
 
+    @State private var hasHealth: Bool = false
+    @State private var healthMax: Float = 100.0
+    @State private var healthCurrent: Float = 100.0
+    @State private var healthDestroyOnDeath: Bool = true
+
     @State private var hasCharacterController: Bool = false
     @State private var ccRadius: Float = 0.5
     @State private var ccHeight: Float = 2.0
@@ -866,6 +871,10 @@ struct PhysicsInspector: View {
     @State private var fpsUseEyeHeight: Bool = true
     @State private var fpsDriveCharacter: Bool = true
     @State private var fpsFireCooldown: Float = 0.12
+    @State private var fpsFireDamage: Float = 25.0
+    @State private var fpsFireRange: Float = 60.0
+    @State private var fpsFireMask: Int = Int(UInt32.max)
+    @State private var fpsFireHitTriggers: Bool = false
     @State private var fpsMuzzleTexturePath: String = ""
     @State private var showMuzzleFileImporter: Bool = false
 
@@ -891,6 +900,9 @@ struct PhysicsInspector: View {
             Divider()
                 .overlay(EditorTheme.panelStroke)
             colliderSection
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+            healthSection
             Divider()
                 .overlay(EditorTheme.panelStroke)
             characterControllerSection
@@ -1124,6 +1136,52 @@ struct PhysicsInspector: View {
         }
     }
 
+    private var healthSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Health")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                if hasHealth {
+                    Button(action: removeHealth) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if !hasHealth {
+                Button("Add Health") {
+                    let _ = CrescentEngineBridge.shared().addHealth(uuid: entityUUID)
+                    refresh()
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            } else {
+                SliderRow(title: "Max Health", value: $healthMax, range: 1...500, step: 1) { _ in
+                    healthMax = max(1.0, healthMax)
+                    if healthCurrent > healthMax {
+                        healthCurrent = healthMax
+                    }
+                    pushHealth()
+                }
+                SliderRow(title: "Current Health", value: $healthCurrent, range: 0...max(1.0, healthMax), step: 1) { _ in
+                    healthCurrent = min(healthCurrent, healthMax)
+                    pushHealth()
+                }
+
+                Toggle("Destroy On Death", isOn: Binding(
+                    get: { healthDestroyOnDeath },
+                    set: { newVal in
+                        healthDestroyOnDeath = newVal
+                        pushHealth()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+            }
+        }
+    }
+
     private var characterControllerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -1327,6 +1385,35 @@ struct PhysicsInspector: View {
                 SliderRow(title: "Fire Cooldown", value: $fpsFireCooldown, range: 0...0.5, step: 0.01) { _ in
                     pushFirstPersonController()
                 }
+                SliderRow(title: "Fire Damage", value: $fpsFireDamage, range: 0...200, step: 1) { _ in
+                    pushFirstPersonController()
+                }
+                SliderRow(title: "Fire Range", value: $fpsFireRange, range: 1...200, step: 1) { _ in
+                    pushFirstPersonController()
+                }
+                HStack {
+                    Text("Hit Mask")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    TextField("4294967295",
+                              value: Binding(
+                                get: { fpsFireMask },
+                                set: { newVal in
+                                    let clamped = max(0, min(newVal, Int(UInt32.max)))
+                                    fpsFireMask = clamped
+                                    pushFirstPersonController()
+                                }),
+                              formatter: NumberFormatter.intFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                }
+                Toggle("Hit Triggers", isOn: Binding(
+                    get: { fpsFireHitTriggers },
+                    set: { newVal in
+                        fpsFireHitTriggers = newVal
+                        pushFirstPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
                 TextureSlotRow(
                     title: "Muzzle Texture",
                     path: fpsMuzzleTexturePath
@@ -1426,6 +1513,16 @@ struct PhysicsInspector: View {
             hasCollider = false
         }
 
+        if let info = bridge.getHealthInfo(uuid: entityUUID) as? [String: Any],
+           !info.isEmpty {
+            hasHealth = true
+            healthMax = (info["max"] as? NSNumber)?.floatValue ?? healthMax
+            healthCurrent = (info["current"] as? NSNumber)?.floatValue ?? healthCurrent
+            healthDestroyOnDeath = (info["destroyOnDeath"] as? NSNumber)?.boolValue ?? healthDestroyOnDeath
+        } else {
+            hasHealth = false
+        }
+
         if let info = bridge.getCharacterControllerInfo(uuid: entityUUID) as? [String: Any],
            !info.isEmpty {
             hasCharacterController = true
@@ -1473,6 +1570,10 @@ struct PhysicsInspector: View {
             fpsUseEyeHeight = (info["useEyeHeight"] as? NSNumber)?.boolValue ?? fpsUseEyeHeight
             fpsDriveCharacter = (info["driveCharacterController"] as? NSNumber)?.boolValue ?? fpsDriveCharacter
             fpsFireCooldown = (info["fireCooldown"] as? NSNumber)?.floatValue ?? fpsFireCooldown
+            fpsFireDamage = (info["fireDamage"] as? NSNumber)?.floatValue ?? fpsFireDamage
+            fpsFireRange = (info["fireRange"] as? NSNumber)?.floatValue ?? fpsFireRange
+            fpsFireMask = (info["fireMask"] as? NSNumber)?.intValue ?? fpsFireMask
+            fpsFireHitTriggers = (info["fireHitTriggers"] as? NSNumber)?.boolValue ?? fpsFireHitTriggers
             fpsMuzzleTexturePath = info["muzzleTexture"] as? String ?? fpsMuzzleTexturePath
         } else {
             hasFpsController = false
@@ -1512,6 +1613,15 @@ struct PhysicsInspector: View {
         _ = CrescentEngineBridge.shared().setColliderInfo(uuid: entityUUID, info: info)
     }
 
+    private func pushHealth() {
+        let info: [String: Any] = [
+            "max": healthMax,
+            "current": healthCurrent,
+            "destroyOnDeath": healthDestroyOnDeath
+        ]
+        _ = CrescentEngineBridge.shared().setHealthInfo(uuid: entityUUID, info: info)
+    }
+
     private func removeRigidbody() {
         CrescentEngineBridge.shared().removeRigidbody(uuid: entityUUID)
         hasRigidbody = false
@@ -1520,6 +1630,11 @@ struct PhysicsInspector: View {
     private func removeCollider() {
         CrescentEngineBridge.shared().removeCollider(uuid: entityUUID)
         hasCollider = false
+    }
+
+    private func removeHealth() {
+        CrescentEngineBridge.shared().removeHealth(uuid: entityUUID)
+        hasHealth = false
     }
 
     private func pushCharacterController() {
@@ -1572,6 +1687,10 @@ struct PhysicsInspector: View {
             "useEyeHeight": fpsUseEyeHeight,
             "driveCharacterController": fpsDriveCharacter,
             "fireCooldown": fpsFireCooldown,
+            "fireDamage": fpsFireDamage,
+            "fireRange": fpsFireRange,
+            "fireMask": fpsFireMask,
+            "fireHitTriggers": fpsFireHitTriggers,
             "muzzleTexture": fpsMuzzleTexturePath
         ]
         _ = CrescentEngineBridge.shared().setFirstPersonControllerInfo(uuid: entityUUID, info: info)

@@ -305,6 +305,19 @@ class EditorState: ObservableObject {
         selectedEntityUUIDs = []
         refreshEntityList()
     }
+
+    func duplicateSelected() {
+        guard !selectedEntityUUIDs.isEmpty else { return }
+
+        let uuids = Array(selectedEntityUUIDs)
+        let duplicated = CrescentEngineBridge.shared().duplicateEntities(uuids: uuids) as? [String] ?? []
+        refreshEntityList()
+        if !duplicated.isEmpty {
+            selectedEntityUUIDs = Set(duplicated)
+            syncSelectionToEngine()
+            addLog(.info, "Duplicated \(duplicated.count) object(s)")
+        }
+    }
     
     private func syncSelectionToEngine() {
         let uuids = Array(selectedEntityUUIDs)

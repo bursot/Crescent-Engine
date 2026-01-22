@@ -54,6 +54,16 @@ public:
     float getTimeSeconds() const { return m_TimeSeconds; }
     void setTimeSeconds(float time) { m_TimeSeconds = time; }
 
+    bool getRootMotionEnabled() const { return m_RootMotionEnabled; }
+    void setRootMotionEnabled(bool enabled) {
+        m_RootMotionEnabled = enabled;
+        m_RootMotionValid = false;
+    }
+    bool getApplyRootMotionPosition() const { return m_RootMotionApplyPosition; }
+    void setApplyRootMotionPosition(bool value) { m_RootMotionApplyPosition = value; }
+    bool getApplyRootMotionRotation() const { return m_RootMotionApplyRotation; }
+    void setApplyRootMotionRotation(bool value) { m_RootMotionApplyRotation = value; }
+
     const std::vector<Math::Matrix4x4>& getBoneMatrices() const { return m_BoneMatrices; }
     void setBoneMatrices(const std::vector<Math::Matrix4x4>& matrices) { m_BoneMatrices = matrices; }
     const std::vector<Math::Matrix4x4>& getPreviousBoneMatrices() const { return m_PrevBoneMatrices; }
@@ -61,6 +71,8 @@ public:
     void OnUpdate(float deltaTime) override;
 
 private:
+    void applyRootMotion(AnimationLocalPose& pose, float sampleTime);
+
     std::shared_ptr<Mesh> m_Mesh;
     std::shared_ptr<Skeleton> m_Skeleton;
     std::vector<std::shared_ptr<Material>> m_Materials;
@@ -73,9 +85,15 @@ private:
     float m_BlendDuration;
     float m_BlendElapsed;
     int m_BlendClipIndex;
+    float m_SmoothedDelta = 0.0f;
+    float m_AnimAccumulator = 0.0f;
+    bool m_HasPose = false;
     AnimationLocalPose m_LocalPose;
     AnimationLocalPose m_BlendPose;
     AnimationLocalPose m_BlendResultPose;
+    AnimationLocalPose m_PrevPose;
+    AnimationLocalPose m_CurrentPose;
+    AnimationLocalPose m_RenderPose;
 
     bool m_Playing;
     bool m_Looping;
@@ -83,6 +101,13 @@ private:
     float m_TimeSeconds;
     int m_ActiveClipIndex;
     bool m_DrivenByAnimator;
+    bool m_RootMotionEnabled = false;
+    bool m_RootMotionApplyPosition = true;
+    bool m_RootMotionApplyRotation = false;
+    bool m_RootMotionValid = false;
+    float m_PrevRootTime = 0.0f;
+    Math::Vector3 m_PrevRootPos = Math::Vector3::Zero;
+    Math::Quaternion m_PrevRootRot = Math::Quaternion::Identity;
 };
 
 } // namespace Crescent

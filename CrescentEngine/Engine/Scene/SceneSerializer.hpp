@@ -2,6 +2,7 @@
 
 #include "Scene.hpp"
 #include <string>
+#include <vector>
 
 namespace Crescent {
 
@@ -15,6 +16,7 @@ public:
     static std::string SerializeScene(Scene* scene, bool includeEditorOnly);
     static bool DeserializeScene(Scene* scene, const std::string& data);
     static bool DeserializeScene(Scene* scene, const std::string& data, const std::string& scenePath);
+    static std::vector<Entity*> DuplicateEntities(Scene* scene, const std::vector<Entity*>& entities);
 };
 
 } // namespace Crescent

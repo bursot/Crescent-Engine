@@ -1062,6 +1062,7 @@ JPH::RefConst<JPH::Shape> PhysicsWorld::buildShape(const PhysicsCollider& collid
                                                    const Math::Vector3& scale,
                                                    const Entity* entity,
                                                    RigidbodyType bodyType) const {
+    constexpr float kMinShapeDimension = 0.001f;
     Math::Vector3 absScale(std::abs(scale.x), std::abs(scale.y), std::abs(scale.z));
     Math::Vector3 shapeOffset(0.0f, 0.0f, 0.0f);
     JPH::RefConst<JPH::Shape> shape;
@@ -1069,13 +1070,19 @@ JPH::RefConst<JPH::Shape> PhysicsWorld::buildShape(const PhysicsCollider& collid
     switch (collider.getShapeType()) {
     case PhysicsCollider::ShapeType::Sphere: {
         float radius = collider.getRadius() * std::max({absScale.x, absScale.y, absScale.z});
+        radius = std::max(radius, kMinShapeDimension);
         shape = new JPH::SphereShape(radius);
         break;
     }
     case PhysicsCollider::ShapeType::Capsule: {
         float radius = collider.getRadius() * std::max(absScale.x, absScale.z);
-        float halfHeight = std::max(0.0f, (collider.getHeight() * absScale.y * 0.5f) - radius);
-        shape = new JPH::CapsuleShape(halfHeight, radius);
+        radius = std::max(radius, kMinShapeDimension);
+        float halfHeight = (collider.getHeight() * absScale.y * 0.5f) - radius;
+        if (halfHeight <= kMinShapeDimension) {
+            shape = new JPH::SphereShape(radius);
+        } else {
+            shape = new JPH::CapsuleShape(halfHeight, radius);
+        }
         break;
     }
     case PhysicsCollider::ShapeType::Mesh: {
@@ -1656,18 +1663,22 @@ bool PhysicsWorld::capsuleCast(const Math::Vector3& center,
                                uint32_t layerMask,
                                bool includeTriggers,
                                const Entity* ignore) const {
+    constexpr float kMinShapeDimension = 0.001f;
     outHit = PhysicsRaycastHit{};
     if (!m_Impl || radius <= 0.0f || maxDistance <= 0.0f) {
         return false;
     }
 
-    float halfHeight = std::max(0.0f, (height * 0.5f) - radius);
+    radius = std::max(radius, kMinShapeDimension);
+    float halfHeight = (height * 0.5f) - radius;
     Math::Vector3 dir = direction.normalized();
     if (dir.lengthSquared() == 0.0f) {
         return false;
     }
 
-    JPH::RefConst<JPH::Shape> shape = new JPH::CapsuleShape(halfHeight, radius);
+    JPH::RefConst<JPH::Shape> shape = halfHeight <= kMinShapeDimension
+        ? JPH::RefConst<JPH::Shape>(new JPH::SphereShape(radius))
+        : JPH::RefConst<JPH::Shape>(new JPH::CapsuleShape(halfHeight, radius));
     JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
     JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
     JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,
@@ -1697,18 +1708,22 @@ int PhysicsWorld::capsuleCastAll(const Math::Vector3& center,
                                  uint32_t layerMask,
                                  bool includeTriggers,
                                  const Entity* ignore) const {
+    constexpr float kMinShapeDimension = 0.001f;
     outHits.clear();
     if (!m_Impl || radius <= 0.0f || maxDistance <= 0.0f) {
         return 0;
     }
 
-    float halfHeight = std::max(0.0f, (height * 0.5f) - radius);
+    radius = std::max(radius, kMinShapeDimension);
+    float halfHeight = (height * 0.5f) - radius;
     Math::Vector3 dir = direction.normalized();
     if (dir.lengthSquared() == 0.0f) {
         return 0;
     }
 
-    JPH::RefConst<JPH::Shape> shape = new JPH::CapsuleShape(halfHeight, radius);
+    JPH::RefConst<JPH::Shape> shape = halfHeight <= kMinShapeDimension
+        ? JPH::RefConst<JPH::Shape>(new JPH::SphereShape(radius))
+        : JPH::RefConst<JPH::Shape>(new JPH::CapsuleShape(halfHeight, radius));
     JPH::Vec3 castDir(dir.x * maxDistance, dir.y * maxDistance, dir.z * maxDistance);
     JPH::RMat44 world = JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z));
     JPH::RShapeCast shapeCast = JPH::RShapeCast::sFromWorldTransform(shape,

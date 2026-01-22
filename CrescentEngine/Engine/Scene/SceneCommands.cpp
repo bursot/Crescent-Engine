@@ -1271,8 +1271,8 @@ Entity* SceneCommands::createPointLight(Scene* scene, const std::string& name) {
     Light* light = entity->addComponent<Light>();
     light->setType(Light::Type::Point);
     light->setColor(Math::Vector3(1.0f, 1.0f, 1.0f));
-    light->setIntensity(10.0f);
-    light->setRange(10.0f);
+    light->setIntensity(800.0f);
+    light->setRange(15.0f);
     
     entity->getTransform()->setPosition(Math::Vector3(0, 3, 0));
     
@@ -1287,8 +1287,8 @@ Entity* SceneCommands::createSpotLight(Scene* scene, const std::string& name) {
     Light* light = entity->addComponent<Light>();
     light->setType(Light::Type::Spot);
     light->setColor(Math::Vector3(1.0f, 1.0f, 1.0f));
-    light->setIntensity(10.0f);
-    light->setRange(10.0f);
+    light->setIntensity(1200.0f);
+    light->setRange(20.0f);
     light->setSpotAngle(45.0f);
     
     entity->getTransform()->setPosition(Math::Vector3(0, 5, 0));

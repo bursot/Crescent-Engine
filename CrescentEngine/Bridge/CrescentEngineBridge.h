@@ -42,6 +42,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)importModelAtPath:(NSString *)path NS_SWIFT_NAME(importModel(path:));
 - (BOOL)importModelAtPath:(NSString *)path options:(NSDictionary *)options NS_SWIFT_NAME(importModel(path:options:));
 - (void)deleteEntitiesByUUID:(NSArray<NSString *> *)uuids NS_SWIFT_NAME(deleteEntities(uuids:));
+- (NSArray<NSString *> *)duplicateEntitiesByUUID:(NSArray<NSString *> *)uuids NS_SWIFT_NAME(duplicateEntities(uuids:));
 
 // Scene query
 - (NSArray<NSDictionary *> *)getAllEntityInfo; // Returns array of {uuid, name, parent}
@@ -163,6 +164,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setColliderInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setColliderInfo(uuid:info:));
 - (BOOL)addCollider:(NSString *)uuid NS_SWIFT_NAME(addCollider(uuid:));
 - (void)removeCollider:(NSString *)uuid NS_SWIFT_NAME(removeCollider(uuid:));
+- (NSDictionary *)getHealthInfo:(NSString *)uuid NS_SWIFT_NAME(getHealthInfo(uuid:));
+- (BOOL)setHealthInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setHealthInfo(uuid:info:));
+- (BOOL)addHealth:(NSString *)uuid NS_SWIFT_NAME(addHealth(uuid:));
+- (void)removeHealth:(NSString *)uuid NS_SWIFT_NAME(removeHealth(uuid:));
 - (NSDictionary *)getCharacterControllerInfo:(NSString *)uuid NS_SWIFT_NAME(getCharacterControllerInfo(uuid:));
 - (BOOL)setCharacterControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setCharacterControllerInfo(uuid:info:));
 - (BOOL)addCharacterController:(NSString *)uuid NS_SWIFT_NAME(addCharacterController(uuid:));
@@ -171,6 +176,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setFirstPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setFirstPersonControllerInfo(uuid:info:));
 - (BOOL)addFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(addFirstPersonController(uuid:));
 - (void)removeFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(removeFirstPersonController(uuid:));
+- (NSNumber *)getFireEventCounter NS_SWIFT_NAME(getFireEventCounter());
 - (NSDictionary *)getAudioSourceInfo:(NSString *)uuid NS_SWIFT_NAME(getAudioSourceInfo(uuid:));
 - (BOOL)setAudioSourceInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setAudioSourceInfo(uuid:info:));
 - (BOOL)addAudioSource:(NSString *)uuid NS_SWIFT_NAME(addAudioSource(uuid:));

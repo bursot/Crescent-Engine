@@ -13,6 +13,7 @@
 #include "../Components/SkinnedMeshRenderer.hpp"
 #include "../Components/Animator.hpp"
 #include "../Components/AudioSource.hpp"
+#include "../Components/Health.hpp"
 #include "../Components/Light.hpp"
 #include "../Components/MeshRenderer.hpp"
 #include "../Core/Engine.hpp"
@@ -20,6 +21,7 @@
 #include "../Rendering/Material.hpp"
 #include "../Rendering/Mesh.hpp"
 #include "../Rendering/Texture.hpp"
+#include <atomic>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -50,6 +52,10 @@ public:
         , m_UseEyeHeight(true)
         , m_DriveCharacterController(true)
         , m_FireCooldown(0.12f)
+        , m_FireDamage(25.0f)
+        , m_FireRange(60.0f)
+        , m_FireHitMask(PhysicsWorld::kAllLayersMask)
+        , m_FireHitTriggers(false)
         , m_MuzzleRotationOffset(Math::Quaternion::FromEulerAngles(
               Math::Vector3(90.0f * Math::DEG_TO_RAD, 0.0f, 0.0f))) {
     }
@@ -104,6 +110,20 @@ public:
 
     float getFireCooldown() const { return m_FireCooldown; }
     void setFireCooldown(float value) { m_FireCooldown = std::max(0.0f, value); }
+
+    float getFireDamage() const { return m_FireDamage; }
+    void setFireDamage(float value) { m_FireDamage = std::max(0.0f, value); }
+
+    float getFireRange() const { return m_FireRange; }
+    void setFireRange(float value) { m_FireRange = std::max(0.1f, value); }
+
+    uint32_t getFireHitMask() const { return m_FireHitMask; }
+    void setFireHitMask(uint32_t mask) { m_FireHitMask = mask; }
+
+    bool getFireHitTriggers() const { return m_FireHitTriggers; }
+    void setFireHitTriggers(bool value) { m_FireHitTriggers = value; }
+
+    static uint64_t getFireEventCounter() { return s_FireEventCounter.load(std::memory_order_relaxed); }
 
     const std::string& getMuzzleTexturePath() const { return m_MuzzleTexturePath; }
     void setMuzzleTexturePath(const std::string& path) {
@@ -550,6 +570,7 @@ private:
         bool reloadTriggered = input.isKeyDown(KeyCode::R);
 
         if (fireAllowed) {
+            s_FireEventCounter.fetch_add(1, std::memory_order_relaxed);
             if (!m_FireAudio && m_Entity) {
                 Transform* audioRoot = m_BodyTransform ? m_BodyTransform : m_Entity->getTransform();
                 resolveAudioSources(audioRoot);
@@ -558,6 +579,7 @@ private:
                 m_FireAudio->play();
             }
             triggerMuzzleFlash();
+            applyFireRaycast();
         }
 
         if (reloadTriggered) {
@@ -632,6 +654,53 @@ private:
 
         if (clipIndex >= 0) {
             startAction(movementAction, clipIndex, stateIndex, true, false);
+        }
+    }
+
+    void applyFireRaycast() {
+        if (!m_Entity) {
+            return;
+        }
+        Scene* scene = m_Entity->getScene();
+        if (!scene) {
+            return;
+        }
+        PhysicsWorld* physics = scene->getPhysicsWorld();
+        if (!physics) {
+            return;
+        }
+        Transform* originTransform = m_CameraTransform ? m_CameraTransform : m_BodyTransform;
+        if (!originTransform) {
+            return;
+        }
+        Math::Vector3 origin = originTransform->getPosition();
+        Math::Vector3 direction = originTransform->forward();
+        PhysicsRaycastHit hit{};
+        const Entity* ignore = m_BodyTransform ? m_BodyTransform->getEntity() : m_Entity;
+        if (!physics->raycast(origin, direction, m_FireRange, hit, m_FireHitMask, m_FireHitTriggers, ignore)) {
+            return;
+        }
+        Entity* hitEntity = hit.entity;
+        if (!hitEntity) {
+            return;
+        }
+        Transform* bodyRoot = m_BodyTransform ? m_BodyTransform : m_Entity->getTransform();
+        Transform* hitTransform = hitEntity->getTransform();
+        if (bodyRoot && hitTransform) {
+            if (hitTransform == bodyRoot || hitTransform->isChildOf(bodyRoot)) {
+                return;
+            }
+        }
+
+        Health* health = nullptr;
+        Entity* cursor = hitEntity;
+        while (cursor && !health) {
+            health = cursor->getComponent<Health>();
+            Transform* parent = cursor->getTransform() ? cursor->getTransform()->getParent() : nullptr;
+            cursor = parent ? parent->getEntity() : nullptr;
+        }
+        if (health) {
+            health->applyDamage(m_FireDamage);
         }
     }
 
@@ -808,11 +877,35 @@ private:
         return nullptr;
     }
 
+    AudioSource* findAudioSourceInSceneByTokens(Scene* scene, const std::vector<std::string>& tokens) const {
+        if (!scene) {
+            return nullptr;
+        }
+        for (const auto& entityPtr : scene->getAllEntities()) {
+            Entity* entity = entityPtr.get();
+            if (!entity) {
+                continue;
+            }
+            if (auto* audio = entity->getComponent<AudioSource>()) {
+                std::string name = ToLower(entity->getName());
+                std::string path = ToLower(audio->getFilePath());
+                if (ContainsAnyToken(name, tokens) || ContainsAnyToken(path, tokens)) {
+                    return audio;
+                }
+            }
+        }
+        return nullptr;
+    }
+
     void resolveAudioSources(Transform* root) {
         std::vector<AudioSource*> sources;
         collectAudioSources(root, sources);
         m_FireAudio = findAudioSourceByTokens(root, {"fire", "shoot"});
         m_ReloadAudio = findAudioSourceByTokens(root, {"reload"});
+        if (!m_ReloadAudio) {
+            Scene* scene = m_Entity ? m_Entity->getScene() : nullptr;
+            m_ReloadAudio = findAudioSourceInSceneByTokens(scene, {"reload"});
+        }
         if (!m_FireAudio) {
             if (!sources.empty()) {
                 m_FireAudio = sources.front();
@@ -1100,6 +1193,10 @@ private:
     bool m_DriveCharacterController;
     float m_FireCooldown;
     float m_FireCooldownTimer = 0.0f;
+    float m_FireDamage = 25.0f;
+    float m_FireRange = 60.0f;
+    uint32_t m_FireHitMask = PhysicsWorld::kAllLayersMask;
+    bool m_FireHitTriggers = false;
 
     CharacterController* m_Controller = nullptr;
     Transform* m_BodyTransform = nullptr;
@@ -1117,6 +1214,7 @@ private:
     float m_ActionElapsed = 0.0f;
     float m_ActionDuration = 0.0f;
     bool m_LeftMouseWasDown = false;
+    inline static std::atomic<uint64_t> s_FireEventCounter{0};
     bool m_AnimInitialized = false;
     bool m_AnimatorParamsResolved = false;
     bool m_AnimatorHasMoveParam = false;

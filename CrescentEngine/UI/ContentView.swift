@@ -330,6 +330,12 @@ struct ViewportPanel: View {
                 .padding(10)
                 .allowsHitTesting(false)
 
+                if viewKind == .game && editorState.isPlaying {
+                    CrosshairView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
+
                 if viewKind == .scene {
                     SceneCameraCompass(basis: cameraBasis)
                         .padding(10)
@@ -407,6 +413,77 @@ private struct CameraBasis {
         up: simd_float3(0, 1, 0),
         forward: simd_float3(0, 0, -1)
     )
+}
+
+private struct CrosshairView: View {
+    @State private var lastFireCounter: UInt64 = 0
+    @State private var pulse: CGFloat = 0.0
+
+    private let pollTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        let baseGap: CGFloat = 6.0
+        let baseLength: CGFloat = 14.0
+        let baseThickness: CGFloat = 2.0
+        let gap = baseGap + 8.0 * pulse
+        let length = baseLength + 6.0 * pulse
+        let thickness = baseThickness + 1.0 * pulse
+
+        ZStack {
+            crosshairTicks(color: Color.black.opacity(0.45),
+                           thickness: thickness + 1.0,
+                           length: length + 1.0,
+                           gap: gap)
+            crosshairTicks(color: Color.white.opacity(0.9),
+                           thickness: thickness,
+                           length: length,
+                           gap: gap)
+        }
+        .frame(width: 54, height: 54)
+        .scaleEffect(1.0 + 0.04 * pulse)
+        .shadow(color: Color.black.opacity(0.25), radius: 2, x: 0, y: 0)
+        .onReceive(pollTimer) { _ in
+            let counter = CrescentEngineBridge.shared().getFireEventCounter().uint64Value
+            if counter != lastFireCounter {
+                lastFireCounter = counter
+                triggerPulse()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func crosshairTicks(color: Color, thickness: CGFloat, length: CGFloat, gap: CGFloat) -> some View {
+        let half = length * 0.5
+        CrosshairTick(width: length, height: thickness, offset: CGSize(width: gap + half, height: 0), color: color)
+        CrosshairTick(width: length, height: thickness, offset: CGSize(width: -(gap + half), height: 0), color: color)
+        CrosshairTick(width: thickness, height: length, offset: CGSize(width: 0, height: gap + half), color: color)
+        CrosshairTick(width: thickness, height: length, offset: CGSize(width: 0, height: -(gap + half)), color: color)
+    }
+
+    private func triggerPulse() {
+        withAnimation(.easeOut(duration: 0.06)) {
+            pulse = 1.0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            withAnimation(.easeIn(duration: 0.16)) {
+                pulse = 0.0
+            }
+        }
+    }
+}
+
+private struct CrosshairTick: View {
+    let width: CGFloat
+    let height: CGFloat
+    let offset: CGSize
+    let color: Color
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: min(width, height) * 0.45)
+            .fill(color)
+            .frame(width: width, height: height)
+            .offset(offset)
+    }
 }
 
 private struct SceneCameraCompass: View {

@@ -116,6 +116,12 @@ void Scene::destroyEntity(Entity* entity) {
         }
     }
 
+    auto pendingIt = std::find(m_PendingDestroy.begin(), m_PendingDestroy.end(), entity);
+    if (pendingIt != m_PendingDestroy.end()) {
+        return;
+    }
+
+    entity->setActive(false);
     SelectionSystem::removeEntity(entity);
     UUID uuid = entity->getUUID();
 
@@ -125,14 +131,9 @@ void Scene::destroyEntity(Entity* entity) {
     // Remove from map
     m_EntityMap.erase(uuid);
     
-    // Remove from vector
-    auto it = std::find_if(m_Entities.begin(), m_Entities.end(),
-        [entity](const std::unique_ptr<Entity>& e) {
-            return e.get() == entity;
-        });
-    
-    if (it != m_Entities.end()) {
-        m_Entities.erase(it);
+    queueDestroyEntity(entity);
+    if (m_IterationDepth == 0) {
+        flushPendingDestroys();
     }
 }
 
@@ -203,51 +204,61 @@ void Scene::setActive(bool active) {
 }
 
 void Scene::OnCreate() {
+    beginIteration();
     for (auto& entity : m_Entities) {
         if (entity->isActive()) {
             entity->onSceneActivated();
         }
     }
+    endIteration();
 }
 
 void Scene::OnDestroy() {
+    beginIteration();
     for (auto& entity : m_Entities) {
         if (entity->isActive()) {
             entity->onSceneDeactivated();
         }
     }
+    endIteration();
 }
 
 void Scene::OnStart() {
     if (!m_IsActive) {
         return;
     }
+    beginIteration();
     for (auto& entity : m_Entities) {
         if (entity->isActive() && !entity->isEditorOnly()) {
             entity->OnStart();
         }
     }
+    endIteration();
 }
 
 void Scene::OnUpdate(float deltaTime) {
     if (!m_IsActive) return;
     
+    beginIteration();
     for (auto& entity : m_Entities) {
         if (entity->isActive() && !entity->isEditorOnly()) {
             entity->OnUpdate(deltaTime);
         }
     }
+    endIteration();
 }
 
 void Scene::OnFixedUpdate(float deltaTime) {
     if (!m_IsActive) {
         return;
     }
+    beginIteration();
     for (auto& entity : m_Entities) {
         if (entity->isActive() && !entity->isEditorOnly()) {
             entity->OnFixedUpdate(deltaTime);
         }
     }
+    endIteration();
 }
 
 void Scene::OnFixedPhysicsUpdate(float deltaTime) {
@@ -266,21 +277,62 @@ void Scene::OnEditorUpdate(float deltaTime) {
     if (m_PhysicsWorld && !SceneManager::getInstance().isPlaying()) {
         m_PhysicsWorld->update(deltaTime, false);
     }
+    beginIteration();
     for (auto& entity : m_Entities) {
         if (entity->isActive() && entity->isEditorOnly()) {
             entity->OnEditorUpdate(deltaTime);
         }
     }
+    endIteration();
 }
 
 void Scene::beginFrame() {
     if (!m_IsActive) {
         return;
     }
+    if (m_IterationDepth == 0) {
+        flushPendingDestroys();
+    }
+    beginIteration();
     for (auto& entity : m_Entities) {
         if (entity->isActive()) {
             entity->getTransform()->capturePreviousWorldMatrix();
         }
+    }
+    endIteration();
+}
+
+void Scene::queueDestroyEntity(Entity* entity) {
+    if (!entity) {
+        return;
+    }
+    if (std::find(m_PendingDestroy.begin(), m_PendingDestroy.end(), entity) == m_PendingDestroy.end()) {
+        m_PendingDestroy.push_back(entity);
+    }
+}
+
+void Scene::flushPendingDestroys() {
+    if (m_PendingDestroy.empty()) {
+        return;
+    }
+    for (Entity* entity : m_PendingDestroy) {
+        auto it = std::find_if(m_Entities.begin(), m_Entities.end(),
+            [entity](const std::unique_ptr<Entity>& e) {
+                return e.get() == entity;
+            });
+        if (it != m_Entities.end()) {
+            m_Entities.erase(it);
+        }
+    }
+    m_PendingDestroy.clear();
+}
+
+void Scene::endIteration() {
+    if (m_IterationDepth > 0) {
+        --m_IterationDepth;
+    }
+    if (m_IterationDepth == 0) {
+        flushPendingDestroys();
     }
 }
 

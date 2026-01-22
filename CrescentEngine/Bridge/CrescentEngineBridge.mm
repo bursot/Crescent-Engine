@@ -7,6 +7,7 @@
 #include "../Engine/Renderer/Renderer.hpp"
 #include "../Engine/Scene/SceneManager.hpp"
 #include "../Engine/Scene/SceneCommands.hpp"
+#include "../Engine/Scene/SceneSerializer.hpp"
 #include "../Engine/Scene/Scene.hpp"
 #include "../Engine/Components/MeshRenderer.hpp"
 #include "../Engine/Components/SkinnedMeshRenderer.hpp"
@@ -16,6 +17,7 @@
 #include "../Engine/Components/PhysicsCollider.hpp"
 #include "../Engine/Components/CharacterController.hpp"
 #include "../Engine/Components/FirstPersonController.hpp"
+#include "../Engine/Components/Health.hpp"
 #include "../Engine/Components/AudioSource.hpp"
 #include "../Engine/ECS/Transform.hpp"
 #include "../Engine/Assets/AssetDatabase.hpp"
@@ -227,6 +229,31 @@ static SkinnedMeshRenderer* FindSkinnedInHierarchy(Entity* entity, Animator* own
     return nullptr;
 }
 
+static void CollectSkinnedInHierarchy(Entity* entity,
+                                      Animator* owner,
+                                      std::vector<SkinnedMeshRenderer*>& out) {
+    if (!entity) {
+        return;
+    }
+    Animator* animator = entity->getComponent<Animator>();
+    if (animator && animator != owner) {
+        return;
+    }
+    if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+        out.push_back(skinned);
+    }
+    Transform* transform = entity->getTransform();
+    if (!transform) {
+        return;
+    }
+    for (Transform* child : transform->getChildren()) {
+        if (!child) {
+            continue;
+        }
+        CollectSkinnedInHierarchy(child->getEntity(), owner, out);
+    }
+}
+
 static bool ResolveAnimatorAndSkinned(const std::string& uuid,
                                       Animator*& outAnimator,
                                       SkinnedMeshRenderer*& outSkinned) {
@@ -238,6 +265,11 @@ static bool ResolveAnimatorAndSkinned(const std::string& uuid,
     }
     if (!outAnimator) {
         outSkinned = GetSkinnedByUUID(uuid);
+        if (!outSkinned) {
+            Scene* scene = SceneManager::getInstance().getActiveScene();
+            Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, uuid) : nullptr;
+            outSkinned = FindSkinnedInHierarchy(entity, nullptr);
+        }
         return outSkinned != nullptr;
     }
     outSkinned = GetSkinnedByUUID(uuid);
@@ -794,6 +826,35 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         }
         Crescent::SceneCommands::destroyEntitiesByUUID(scene, toDelete);
         Crescent::SelectionSystem::clearSelection();
+    }];
+}
+
+- (NSArray<NSString *> *)duplicateEntitiesByUUID:(NSArray<NSString *> *)uuids {
+    return (NSArray<NSString *> *)[self performSyncObject:^id{
+        Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
+        if (!scene || !uuids) {
+            return @[];
+        }
+        std::vector<Crescent::Entity*> toDuplicate;
+        toDuplicate.reserve(uuids.count);
+        for (NSString* uuid in uuids) {
+            Crescent::Entity* entity = Crescent::SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+            if (entity) {
+                toDuplicate.push_back(entity);
+            }
+        }
+        if (toDuplicate.empty()) {
+            return @[];
+        }
+        std::vector<Crescent::Entity*> duplicates = Crescent::SceneSerializer::DuplicateEntities(scene, toDuplicate);
+        NSMutableArray<NSString *> *result = [NSMutableArray arrayWithCapacity:duplicates.size()];
+        for (Crescent::Entity* entity : duplicates) {
+            if (!entity) {
+                continue;
+            }
+            [result addObject:[NSString stringWithUTF8String: entity->getUUID().toString().c_str()]];
+        }
+        return result;
     }];
 }
 
@@ -2222,6 +2283,12 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         dict[@"intensityUnit"] = @(static_cast<int>(light->getIntensityUnit()));
         dict[@"range"] = @(light->getRange());
         dict[@"falloff"] = @(static_cast<int>(light->getFalloffModel()));
+        dict[@"spotAngle"] = @(light->getSpotAngle());
+        dict[@"innerSpotAngle"] = @(light->getInnerSpotAngle());
+        Math::Vector2 area = light->getAreaSize();
+        dict[@"areaSize"] = @[@(area.x), @(area.y)];
+        dict[@"sourceRadius"] = @(light->getSourceRadius());
+        dict[@"sourceLength"] = @(light->getSourceLength());
         dict[@"castsShadows"] = @(light->getCastShadows());
         dict[@"shadowResolution"] = @(light->getShadowMapResolution());
         dict[@"shadowBias"] = @(light->getShadowBias());
@@ -2268,6 +2335,21 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         }
         if (NSNumber* falloff = info[@"falloff"]) {
             light->setFalloffModel(static_cast<Light::FalloffModel>(falloff.intValue));
+        }
+        if (NSNumber* spot = info[@"spotAngle"]) {
+            light->setSpotAngle(spot.floatValue);
+        }
+        if (NSNumber* inner = info[@"innerSpotAngle"]) {
+            light->setInnerSpotAngle(inner.floatValue);
+        }
+        if (NSArray* area = info[@"areaSize"]; area.count >= 2) {
+            light->setAreaSize(Math::Vector2([area[0] floatValue], [area[1] floatValue]));
+        }
+        if (NSNumber* sourceRadius = info[@"sourceRadius"]) {
+            light->setSourceRadius(sourceRadius.floatValue);
+        }
+        if (NSNumber* sourceLength = info[@"sourceLength"]) {
+            light->setSourceLength(sourceLength.floatValue);
         }
         if (NSNumber* cast = info[@"castsShadows"]) {
             light->setCastShadows(cast.boolValue);
@@ -2504,6 +2586,10 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
                 [params addObject:entry];
             }
             info[@"parameters"] = params;
+        } else {
+            info[@"rootMotionEnabled"] = @(skinned->getRootMotionEnabled());
+            info[@"rootMotionPosition"] = @(skinned->getApplyRootMotionPosition());
+            info[@"rootMotionRotation"] = @(skinned->getApplyRootMotionRotation());
         }
 
         return info;
@@ -2607,10 +2693,27 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
 - (BOOL)setAnimatorRootMotion:(NSString *)uuid enabled:(BOOL)enabled applyPosition:(BOOL)applyPosition applyRotation:(BOOL)applyRotation {
     return [self performSyncBool:^BOOL {
         Animator* animator = GetAnimatorByUUID(uuid.UTF8String);
-        if (!animator) return NO;
-        animator->setRootMotionEnabled(enabled);
-        animator->setApplyRootMotionPosition(applyPosition);
-        animator->setApplyRootMotionRotation(applyRotation);
+        if (animator) {
+            animator->setRootMotionEnabled(enabled);
+            animator->setApplyRootMotionPosition(applyPosition);
+            animator->setApplyRootMotionRotation(applyRotation);
+            return YES;
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, uuid.UTF8String) : nullptr;
+        std::vector<SkinnedMeshRenderer*> targets;
+        if (entity) {
+            CollectSkinnedInHierarchy(entity, nullptr, targets);
+        }
+        if (targets.empty()) {
+            return NO;
+        }
+        for (auto* skinned : targets) {
+            if (!skinned) continue;
+            skinned->setRootMotionEnabled(enabled);
+            skinned->setApplyRootMotionPosition(applyPosition);
+            skinned->setApplyRootMotionRotation(applyRotation);
+        }
         return YES;
     }];
 }
@@ -3202,6 +3305,69 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
     }];
 }
 
+- (NSDictionary *)getHealthInfo:(NSString *)uuid {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return @{};
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return @{};
+        Health* health = entity->getComponent<Health>();
+        if (!health) return @{};
+        return @{
+            @"max": @(health->getMaxHealth()),
+            @"current": @(health->getCurrentHealth()),
+            @"destroyOnDeath": @(health->getDestroyOnDeath())
+        };
+    }];
+}
+
+- (BOOL)setHealthInfo:(NSString *)uuid info:(NSDictionary *)info {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene || !info) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        Health* health = entity->getComponent<Health>();
+        if (!health) {
+            health = entity->addComponent<Health>();
+        }
+
+        if (NSNumber* value = info[@"max"]) {
+            health->setMaxHealth(value.floatValue);
+        }
+        if (NSNumber* value = info[@"current"]) {
+            health->setCurrentHealth(value.floatValue);
+        }
+        if (NSNumber* value = info[@"destroyOnDeath"]) {
+            health->setDestroyOnDeath(value.boolValue);
+        }
+        return YES;
+    }];
+}
+
+- (BOOL)addHealth:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        if (!entity->getComponent<Health>()) {
+            entity->addComponent<Health>();
+        }
+        return YES;
+    }];
+}
+
+- (void)removeHealth:(NSString *)uuid {
+    [self performAsync:^{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return;
+        entity->removeComponent<Health>();
+    }];
+}
+
 - (NSDictionary *)getCharacterControllerInfo:(NSString *)uuid {
     return (NSDictionary *)[self performSyncObject:^id{
         Scene* scene = SceneManager::getInstance().getActiveScene();
@@ -3359,6 +3525,10 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
             @"useEyeHeight": @(controller->getUseEyeHeight()),
             @"driveCharacterController": @(controller->getDriveCharacterController()),
             @"fireCooldown": @(controller->getFireCooldown()),
+            @"fireDamage": @(controller->getFireDamage()),
+            @"fireRange": @(controller->getFireRange()),
+            @"fireMask": @(controller->getFireHitMask()),
+            @"fireHitTriggers": @(controller->getFireHitTriggers()),
             @"muzzleTexture": controller->getMuzzleTexturePath().empty()
                 ? @""
                 : [NSString stringWithUTF8String: controller->getMuzzleTexturePath().c_str()]
@@ -3428,6 +3598,18 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
         if (NSNumber* value = info[@"fireCooldown"]) {
             controller->setFireCooldown(value.floatValue);
         }
+        if (NSNumber* value = info[@"fireDamage"]) {
+            controller->setFireDamage(value.floatValue);
+        }
+        if (NSNumber* value = info[@"fireRange"]) {
+            controller->setFireRange(value.floatValue);
+        }
+        if (NSNumber* value = info[@"fireMask"]) {
+            controller->setFireHitMask(value.unsignedIntValue);
+        }
+        if (NSNumber* value = info[@"fireHitTriggers"]) {
+            controller->setFireHitTriggers(value.boolValue);
+        }
         if (NSString* value = info[@"muzzleTexture"]) {
             controller->setMuzzleTexturePath(value.UTF8String);
         }
@@ -3455,6 +3637,12 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
         Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
         if (!entity) return;
         entity->removeComponent<FirstPersonController>();
+    }];
+}
+
+- (NSNumber *)getFireEventCounter {
+    return (NSNumber *)[self performSyncObject:^id{
+        return @(FirstPersonController::getFireEventCounter());
     }];
 }
 

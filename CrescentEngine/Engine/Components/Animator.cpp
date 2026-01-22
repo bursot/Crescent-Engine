@@ -3,7 +3,9 @@
 #include "../ECS/Transform.hpp"
 #include "../Animation/AnimationPose.hpp"
 #include "../Components/IKConstraint.hpp"
+#include "../Core/Time.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 namespace Crescent {
@@ -73,6 +75,90 @@ static void DecomposeTRS(const Math::Matrix4x4& matrix,
         outRot.z = 0.25f * s;
     }
     outRot.normalize();
+}
+
+static std::string ToLower(const std::string& value) {
+    std::string lowered = value;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return lowered;
+}
+
+static bool ContainsToken(const std::string& value, const std::vector<std::string>& tokens) {
+    for (const auto& token : tokens) {
+        if (!token.empty() && value.find(token) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int FindBoneByTokens(const std::vector<Bone>& bones,
+                            const std::vector<std::string>& tokens,
+                            int parentFilter) {
+    for (size_t i = 0; i < bones.size(); ++i) {
+        if (parentFilter >= 0 && bones[i].parentIndex != parentFilter) {
+            continue;
+        }
+        std::string name = ToLower(bones[i].name);
+        if (ContainsToken(name, tokens)) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+static int ResolveRootMotionBoneIndex(const Skeleton& skeleton,
+                                      const AnimationLocalPose* pose) {
+    const auto& bones = skeleton.getBones();
+    if (bones.empty()) {
+        return -1;
+    }
+    int root = static_cast<int>(skeleton.getRootIndex());
+    if (root < 0 || root >= static_cast<int>(bones.size())) {
+        return -1;
+    }
+    std::string rootName = ToLower(bones[root].name);
+    bool rootMoves = false;
+    if (pose && root < static_cast<int>(pose->positions.size())) {
+        Math::Vector3 basePos;
+        Math::Quaternion baseRot;
+        Math::Vector3 baseScale;
+        DecomposeTRS(bones[root].localBind, basePos, baseRot, baseScale);
+        rootMoves = (pose->positions[root] - basePos).length() > 0.0005f;
+    }
+    bool genericRoot = !rootMoves && (rootName.empty() || ContainsToken(rootName, {"root", "armature", "scene"}));
+    if (genericRoot) {
+        int direct = FindBoneByTokens(bones, {"hips", "pelvis", "hip"}, root);
+        if (direct >= 0) {
+            return direct;
+        }
+        int any = FindBoneByTokens(bones, {"hips", "pelvis", "hip"}, -1);
+        if (any >= 0) {
+            return any;
+        }
+    }
+    return root;
+}
+
+static Math::Matrix4x4 BuildGlobalPose(const Skeleton& skeleton,
+                                       const AnimationLocalPose& pose,
+                                       int boneIndex) {
+    Math::Matrix4x4 global = Math::Matrix4x4::Identity;
+    if (boneIndex < 0) {
+        return global;
+    }
+    const auto& bones = skeleton.getBones();
+    std::vector<int> chain;
+    for (int idx = boneIndex; idx >= 0; idx = bones[idx].parentIndex) {
+        chain.push_back(idx);
+    }
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        int idx = *it;
+        global = global * Math::Matrix4x4::TRS(pose.positions[idx], pose.rotations[idx], pose.scales[idx]);
+    }
+    return global;
 }
 
 static void CollectEvents(const AnimationClip* clip,
@@ -211,7 +297,8 @@ Animator::Animator()
     , m_RootMotionValid(false)
     , m_PrevRootTime(0.0f)
     , m_PrevRootPos(Math::Vector3(0.0f))
-    , m_PrevRootRot(Math::Quaternion::Identity) {
+    , m_PrevRootRot(Math::Quaternion::Identity)
+    , m_SmoothedDelta(0.0f) {
 }
 
 void Animator::setStates(const std::vector<AnimatorState>& states) {
@@ -319,138 +406,185 @@ void Animator::OnUpdate(float deltaTime) {
         return;
     }
 
-    if (m_CurrentStateIndex < 0 || m_CurrentStateIndex >= static_cast<int>(m_States.size())) {
-        m_CurrentStateIndex = 0;
+    constexpr float kMaxAnimDelta = 0.05f;
+    constexpr float kAnimSmoothing = 0.2f;
+    constexpr int kMaxAnimSteps = 5;
+    float animDelta = std::clamp(deltaTime, 0.0f, kMaxAnimDelta);
+    if (m_SmoothedDelta <= 0.0f) {
+        m_SmoothedDelta = animDelta;
+    } else {
+        m_SmoothedDelta += (animDelta - m_SmoothedDelta) * kAnimSmoothing;
     }
-    const auto& state = m_States[static_cast<size_t>(m_CurrentStateIndex)];
-    const auto& clips = skinned->getAnimationClips();
+    animDelta = m_SmoothedDelta;
+
     const Skeleton& skeleton = *skinned->getSkeleton();
+    const auto& clips = skinned->getAnimationClips();
+    float fixedStep = std::max(0.0001f, Time::fixedDeltaTime());
+    m_AnimAccumulator += animDelta;
+    float maxAccumulator = fixedStep * static_cast<float>(kMaxAnimSteps);
+    if (m_AnimAccumulator > maxAccumulator) {
+        m_AnimAccumulator = maxAccumulator;
+    }
 
-    bool playing = skinned->isPlaying();
-    float speed = state.speed * skinned->getPlaybackSpeed();
-    float duration = ResolveStateDuration(state, clips);
+    auto stepAnimation = [&](float stepDelta) {
+        if (m_CurrentStateIndex < 0 || m_CurrentStateIndex >= static_cast<int>(m_States.size())) {
+            m_CurrentStateIndex = 0;
+        }
+        const auto& state = m_States[static_cast<size_t>(m_CurrentStateIndex)];
 
-    m_PrevStateTime = m_StateTime;
-    if (playing && duration > 0.0f) {
-        m_StateTime += deltaTime * speed;
-        if (state.loop && skinned->isLooping()) {
-            while (m_StateTime >= duration) {
-                m_StateTime -= duration;
+        bool playing = skinned->isPlaying();
+        float speed = state.speed * skinned->getPlaybackSpeed();
+        float duration = ResolveStateDuration(state, clips);
+
+        m_PrevStateTime = m_StateTime;
+        if (playing && duration > 0.0f) {
+            m_StateTime += stepDelta * speed;
+            if (state.loop && skinned->isLooping()) {
+                while (m_StateTime >= duration) {
+                    m_StateTime -= duration;
+                }
+            } else {
+                m_StateTime = std::min(m_StateTime, duration);
+            }
+        }
+
+        if (m_InTransition && m_NextStateIndex >= 0 && m_NextStateIndex < static_cast<int>(m_States.size())) {
+            const auto& nextState = m_States[static_cast<size_t>(m_NextStateIndex)];
+            float nextDuration = ResolveStateDuration(nextState, clips);
+            float nextSpeed = nextState.speed * skinned->getPlaybackSpeed();
+            if (playing && nextDuration > 0.0f) {
+                m_NextStateTime += stepDelta * nextSpeed;
+                if (nextState.loop && skinned->isLooping()) {
+                    while (m_NextStateTime >= nextDuration) {
+                        m_NextStateTime -= nextDuration;
+                    }
+                } else {
+                    m_NextStateTime = std::min(m_NextStateTime, nextDuration);
+                }
+            }
+            m_TransitionElapsed = std::min(m_TransitionElapsed + stepDelta, m_TransitionDuration);
+        } else if (!m_InTransition) {
+            EvaluateTransitions(stepDelta);
+        }
+
+        AnimationLocalPose* outputPose = &m_StatePose;
+        if (m_InTransition && m_TransitionDuration > 0.0f &&
+            m_NextStateIndex >= 0 && m_NextStateIndex < static_cast<int>(m_States.size())) {
+            const auto& nextState = m_States[static_cast<size_t>(m_NextStateIndex)];
+            EvaluateStatePose(state, clips, skeleton, m_StateTime, m_StatePose);
+            EvaluateStatePose(nextState, clips, skeleton, m_NextStateTime, m_NextPose);
+            float t = Math::Clamp(m_TransitionElapsed / m_TransitionDuration, 0.0f, 1.0f);
+            BlendLocalPose(m_StatePose, m_NextPose, t, m_BlendPose);
+            outputPose = &m_BlendPose;
+            if (t >= 0.999f) {
+                m_CurrentStateIndex = m_NextStateIndex;
+                m_StateTime = m_NextStateTime;
+                m_InTransition = false;
+                m_TransitionDuration = 0.0f;
+                m_TransitionElapsed = 0.0f;
+                m_NextStateIndex = -1;
+                m_RootMotionValid = false;
             }
         } else {
-            m_StateTime = std::min(m_StateTime, duration);
+            EvaluateStatePose(state, clips, skeleton, m_StateTime, m_StatePose);
+            outputPose = &m_StatePose;
         }
-    }
 
-    if (m_InTransition && m_NextStateIndex >= 0 && m_NextStateIndex < static_cast<int>(m_States.size())) {
-        const auto& nextState = m_States[static_cast<size_t>(m_NextStateIndex)];
-        float nextDuration = ResolveStateDuration(nextState, clips);
-        float nextSpeed = nextState.speed * skinned->getPlaybackSpeed();
-        if (playing && nextDuration > 0.0f) {
-            m_NextStateTime += deltaTime * nextSpeed;
-            if (nextState.loop && skinned->isLooping()) {
-                while (m_NextStateTime >= nextDuration) {
-                    m_NextStateTime -= nextDuration;
-                }
-            } else {
-                m_NextStateTime = std::min(m_NextStateTime, nextDuration);
-            }
-        }
-        m_TransitionElapsed = std::min(m_TransitionElapsed + deltaTime, m_TransitionDuration);
-    } else if (!m_InTransition) {
-        EvaluateTransitions(deltaTime);
-    }
+        // Root motion extraction (modifies pose)
+        if (m_RootMotionEnabled && outputPose) {
+            int motionIdx = ResolveRootMotionBoneIndex(skeleton, outputPose);
+            if (motionIdx >= 0 && motionIdx < static_cast<int>(outputPose->positions.size())) {
+                Math::Vector3 basePos;
+                Math::Quaternion baseRot;
+                Math::Vector3 baseScale;
+                DecomposeTRS(skeleton.getBones()[motionIdx].localBind, basePos, baseRot, baseScale);
+                Math::Matrix4x4 global = BuildGlobalPose(skeleton, *outputPose, motionIdx);
+                Math::Vector3 currentPos;
+                Math::Quaternion currentRot;
+                Math::Vector3 currentScale;
+                DecomposeTRS(global, currentPos, currentRot, currentScale);
 
-    AnimationLocalPose* outputPose = &m_StatePose;
-    if (m_InTransition && m_TransitionDuration > 0.0f) {
-        const auto& nextState = m_States[static_cast<size_t>(m_NextStateIndex)];
-        EvaluateStatePose(state, clips, skeleton, m_StateTime, m_StatePose);
-        EvaluateStatePose(nextState, clips, skeleton, m_NextStateTime, m_NextPose);
-        float t = Math::Clamp(m_TransitionElapsed / m_TransitionDuration, 0.0f, 1.0f);
-        BlendLocalPose(m_StatePose, m_NextPose, t, m_BlendPose);
-        outputPose = &m_BlendPose;
-        if (t >= 0.999f) {
-            m_CurrentStateIndex = m_NextStateIndex;
-            m_StateTime = m_NextStateTime;
-            m_InTransition = false;
-            m_TransitionDuration = 0.0f;
-            m_TransitionElapsed = 0.0f;
-            m_NextStateIndex = -1;
-            m_RootMotionValid = false;
-        }
-    } else {
-        EvaluateStatePose(state, clips, skeleton, m_StateTime, m_StatePose);
-        outputPose = &m_StatePose;
-    }
-
-    // Root motion extraction (modifies pose)
-    if (m_RootMotionEnabled && outputPose) {
-        uint32_t rootIdx = skeleton.getRootIndex();
-        if (rootIdx < outputPose->positions.size()) {
-            Math::Vector3 basePos;
-            Math::Quaternion baseRot;
-            Math::Vector3 baseScale;
-            DecomposeTRS(skeleton.getBones()[rootIdx].localBind, basePos, baseRot, baseScale);
-            Math::Vector3 currentPos = outputPose->positions[rootIdx];
-            Math::Quaternion currentRot = outputPose->rotations[rootIdx];
-
-            if (!m_RootMotionValid || m_StateTime < m_PrevRootTime) {
-                m_PrevRootPos = currentPos;
-                m_PrevRootRot = currentRot;
-                m_RootMotionValid = true;
-            } else {
-                Math::Vector3 deltaPos = currentPos - m_PrevRootPos;
-                Math::Quaternion deltaRot = currentRot * m_PrevRootRot.inverse();
-                Transform* transform = getEntity() ? getEntity()->getTransform() : nullptr;
-                if (transform) {
-                    if (m_RootMotionApplyPosition) {
-                        transform->translate(deltaPos, true);
+                if (!m_RootMotionValid || m_StateTime < m_PrevRootTime) {
+                    m_PrevRootPos = currentPos;
+                    m_PrevRootRot = currentRot;
+                    m_RootMotionValid = true;
+                } else {
+                    Math::Vector3 deltaPos = currentPos - m_PrevRootPos;
+                    Math::Quaternion deltaRot = currentRot * m_PrevRootRot.inverse();
+                    Transform* transform = getEntity() ? getEntity()->getTransform() : nullptr;
+                    if (transform) {
+                        if (m_RootMotionApplyPosition) {
+                            transform->translate(deltaPos, true);
+                        }
+                        if (m_RootMotionApplyRotation) {
+                            transform->rotate(deltaRot, true);
+                        }
                     }
-                    if (m_RootMotionApplyRotation) {
-                        transform->rotate(deltaRot, true);
-                    }
+                    m_PrevRootPos = currentPos;
+                    m_PrevRootRot = currentRot;
                 }
-                m_PrevRootPos = currentPos;
-                m_PrevRootRot = currentRot;
+                m_PrevRootTime = m_StateTime;
+                outputPose->positions[motionIdx] = basePos;
+                outputPose->rotations[motionIdx] = baseRot;
+                outputPose->scales[motionIdx] = baseScale;
             }
-            m_PrevRootTime = m_StateTime;
-            outputPose->positions[rootIdx] = basePos;
-            outputPose->rotations[rootIdx] = baseRot;
-            outputPose->scales[rootIdx] = baseScale;
         }
+
+        if (outputPose) {
+            Entity* entity = getEntity();
+            IKConstraint* ik = entity ? entity->getComponent<IKConstraint>() : nullptr;
+            if (ik && ik->isEnabled()) {
+                int rootIdx = skeleton.getBoneIndex(ik->getRootBone());
+                int midIdx = skeleton.getBoneIndex(ik->getMidBone());
+                int endIdx = skeleton.getBoneIndex(ik->getEndBone());
+                Math::Vector3 target = ik->getTargetPosition();
+                if (!ik->getTargetInWorld() && entity) {
+                    target = entity->getTransform()->getWorldMatrix().transformPoint(target);
+                }
+                ApplyTwoBoneIK(skeleton, *outputPose, rootIdx, midIdx, endIdx, target, ik->getWeight());
+            }
+        }
+
+        if (outputPose) {
+            if (!m_HasPose) {
+                m_CurrentPose = *outputPose;
+                m_PrevPose = m_CurrentPose;
+                m_HasPose = true;
+            } else {
+                m_PrevPose = m_CurrentPose;
+                m_CurrentPose = *outputPose;
+            }
+        }
+
+        // Fire events
+        const AnimationClip* activeClip = nullptr;
+        if (state.type == AnimatorStateType::Clip && state.clipIndex >= 0 && state.clipIndex < static_cast<int>(clips.size())) {
+            activeClip = clips[static_cast<size_t>(state.clipIndex)].get();
+        }
+        if (activeClip) {
+            CollectEvents(activeClip, m_PrevStateTime, m_StateTime, state.loop && skinned->isLooping(), m_FiredEvents);
+        }
+    };
+
+    int steps = 0;
+    while (m_AnimAccumulator >= fixedStep && steps < kMaxAnimSteps) {
+        m_AnimAccumulator -= fixedStep;
+        stepAnimation(fixedStep);
+        steps++;
+    }
+    if (!m_HasPose) {
+        stepAnimation(0.0f);
     }
 
-    if (outputPose) {
-        Entity* entity = getEntity();
-        IKConstraint* ik = entity ? entity->getComponent<IKConstraint>() : nullptr;
-        if (ik && ik->isEnabled()) {
-            int rootIdx = skeleton.getBoneIndex(ik->getRootBone());
-            int midIdx = skeleton.getBoneIndex(ik->getMidBone());
-            int endIdx = skeleton.getBoneIndex(ik->getEndBone());
-            Math::Vector3 target = ik->getTargetPosition();
-            if (!ik->getTargetInWorld() && entity) {
-                target = entity->getTransform()->getWorldMatrix().transformPoint(target);
-            }
-            ApplyTwoBoneIK(skeleton, *outputPose, rootIdx, midIdx, endIdx, target, ik->getWeight());
-        }
-    }
-
-    if (outputPose) {
-        BuildSkinMatrices(skeleton, *outputPose, m_WorkMatrices);
+    float alpha = fixedStep > 0.0f ? (m_AnimAccumulator / fixedStep) : 0.0f;
+    if (m_HasPose) {
+        BlendLocalPose(m_PrevPose, m_CurrentPose, alpha, m_RenderPose);
+        BuildSkinMatrices(skeleton, m_RenderPose, m_WorkMatrices);
         for (auto* target : targets) {
             if (target) {
                 target->applyBoneMatrices(m_WorkMatrices);
             }
         }
-    }
-
-    // Fire events
-    const AnimationClip* activeClip = nullptr;
-    if (state.type == AnimatorStateType::Clip && state.clipIndex >= 0 && state.clipIndex < static_cast<int>(clips.size())) {
-        activeClip = clips[static_cast<size_t>(state.clipIndex)].get();
-    }
-    if (activeClip) {
-        CollectEvents(activeClip, m_PrevStateTime, m_StateTime, state.loop && skinned->isLooping(), m_FiredEvents);
     }
 
     ResetTriggers();

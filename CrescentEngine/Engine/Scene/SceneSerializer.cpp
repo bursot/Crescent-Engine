@@ -12,6 +12,7 @@
 #include "../Components/PhysicsCollider.hpp"
 #include "../Components/CharacterController.hpp"
 #include "../Components/FirstPersonController.hpp"
+#include "../Components/Health.hpp"
 #include "../Components/AudioSource.hpp"
 #include "../Input/InputManager.hpp"
 #include "../Animation/AnimationClip.hpp"
@@ -31,6 +32,7 @@
 #include <cctype>
 #include <fstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Crescent {
 namespace {
@@ -765,6 +767,14 @@ struct ModelCacheEntry {
     std::vector<std::shared_ptr<AnimationClip>> animations;
 };
 
+struct EntityRecord {
+    Entity* entity = nullptr;
+    json components;
+    std::string parentUUID;
+    bool active = true;
+    bool editorOnly = false;
+};
+
 std::string MakeModelCacheKey(const std::string& path, const SceneCommands::ModelImportOptions& options) {
     return path + "|" + std::to_string(options.scale) + "|" +
            (options.flipUVs ? "1" : "0") + "|" +
@@ -847,6 +857,631 @@ bool SceneSerializer::LoadScene(Scene* scene, const std::string& path) {
 }
 
 namespace {
+
+std::unordered_map<std::string, EntityRecord> BuildEntityRecords(Scene* scene,
+                                                                 const json& entities,
+                                                                 bool preserveUUIDs) {
+    std::unordered_map<std::string, EntityRecord> records;
+    if (!scene || !entities.is_array()) {
+        return records;
+    }
+    for (const auto& e : entities) {
+        if (!e.is_object()) {
+            continue;
+        }
+        std::string uuidStr = e.value("uuid", std::string());
+        std::string name = e.value("name", std::string("Entity"));
+        Entity* entity = nullptr;
+        UUID uuid;
+        if (preserveUUIDs && !uuidStr.empty() && ParseUUID(uuidStr, uuid)) {
+            entity = scene->createEntityWithUUID(uuid, name);
+        } else {
+            entity = scene->createEntity(name);
+        }
+        if (!entity) {
+            continue;
+        }
+        EntityRecord record;
+        record.entity = entity;
+        record.components = e.value("components", json::object());
+        record.parentUUID = e.value("parent", std::string());
+        record.active = e.value("active", true);
+        record.editorOnly = e.value("editorOnly", false);
+        std::string key = uuidStr.empty() ? entity->getUUID().toString() : uuidStr;
+        records[key] = record;
+    }
+    return records;
+}
+
+void ResolveEntityParents(Scene* scene, std::unordered_map<std::string, EntityRecord>& records) {
+    for (auto& [uuid, record] : records) {
+        if (!record.entity) {
+            continue;
+        }
+        if (record.parentUUID.empty()) {
+            continue;
+        }
+        auto parentIt = records.find(record.parentUUID);
+        if (parentIt != records.end() && parentIt->second.entity) {
+            record.entity->getTransform()->setParent(parentIt->second.entity->getTransform(), false);
+            continue;
+        }
+        if (!scene) {
+            continue;
+        }
+        UUID parentUUID;
+        if (ParseUUID(record.parentUUID, parentUUID)) {
+            if (Entity* parent = scene->findEntity(parentUUID)) {
+                record.entity->getTransform()->setParent(parent->getTransform(), false);
+            }
+        }
+    }
+}
+
+void ApplyEntityComponents(Entity* entity,
+                           const json& components,
+                           Scene* scene,
+                           const std::string& scenePath,
+                           TextureLoader* textureLoader,
+                           std::unordered_map<std::string, ModelCacheEntry>& modelCache) {
+    if (!entity) {
+        return;
+    }
+    (void)scene;
+    if (components.contains("Transform")) {
+        const json& t = components["Transform"];
+        Transform* transform = entity->getTransform();
+        transform->setLocalPosition(JsonToVec3(t.value("position", json::array()), transform->getLocalPosition()));
+        transform->setLocalRotation(JsonToQuat(t.value("rotation", json::array()), transform->getLocalRotation()));
+        transform->setLocalScale(JsonToVec3(t.value("scale", json::array({1.0f, 1.0f, 1.0f})), transform->getLocalScale()));
+    }
+
+    if (components.contains("PrimitiveMesh")) {
+        const json& p = components["PrimitiveMesh"];
+        PrimitiveType type = PrimitiveTypeFromString(p.value("type", std::string("Cube")));
+        entity->addComponent<PrimitiveMesh>()->setType(type);
+    }
+
+    ModelMeshReference* modelRef = nullptr;
+    if (components.contains("ModelMeshReference")) {
+        const json& m = components["ModelMeshReference"];
+        modelRef = entity->addComponent<ModelMeshReference>();
+        std::string storedPath = m.value("sourcePath", std::string());
+        std::string guid = m.value("sourceGuid", std::string());
+        std::string resolvedPath;
+        AssetDatabase& db = AssetDatabase::getInstance();
+        if (!guid.empty()) {
+            resolvedPath = db.getPathForGuid(guid);
+        }
+        if (resolvedPath.empty()) {
+            resolvedPath = db.resolvePath(storedPath);
+        }
+        if (resolvedPath.empty()) {
+            resolvedPath = storedPath;
+        }
+        if (!resolvedPath.empty()) {
+            std::filesystem::path resolved(resolvedPath);
+            if (!std::filesystem::exists(resolved)) {
+                if (!scenePath.empty()) {
+                    std::filesystem::path sceneDir = std::filesystem::path(scenePath).parent_path();
+                    std::filesystem::path candidate = (sceneDir / storedPath).lexically_normal();
+                    if (std::filesystem::exists(candidate)) {
+                        resolvedPath = candidate.string();
+                    }
+                }
+            }
+        }
+        modelRef->setSourcePath(resolvedPath);
+        modelRef->setSourceGuid(guid);
+        modelRef->setMeshIndex(m.value("meshIndex", -1));
+        modelRef->setMaterialIndex(m.value("materialIndex", -1));
+        modelRef->setMeshName(m.value("meshName", std::string()));
+        modelRef->setSkinned(m.value("skinned", false));
+        modelRef->setMerged(m.value("merged", false));
+        if (m.contains("importOptions")) {
+            modelRef->setImportOptions(DeserializeImportOptions(m["importOptions"]));
+        }
+    }
+
+    MeshRenderer* meshRenderer = nullptr;
+    SkinnedMeshRenderer* skinnedRenderer = nullptr;
+
+    if (modelRef) {
+        std::string cacheKey = MakeModelCacheKey(modelRef->getSourcePath(), modelRef->getImportOptions());
+        auto it = modelCache.find(cacheKey);
+        if (it == modelCache.end()) {
+            modelCache[cacheKey] = BuildModelCache(modelRef->getSourcePath(), modelRef->getImportOptions());
+            it = modelCache.find(cacheKey);
+        }
+        const ModelCacheEntry& cache = it->second;
+        MeshCacheEntry meshEntry;
+        bool found = false;
+        if (modelRef->isMerged()) {
+            auto mergedIt = cache.mergedByMaterial.find(modelRef->getMaterialIndex());
+            if (mergedIt != cache.mergedByMaterial.end()) {
+                meshEntry = mergedIt->second;
+                found = true;
+            }
+        } else {
+            auto meshIt = cache.meshesByIndex.find(modelRef->getMeshIndex());
+            if (meshIt != cache.meshesByIndex.end()) {
+                meshEntry = meshIt->second;
+                found = true;
+            }
+        }
+        if (found) {
+            meshRenderer = entity->addComponent<MeshRenderer>();
+            meshRenderer->setMesh(meshEntry.mesh);
+            meshRenderer->setMaterial(meshEntry.material ? meshEntry.material : Material::CreateDefault());
+            if (modelRef->isSkinned() && cache.skeleton) {
+                skinnedRenderer = entity->addComponent<SkinnedMeshRenderer>();
+                skinnedRenderer->setMesh(meshEntry.mesh);
+                skinnedRenderer->setMaterial(meshEntry.material ? meshEntry.material : Material::CreateDefault());
+                skinnedRenderer->setSkeleton(cache.skeleton);
+                if (!cache.animations.empty()) {
+                    skinnedRenderer->setAnimationClips(cache.animations);
+                }
+            }
+        }
+    }
+
+    if (!meshRenderer && components.contains("PrimitiveMesh")) {
+        meshRenderer = entity->addComponent<MeshRenderer>();
+        PrimitiveType type = entity->getComponent<PrimitiveMesh>()->getType();
+        switch (type) {
+            case PrimitiveType::Sphere:
+                meshRenderer->setMesh(Mesh::CreateSphere(0.5f, 32, 16));
+                break;
+            case PrimitiveType::Plane:
+                meshRenderer->setMesh(Mesh::CreatePlane(10.0f, 10.0f, 1, 1));
+                break;
+            case PrimitiveType::Cylinder:
+                meshRenderer->setMesh(Mesh::CreateCylinder(0.5f, 1.0f, 32));
+                break;
+            case PrimitiveType::Cone:
+                meshRenderer->setMesh(Mesh::CreateCone(0.5f, 1.0f, 32));
+                break;
+            case PrimitiveType::Torus:
+                meshRenderer->setMesh(Mesh::CreateTorus(0.75f, 0.25f, 32, 16));
+                break;
+            case PrimitiveType::Capsule:
+                meshRenderer->setMesh(Mesh::CreateCapsule(0.5f, 2.0f, 16));
+                break;
+            default:
+                meshRenderer->setMesh(Mesh::CreateCube(1.0f));
+                break;
+        }
+        meshRenderer->setMaterial(Material::CreateDefault());
+    }
+
+    if (components.contains("MeshRenderer")) {
+        const json& r = components["MeshRenderer"];
+        if (!meshRenderer) {
+            meshRenderer = entity->addComponent<MeshRenderer>();
+        }
+        meshRenderer->setCastShadows(r.value("castShadows", meshRenderer->getCastShadows()));
+        meshRenderer->setReceiveShadows(r.value("receiveShadows", meshRenderer->getReceiveShadows()));
+
+        if (r.contains("materials") && r["materials"].is_array()) {
+            const json& mats = r["materials"];
+            for (size_t i = 0; i < mats.size(); ++i) {
+                auto material = DeserializeMaterial(mats[i], textureLoader);
+                meshRenderer->setMaterial(static_cast<uint32_t>(i), material);
+                if (skinnedRenderer) {
+                    skinnedRenderer->setMaterial(static_cast<uint32_t>(i), material);
+                }
+            }
+        }
+    }
+
+    if (components.contains("SkinnedMeshRenderer") && skinnedRenderer) {
+        const json& s = components["SkinnedMeshRenderer"];
+        skinnedRenderer->setPlaying(s.value("playing", skinnedRenderer->isPlaying()));
+        skinnedRenderer->setLooping(s.value("looping", skinnedRenderer->isLooping()));
+        skinnedRenderer->setPlaybackSpeed(std::max(0.0f, s.value("speed", skinnedRenderer->getPlaybackSpeed())));
+        int clipIndex = s.value("clipIndex", skinnedRenderer->getActiveClipIndex());
+        skinnedRenderer->setActiveClipIndex(clipIndex);
+        skinnedRenderer->setTimeSeconds(std::max(0.0f, s.value("time", skinnedRenderer->getTimeSeconds())));
+        skinnedRenderer->setRootMotionEnabled(s.value("rootMotionEnabled", skinnedRenderer->getRootMotionEnabled()));
+        skinnedRenderer->setApplyRootMotionPosition(s.value("rootMotionPosition", skinnedRenderer->getApplyRootMotionPosition()));
+        skinnedRenderer->setApplyRootMotionRotation(s.value("rootMotionRotation", skinnedRenderer->getApplyRootMotionRotation()));
+        if (s.contains("clipEvents") && s["clipEvents"].is_array()) {
+            const auto& clips = skinnedRenderer->getAnimationClips();
+            for (const auto& entry : s["clipEvents"]) {
+                int eventClipIndex = entry.value("clipIndex", -1);
+                if (eventClipIndex < 0 || eventClipIndex >= static_cast<int>(clips.size())) {
+                    continue;
+                }
+                auto clip = clips[static_cast<size_t>(eventClipIndex)];
+                if (!clip) continue;
+                clip->clearEvents();
+                if (entry.contains("events") && entry["events"].is_array()) {
+                    for (const auto& evt : entry["events"]) {
+                        AnimationEvent ev;
+                        ev.time = evt.value("time", 0.0f);
+                        ev.name = evt.value("name", "");
+                        if (!ev.name.empty()) {
+                            clip->addEvent(ev);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (components.contains("Animator")) {
+        const json& a = components["Animator"];
+        Animator* animator = entity->getComponent<Animator>();
+        if (animator) {
+            animator->setDefaultBlendDuration(a.value("blendDuration", animator->getDefaultBlendDuration()));
+            animator->setAutoPlay(a.value("autoPlay", animator->getAutoPlay()));
+            if (a.contains("rootMotion")) {
+                const json& rm = a["rootMotion"];
+                animator->setRootMotionEnabled(rm.value("enabled", animator->getRootMotionEnabled()));
+                animator->setApplyRootMotionPosition(rm.value("applyPosition", animator->getApplyRootMotionPosition()));
+                animator->setApplyRootMotionRotation(rm.value("applyRotation", animator->getApplyRootMotionRotation()));
+            }
+
+            if (a.contains("parameters") && a["parameters"].is_array()) {
+                std::vector<AnimatorParameter> params;
+                for (const auto& p : a["parameters"]) {
+                    AnimatorParameter param;
+                    param.name = p.value("name", "");
+                    param.type = AnimatorParamTypeFromString(p.value("type", "Float"));
+                    param.floatValue = p.value("float", 0.0f);
+                    param.intValue = p.value("int", 0);
+                    param.boolValue = p.value("bool", false);
+                    param.triggerValue = false;
+                    if (!param.name.empty()) {
+                        params.push_back(param);
+                    }
+                }
+                animator->setParameters(params);
+            }
+
+            if (a.contains("blendTrees") && a["blendTrees"].is_array()) {
+                std::vector<AnimatorBlendTree> trees;
+                for (const auto& t : a["blendTrees"]) {
+                    AnimatorBlendTree tree;
+                    tree.name = t.value("name", "");
+                    tree.type = AnimatorBlendTypeFromString(t.value("type", "Blend1D"));
+                    tree.parameter = t.value("parameter", "");
+                    if (t.contains("motions") && t["motions"].is_array()) {
+                        for (const auto& m : t["motions"]) {
+                            AnimatorBlendMotion motion;
+                            motion.clipIndex = m.value("clipIndex", -1);
+                            motion.threshold = m.value("threshold", 0.0f);
+                            tree.motions.push_back(motion);
+                        }
+                    }
+                    trees.push_back(tree);
+                }
+                animator->setBlendTrees(trees);
+            }
+
+            if (a.contains("states") && a["states"].is_array()) {
+                std::vector<AnimatorState> states;
+                for (const auto& s : a["states"]) {
+                    AnimatorState state;
+                    state.name = s.value("name", "");
+                    state.type = AnimatorStateTypeFromString(s.value("type", "Clip"));
+                    state.clipIndex = s.value("clipIndex", -1);
+                    state.blendTreeIndex = s.value("blendTree", -1);
+                    state.speed = s.value("speed", 1.0f);
+                    state.loop = s.value("loop", true);
+                    states.push_back(state);
+                }
+                animator->setStates(states);
+            }
+
+            if (a.contains("transitions") && a["transitions"].is_array()) {
+                std::vector<AnimatorTransition> transitions;
+                for (const auto& t : a["transitions"]) {
+                    AnimatorTransition transition;
+                    transition.fromState = t.value("from", -1);
+                    transition.toState = t.value("to", -1);
+                    transition.duration = t.value("duration", 0.25f);
+                    transition.hasExitTime = t.value("hasExitTime", false);
+                    transition.exitTime = t.value("exitTime", 0.9f);
+                    transition.fixedDuration = t.value("fixedDuration", true);
+                    if (t.contains("conditions") && t["conditions"].is_array()) {
+                        for (const auto& c : t["conditions"]) {
+                            AnimatorCondition cond;
+                            cond.parameter = c.value("parameter", "");
+                            cond.op = AnimatorCondOpFromString(c.value("op", "IfTrue"));
+                            cond.threshold = c.value("threshold", 0.0f);
+                            cond.intThreshold = c.value("intThreshold", 0);
+                            cond.boolThreshold = c.value("boolThreshold", false);
+                            if (!cond.parameter.empty()) {
+                                transition.conditions.push_back(cond);
+                            }
+                        }
+                    }
+                    transitions.push_back(transition);
+                }
+                animator->setTransitions(transitions);
+            }
+
+            int stateIndex = a.value("stateIndex", animator->getCurrentStateIndex());
+            animator->setCurrentStateIndex(stateIndex, 0.0f, true);
+        }
+    }
+
+    if (components.contains("IKConstraint")) {
+        const json& k = components["IKConstraint"];
+        IKConstraint* ik = entity->getComponent<IKConstraint>();
+        if (!ik) {
+            ik = entity->addComponent<IKConstraint>();
+        }
+        ik->setRootBone(k.value("root", ""));
+        ik->setMidBone(k.value("mid", ""));
+        ik->setEndBone(k.value("end", ""));
+        if (k.contains("target")) {
+            ik->setTargetPosition(JsonToVec3(k["target"], ik->getTargetPosition()));
+        }
+        ik->setTargetInWorld(k.value("world", ik->getTargetInWorld()));
+        ik->setWeight(k.value("weight", ik->getWeight()));
+    }
+
+    if (components.contains("Rigidbody")) {
+        const json& r = components["Rigidbody"];
+        Rigidbody* rb = entity->getComponent<Rigidbody>();
+        if (!rb) {
+            rb = entity->addComponent<Rigidbody>();
+        }
+        rb->setType(RigidbodyTypeFromString(r.value("type", std::string("Dynamic"))));
+        rb->setMass(r.value("mass", rb->getMass()));
+        rb->setLinearDamping(r.value("linearDamping", rb->getLinearDamping()));
+        rb->setAngularDamping(r.value("angularDamping", rb->getAngularDamping()));
+        rb->setUseGravity(r.value("useGravity", rb->getUseGravity()));
+        rb->setContinuousCollision(r.value("continuous", rb->getContinuousCollision()));
+        rb->setAllowSleep(r.value("allowSleep", rb->getAllowSleep()));
+    }
+
+    if (components.contains("PhysicsCollider")) {
+        const json& c = components["PhysicsCollider"];
+        PhysicsCollider* collider = entity->getComponent<PhysicsCollider>();
+        if (!collider) {
+            collider = entity->addComponent<PhysicsCollider>();
+        }
+        collider->setShapeType(ColliderShapeFromString(c.value("shape", std::string("Box"))));
+        if (c.contains("size")) {
+            collider->setSize(JsonToVec3(c["size"], collider->getSize()));
+        }
+        collider->setRadius(c.value("radius", collider->getRadius()));
+        collider->setHeight(c.value("height", collider->getHeight()));
+        if (c.contains("center")) {
+            collider->setCenter(JsonToVec3(c["center"], collider->getCenter()));
+        }
+        collider->setTrigger(c.value("trigger", collider->isTrigger()));
+        collider->setFriction(c.value("friction", collider->getFriction()));
+        collider->setRestitution(c.value("restitution", collider->getRestitution()));
+        collider->setFrictionCombine(CombineModeFromString(c.value("frictionCombine", std::string("Average"))));
+        collider->setRestitutionCombine(CombineModeFromString(c.value("restitutionCombine", std::string("Average"))));
+        collider->setCollisionLayer(c.value("collisionLayer", collider->getCollisionLayer()));
+        collider->setCollisionMask(c.value("collisionMask", collider->getCollisionMask()));
+    }
+
+    if (components.contains("Health")) {
+        const json& h = components["Health"];
+        Health* health = entity->getComponent<Health>();
+        if (!health) {
+            health = entity->addComponent<Health>();
+        }
+        health->setMaxHealth(h.value("max", health->getMaxHealth()));
+        health->setCurrentHealth(h.value("current", health->getCurrentHealth()));
+        health->setDestroyOnDeath(h.value("destroyOnDeath", health->getDestroyOnDeath()));
+    }
+
+    if (components.contains("CharacterController")) {
+        const json& c = components["CharacterController"];
+        CharacterController* controller = entity->getComponent<CharacterController>();
+        if (!controller) {
+            controller = entity->addComponent<CharacterController>();
+        }
+        controller->setRadius(c.value("radius", controller->getRadius()));
+        controller->setHeight(c.value("height", controller->getHeight()));
+        controller->setSkinWidth(c.value("skinWidth", controller->getSkinWidth()));
+        controller->setMoveSpeed(c.value("moveSpeed", controller->getMoveSpeed()));
+        controller->setAcceleration(c.value("acceleration", controller->getAcceleration()));
+        controller->setAirAcceleration(c.value("airAcceleration", controller->getAirAcceleration()));
+        controller->setJumpSpeed(c.value("jumpSpeed", controller->getJumpSpeed()));
+        controller->setGravity(c.value("gravity", controller->getGravity()));
+        controller->setMaxFallSpeed(c.value("maxFallSpeed", controller->getMaxFallSpeed()));
+        controller->setGroundSnapSpeed(c.value("groundSnapSpeed", controller->getGroundSnapSpeed()));
+        controller->setStepOffset(c.value("stepOffset", controller->getStepOffset()));
+        controller->setSlopeLimit(c.value("slopeLimit", controller->getSlopeLimit()));
+        controller->setSlopeSlideSpeed(c.value("slopeSlideSpeed", controller->getSlopeSlideSpeed()));
+        controller->setGroundCheckDistance(c.value("groundCheckDistance", controller->getGroundCheckDistance()));
+        controller->setUseInput(c.value("useInput", controller->getUseInput()));
+        controller->setUseGravity(c.value("useGravity", controller->getUseGravity()));
+        controller->setEnableStep(c.value("enableStep", controller->getEnableStep()));
+        controller->setEnableSlopeLimit(c.value("enableSlopeLimit", controller->getEnableSlopeLimit()));
+        controller->setSnapToGround(c.value("snapToGround", controller->getSnapToGround()));
+        controller->setCollisionMask(c.value("collisionMask", controller->getCollisionMask()));
+    }
+
+    if (components.contains("FirstPersonController")) {
+        const json& c = components["FirstPersonController"];
+        FirstPersonController* controller = entity->getComponent<FirstPersonController>();
+        if (!controller) {
+            controller = entity->addComponent<FirstPersonController>();
+        }
+        controller->setMouseSensitivity(c.value("mouseSensitivity", controller->getMouseSensitivity()));
+        controller->setInvertY(c.value("invertY", controller->getInvertY()));
+        controller->setRequireLookButton(c.value("requireLookButton", controller->getRequireLookButton()));
+        controller->setLookButton(static_cast<MouseButton>(c.value("lookButton", static_cast<int>(controller->getLookButton()))));
+        controller->setMinPitch(c.value("minPitch", controller->getMinPitch()));
+        controller->setMaxPitch(c.value("maxPitch", controller->getMaxPitch()));
+        controller->setWalkSpeed(c.value("walkSpeed", controller->getWalkSpeed()));
+        controller->setSprintMultiplier(c.value("sprintMultiplier", controller->getSprintMultiplier()));
+        controller->setEnableSprint(c.value("enableSprint", controller->getEnableSprint()));
+        controller->setEnableCrouch(c.value("enableCrouch", controller->getEnableCrouch()));
+        controller->setCrouchHeight(c.value("crouchHeight", controller->getCrouchHeight()));
+        controller->setCrouchEyeHeight(c.value("crouchEyeHeight", controller->getCrouchEyeHeight()));
+        controller->setCrouchSpeed(c.value("crouchSpeed", controller->getCrouchSpeed()));
+        controller->setEyeHeight(c.value("eyeHeight", controller->getEyeHeight()));
+        controller->setUseEyeHeight(c.value("useEyeHeight", controller->getUseEyeHeight()));
+        controller->setDriveCharacterController(c.value("driveCharacterController", controller->getDriveCharacterController()));
+        controller->setFireCooldown(c.value("fireCooldown", controller->getFireCooldown()));
+        controller->setFireDamage(c.value("fireDamage", controller->getFireDamage()));
+        controller->setFireRange(c.value("fireRange", controller->getFireRange()));
+        controller->setFireHitMask(c.value("fireMask", controller->getFireHitMask()));
+        controller->setFireHitTriggers(c.value("fireHitTriggers", controller->getFireHitTriggers()));
+        if (c.contains("muzzleTexture")) {
+            std::string resolved = ResolveTextureEntryPath(c["muzzleTexture"]);
+            if (!resolved.empty()) {
+                controller->setMuzzleTexturePath(resolved);
+            } else if (c["muzzleTexture"].is_string()) {
+                controller->setMuzzleTexturePath(c["muzzleTexture"].get<std::string>());
+            }
+        }
+    }
+
+    if (components.contains("AudioSource")) {
+        const json& a = components["AudioSource"];
+        AudioSource* audio = entity->getComponent<AudioSource>();
+        if (!audio) {
+            audio = entity->addComponent<AudioSource>();
+        }
+        audio->setStreaming(a.value("stream", audio->isStreaming()));
+        if (a.contains("file")) {
+            std::string resolved = ResolveTextureEntryPath(a["file"]);
+            if (!resolved.empty()) {
+                audio->setFilePath(resolved);
+            } else if (a["file"].is_string()) {
+                audio->setFilePath(a["file"].get<std::string>());
+            }
+        }
+        audio->setVolume(a.value("volume", audio->getVolume()));
+        audio->setPitch(a.value("pitch", audio->getPitch()));
+        audio->setLooping(a.value("looping", audio->isLooping()));
+        audio->setPlayOnStart(a.value("playOnStart", audio->getPlayOnStart()));
+        audio->setSpatial(a.value("spatial", audio->isSpatial()));
+        audio->setMinDistance(a.value("minDistance", audio->getMinDistance()));
+        audio->setMaxDistance(a.value("maxDistance", audio->getMaxDistance()));
+        audio->setRolloff(a.value("rolloff", audio->getRolloff()));
+    }
+
+    if (components.contains("Light")) {
+        const json& l = components["Light"];
+        Light* light = entity->addComponent<Light>();
+        light->setType(static_cast<Light::Type>(l.value("type", static_cast<int>(light->getType()))));
+        if (l.contains("temperatureK")) {
+            light->setColorTemperature(l.value("temperatureK", light->getColorTemperature()));
+        }
+        if (l.contains("color")) {
+            light->setColor(JsonToVec3(l["color"], light->getColor()));
+        }
+        light->setIntensity(l.value("intensity", light->getIntensity()));
+            light->setIntensityUnit(static_cast<Light::IntensityUnit>(l.value("intensityUnit", static_cast<int>(light->getIntensityUnit()))));
+            light->setRange(l.value("range", light->getRange()));
+            if (l.contains("areaSize")) {
+                light->setAreaSize(JsonToVec2(l["areaSize"], light->getAreaSize()));
+            }
+            light->setSourceRadius(l.value("sourceRadius", light->getSourceRadius()));
+            light->setSourceLength(l.value("sourceLength", light->getSourceLength()));
+            light->setFalloffModel(static_cast<Light::FalloffModel>(l.value("falloff", static_cast<int>(light->getFalloffModel()))));
+            light->setSpotAngle(l.value("spotAngle", light->getSpotAngle()));
+            light->setInnerSpotAngle(l.value("innerSpotAngle", light->getInnerSpotAngle()));
+        light->setCastShadows(l.value("castsShadows", light->getCastShadows()));
+        light->setSoftShadows(l.value("softShadows", light->getSoftShadows()));
+        light->setShadowMapResolution(l.value("shadowResolution", light->getShadowMapResolution()));
+        light->setShadowBias(l.value("shadowBias", light->getShadowBias()));
+        light->setShadowNormalBias(l.value("shadowNormalBias", light->getShadowNormalBias()));
+        if (l.contains("shadowNearPlane") || l.contains("shadowFarPlane")) {
+            float nearPlane = l.value("shadowNearPlane", light->getShadowNearPlane());
+            float farPlane = l.value("shadowFarPlane", light->getShadowFarPlane());
+            light->setShadowRange(nearPlane, farPlane);
+        }
+        light->setPenumbra(l.value("penumbra", light->getPenumbra()));
+        light->setContactShadows(l.value("contactShadows", light->getContactShadows()));
+        light->setCascadeCount(static_cast<uint8_t>(l.value("cascadeCount", light->getCascadeCount())));
+        if (l.contains("cascadeSplits") && l["cascadeSplits"].is_array() && l["cascadeSplits"].size() == 4) {
+            std::array<float, 4> splits = {
+                l["cascadeSplits"][0].get<float>(),
+                l["cascadeSplits"][1].get<float>(),
+                l["cascadeSplits"][2].get<float>(),
+                l["cascadeSplits"][3].get<float>()
+            };
+            light->setCascadeSplits(splits);
+        }
+        light->setVolumetric(l.value("volumetric", light->getVolumetric()));
+    }
+
+    if (components.contains("Decal")) {
+        const json& d = components["Decal"];
+        Decal* decal = entity->addComponent<Decal>();
+        if (d.contains("color")) {
+            decal->setTint(JsonToVec4(d["color"], decal->getTint()));
+        }
+        decal->setOpacity(d.value("opacity", decal->getOpacity()));
+        if (d.contains("tiling")) {
+            decal->setTiling(JsonToVec2(d["tiling"], decal->getTiling()));
+        }
+        if (d.contains("offset")) {
+            decal->setOffset(JsonToVec2(d["offset"], decal->getOffset()));
+        }
+        decal->setEdgeSoftness(d.value("softness", decal->getEdgeSoftness()));
+        auto loadDecal = [&](const char* key, bool srgb,
+                             auto setPath, auto setTexture) {
+            if (!d.contains(key)) {
+                return;
+            }
+            std::string resolved = ResolveTextureEntryPath(d[key]);
+            if (resolved.empty()) {
+                return;
+            }
+            setPath(resolved);
+            if (auto tex = LoadTexturePath(textureLoader, resolved, srgb)) {
+                setTexture(tex);
+            }
+        };
+        loadDecal("albedo", true,
+                  [&](const std::string& path){ decal->setAlbedoPath(path); },
+                  [&](const std::shared_ptr<Texture2D>& tex){ decal->setAlbedoTexture(tex); });
+        if (d.contains("texture")) {
+            loadDecal("texture", true,
+                      [&](const std::string& path){ decal->setAlbedoPath(path); },
+                      [&](const std::shared_ptr<Texture2D>& tex){ decal->setAlbedoTexture(tex); });
+        }
+        loadDecal("normal", false,
+                  [&](const std::string& path){ decal->setNormalPath(path); },
+                  [&](const std::shared_ptr<Texture2D>& tex){ decal->setNormalTexture(tex); });
+        loadDecal("orm", false,
+                  [&](const std::string& path){ decal->setORMPath(path); },
+                  [&](const std::shared_ptr<Texture2D>& tex){ decal->setORMTexture(tex); });
+        loadDecal("mask", false,
+                  [&](const std::string& path){ decal->setMaskPath(path); },
+                  [&](const std::shared_ptr<Texture2D>& tex){ decal->setMaskTexture(tex); });
+    }
+
+    if (components.contains("Camera")) {
+        const json& c = components["Camera"];
+        Camera* camera = entity->addComponent<Camera>();
+        camera->setProjectionType(static_cast<Camera::ProjectionType>(c.value("projection", static_cast<int>(camera->getProjectionType()))));
+        camera->setFieldOfView(c.value("fov", camera->getFieldOfView()));
+        camera->setOrthographicSize(c.value("orthoSize", camera->getOrthographicSize()));
+        camera->setNearClip(c.value("nearClip", camera->getNearClip()));
+        camera->setFarClip(c.value("farClip", camera->getFarClip()));
+        camera->setAspectRatio(c.value("aspect", camera->getAspectRatio()));
+        if (c.contains("viewport")) {
+            camera->setViewport(JsonToVec4(c["viewport"], camera->getViewport()));
+        }
+        if (c.contains("clearColor")) {
+            camera->setClearColor(JsonToVec4(c["clearColor"], camera->getClearColor()));
+        }
+        camera->setClearDepth(c.value("clearDepth", camera->getClearDepth()));
+        camera->setEditorCamera(c.value("editorCamera", false));
+    }
+
+    if (components.contains("CameraController")) {
+        const json& cc = components["CameraController"];
+        CameraController* controller = entity->addComponent<CameraController>();
+        controller->setMoveSpeed(cc.value("moveSpeed", controller->getMoveSpeed()));
+        controller->setRotationSpeed(cc.value("rotationSpeed", controller->getRotationSpeed()));
+    }
+}
 
 json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scenePath, bool includeEditorOnly) {
     json root;
@@ -940,7 +1575,10 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"playing", skinned->isPlaying()},
                 {"looping", skinned->isLooping()},
                 {"speed", skinned->getPlaybackSpeed()},
-                {"time", skinned->getTimeSeconds()}
+                {"time", skinned->getTimeSeconds()},
+                {"rootMotionEnabled", skinned->getRootMotionEnabled()},
+                {"rootMotionPosition", skinned->getApplyRootMotionPosition()},
+                {"rootMotionRotation", skinned->getApplyRootMotionRotation()}
             };
             const auto& clips = skinned->getAnimationClips();
             json clipEvents = json::array();
@@ -1098,6 +1736,14 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
             };
         }
 
+        if (auto* health = entity->getComponent<Health>()) {
+            components["Health"] = {
+                {"max", health->getMaxHealth()},
+                {"current", health->getCurrentHealth()},
+                {"destroyOnDeath", health->getDestroyOnDeath()}
+            };
+        }
+
         if (auto* controller = entity->getComponent<CharacterController>()) {
             components["CharacterController"] = {
                 {"radius", controller->getRadius()},
@@ -1141,7 +1787,11 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"eyeHeight", controller->getEyeHeight()},
                 {"useEyeHeight", controller->getUseEyeHeight()},
                 {"driveCharacterController", controller->getDriveCharacterController()},
-                {"fireCooldown", controller->getFireCooldown()}
+                {"fireCooldown", controller->getFireCooldown()},
+                {"fireDamage", controller->getFireDamage()},
+                {"fireRange", controller->getFireRange()},
+                {"fireMask", controller->getFireHitMask()},
+                {"fireHitTriggers", controller->getFireHitTriggers()}
             };
             json muzzleRef = SerializeAssetPath(controller->getMuzzleTexturePath(), "texture");
             if (!muzzleRef.is_null() && !muzzleRef.empty()) {
@@ -1180,6 +1830,10 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"range", light->getRange()},
                 {"spotAngle", light->getSpotAngle()},
                 {"innerSpotAngle", light->getInnerSpotAngle()},
+                {"areaSize", Vec2ToJson(light->getAreaSize())},
+                {"sourceRadius", light->getSourceRadius()},
+                {"sourceLength", light->getSourceLength()},
+                {"falloff", static_cast<int>(light->getFalloffModel())},
                 {"castsShadows", light->getCastShadows()},
                 {"softShadows", light->getSoftShadows()},
                 {"shadowResolution", light->getShadowMapResolution()},
@@ -1393,593 +2047,23 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
         scene->setName(root.value("name", scene->getName()));
     }
 
-    struct EntityRecord {
-        Entity* entity = nullptr;
-        json components;
-        std::string parentUUID;
-        bool active = true;
-        bool editorOnly = false;
-    };
-
-    std::unordered_map<std::string, EntityRecord> records;
-    if (root.contains("entities") && root["entities"].is_array()) {
-        for (const auto& e : root["entities"]) {
-            if (!e.is_object()) {
-                continue;
-            }
-            std::string uuidStr = e.value("uuid", std::string());
-            std::string name = e.value("name", std::string("Entity"));
-            Entity* entity = nullptr;
-            UUID uuid;
-            if (!uuidStr.empty() && ParseUUID(uuidStr, uuid)) {
-                entity = scene->createEntityWithUUID(uuid, name);
-            } else {
-                entity = scene->createEntity(name);
-                uuidStr = entity->getUUID().toString();
-            }
-            EntityRecord record;
-            record.entity = entity;
-            record.components = e.value("components", json::object());
-            record.parentUUID = e.value("parent", std::string());
-            record.active = e.value("active", true);
-            record.editorOnly = e.value("editorOnly", false);
-            records[uuidStr] = record;
-        }
-    }
-
-    for (auto& [uuid, record] : records) {
-        if (!record.entity) {
-            continue;
-        }
-        if (!record.parentUUID.empty()) {
-            auto parentIt = records.find(record.parentUUID);
-            if (parentIt != records.end() && parentIt->second.entity) {
-                record.entity->getTransform()->setParent(parentIt->second.entity->getTransform(), false);
-            }
-        }
-    }
+    auto records = BuildEntityRecords(scene,
+                                      root.contains("entities") && root["entities"].is_array()
+                                          ? root["entities"]
+                                          : json::array(),
+                                      true);
+    ResolveEntityParents(scene, records);
 
     Renderer* renderer = Engine::getInstance().getRenderer();
     TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
     std::unordered_map<std::string, ModelCacheEntry> modelCache;
 
     for (auto& [uuid, record] : records) {
-        Entity* entity = record.entity;
-        if (!entity) {
+        if (!record.entity) {
             continue;
         }
-        entity->setEditorOnly(record.editorOnly);
-        const json& components = record.components;
-
-        if (components.contains("Transform")) {
-            const json& t = components["Transform"];
-            Transform* transform = entity->getTransform();
-            transform->setLocalPosition(JsonToVec3(t.value("position", json::array()), transform->getLocalPosition()));
-            transform->setLocalRotation(JsonToQuat(t.value("rotation", json::array()), transform->getLocalRotation()));
-            transform->setLocalScale(JsonToVec3(t.value("scale", json::array({1.0f, 1.0f, 1.0f})), transform->getLocalScale()));
-        }
-
-        if (components.contains("PrimitiveMesh")) {
-            const json& p = components["PrimitiveMesh"];
-            PrimitiveType type = PrimitiveTypeFromString(p.value("type", std::string("Cube")));
-            entity->addComponent<PrimitiveMesh>()->setType(type);
-        }
-
-        ModelMeshReference* modelRef = nullptr;
-        if (components.contains("ModelMeshReference")) {
-            const json& m = components["ModelMeshReference"];
-            modelRef = entity->addComponent<ModelMeshReference>();
-            std::string storedPath = m.value("sourcePath", std::string());
-            std::string guid = m.value("sourceGuid", std::string());
-            std::string resolvedPath;
-            AssetDatabase& db = AssetDatabase::getInstance();
-            if (!guid.empty()) {
-                resolvedPath = db.getPathForGuid(guid);
-            }
-            if (resolvedPath.empty()) {
-                resolvedPath = db.resolvePath(storedPath);
-            }
-            if (resolvedPath.empty()) {
-                resolvedPath = storedPath;
-            }
-            if (!resolvedPath.empty()) {
-                std::filesystem::path resolved(resolvedPath);
-                if (!std::filesystem::exists(resolved)) {
-                    if (!scenePath.empty()) {
-                        std::filesystem::path sceneDir = std::filesystem::path(scenePath).parent_path();
-                        std::filesystem::path candidate = (sceneDir / storedPath).lexically_normal();
-                        if (std::filesystem::exists(candidate)) {
-                            resolvedPath = candidate.string();
-                        }
-                    }
-                }
-            }
-            modelRef->setSourcePath(resolvedPath);
-            modelRef->setSourceGuid(guid);
-            modelRef->setMeshIndex(m.value("meshIndex", -1));
-            modelRef->setMaterialIndex(m.value("materialIndex", -1));
-            modelRef->setMeshName(m.value("meshName", std::string()));
-            modelRef->setSkinned(m.value("skinned", false));
-            modelRef->setMerged(m.value("merged", false));
-            if (m.contains("importOptions")) {
-                modelRef->setImportOptions(DeserializeImportOptions(m["importOptions"]));
-            }
-        }
-
-        MeshRenderer* meshRenderer = nullptr;
-        SkinnedMeshRenderer* skinnedRenderer = nullptr;
-
-        if (modelRef) {
-            std::string cacheKey = MakeModelCacheKey(modelRef->getSourcePath(), modelRef->getImportOptions());
-            auto it = modelCache.find(cacheKey);
-            if (it == modelCache.end()) {
-                modelCache[cacheKey] = BuildModelCache(modelRef->getSourcePath(), modelRef->getImportOptions());
-                it = modelCache.find(cacheKey);
-            }
-            const ModelCacheEntry& cache = it->second;
-            MeshCacheEntry meshEntry;
-            bool found = false;
-            if (modelRef->isMerged()) {
-                auto mergedIt = cache.mergedByMaterial.find(modelRef->getMaterialIndex());
-                if (mergedIt != cache.mergedByMaterial.end()) {
-                    meshEntry = mergedIt->second;
-                    found = true;
-                }
-            } else {
-                auto meshIt = cache.meshesByIndex.find(modelRef->getMeshIndex());
-                if (meshIt != cache.meshesByIndex.end()) {
-                    meshEntry = meshIt->second;
-                    found = true;
-                }
-            }
-            if (found) {
-                meshRenderer = entity->addComponent<MeshRenderer>();
-                meshRenderer->setMesh(meshEntry.mesh);
-                meshRenderer->setMaterial(meshEntry.material ? meshEntry.material : Material::CreateDefault());
-                if (modelRef->isSkinned() && cache.skeleton) {
-                    skinnedRenderer = entity->addComponent<SkinnedMeshRenderer>();
-                    skinnedRenderer->setMesh(meshEntry.mesh);
-                    skinnedRenderer->setMaterial(meshEntry.material ? meshEntry.material : Material::CreateDefault());
-                    skinnedRenderer->setSkeleton(cache.skeleton);
-                    if (!cache.animations.empty()) {
-                        skinnedRenderer->setAnimationClips(cache.animations);
-                    }
-                }
-            }
-        }
-
-        if (!meshRenderer && components.contains("PrimitiveMesh")) {
-            meshRenderer = entity->addComponent<MeshRenderer>();
-            PrimitiveType type = entity->getComponent<PrimitiveMesh>()->getType();
-            switch (type) {
-                case PrimitiveType::Sphere:
-                    meshRenderer->setMesh(Mesh::CreateSphere(0.5f, 32, 16));
-                    break;
-                case PrimitiveType::Plane:
-                    meshRenderer->setMesh(Mesh::CreatePlane(10.0f, 10.0f, 1, 1));
-                    break;
-                case PrimitiveType::Cylinder:
-                    meshRenderer->setMesh(Mesh::CreateCylinder(0.5f, 1.0f, 32));
-                    break;
-                case PrimitiveType::Cone:
-                    meshRenderer->setMesh(Mesh::CreateCone(0.5f, 1.0f, 32));
-                    break;
-                case PrimitiveType::Torus:
-                    meshRenderer->setMesh(Mesh::CreateTorus(0.75f, 0.25f, 32, 16));
-                    break;
-                case PrimitiveType::Capsule:
-                    meshRenderer->setMesh(Mesh::CreateCapsule(0.5f, 2.0f, 16));
-                    break;
-                default:
-                    meshRenderer->setMesh(Mesh::CreateCube(1.0f));
-                    break;
-            }
-            meshRenderer->setMaterial(Material::CreateDefault());
-        }
-
-        if (components.contains("MeshRenderer")) {
-            const json& r = components["MeshRenderer"];
-            if (!meshRenderer) {
-                meshRenderer = entity->addComponent<MeshRenderer>();
-            }
-            meshRenderer->setCastShadows(r.value("castShadows", meshRenderer->getCastShadows()));
-            meshRenderer->setReceiveShadows(r.value("receiveShadows", meshRenderer->getReceiveShadows()));
-
-            if (r.contains("materials") && r["materials"].is_array()) {
-                const json& mats = r["materials"];
-                for (size_t i = 0; i < mats.size(); ++i) {
-                    auto material = DeserializeMaterial(mats[i], textureLoader);
-                    meshRenderer->setMaterial(static_cast<uint32_t>(i), material);
-                    if (skinnedRenderer) {
-                        skinnedRenderer->setMaterial(static_cast<uint32_t>(i), material);
-                    }
-                }
-            }
-        }
-
-        if (components.contains("SkinnedMeshRenderer") && skinnedRenderer) {
-            const json& s = components["SkinnedMeshRenderer"];
-            skinnedRenderer->setPlaying(s.value("playing", skinnedRenderer->isPlaying()));
-            skinnedRenderer->setLooping(s.value("looping", skinnedRenderer->isLooping()));
-            skinnedRenderer->setPlaybackSpeed(std::max(0.0f, s.value("speed", skinnedRenderer->getPlaybackSpeed())));
-            int clipIndex = s.value("clipIndex", skinnedRenderer->getActiveClipIndex());
-            skinnedRenderer->setActiveClipIndex(clipIndex);
-            skinnedRenderer->setTimeSeconds(std::max(0.0f, s.value("time", skinnedRenderer->getTimeSeconds())));
-            if (s.contains("clipEvents") && s["clipEvents"].is_array()) {
-                const auto& clips = skinnedRenderer->getAnimationClips();
-                for (const auto& entry : s["clipEvents"]) {
-                    int eventClipIndex = entry.value("clipIndex", -1);
-                    if (eventClipIndex < 0 || eventClipIndex >= static_cast<int>(clips.size())) {
-                        continue;
-                    }
-                    auto clip = clips[static_cast<size_t>(eventClipIndex)];
-                    if (!clip) continue;
-                    clip->clearEvents();
-                    if (entry.contains("events") && entry["events"].is_array()) {
-                        for (const auto& evt : entry["events"]) {
-                            AnimationEvent ev;
-                            ev.time = evt.value("time", 0.0f);
-                            ev.name = evt.value("name", "");
-                            if (!ev.name.empty()) {
-                                clip->addEvent(ev);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (components.contains("Animator")) {
-            const json& a = components["Animator"];
-            Animator* animator = entity->getComponent<Animator>();
-            if (animator) {
-                animator->setDefaultBlendDuration(a.value("blendDuration", animator->getDefaultBlendDuration()));
-                animator->setAutoPlay(a.value("autoPlay", animator->getAutoPlay()));
-                if (a.contains("rootMotion")) {
-                    const json& rm = a["rootMotion"];
-                    animator->setRootMotionEnabled(rm.value("enabled", animator->getRootMotionEnabled()));
-                    animator->setApplyRootMotionPosition(rm.value("applyPosition", animator->getApplyRootMotionPosition()));
-                    animator->setApplyRootMotionRotation(rm.value("applyRotation", animator->getApplyRootMotionRotation()));
-                }
-
-                if (a.contains("parameters") && a["parameters"].is_array()) {
-                    std::vector<AnimatorParameter> params;
-                    for (const auto& p : a["parameters"]) {
-                        AnimatorParameter param;
-                        param.name = p.value("name", "");
-                        param.type = AnimatorParamTypeFromString(p.value("type", "Float"));
-                        param.floatValue = p.value("float", 0.0f);
-                        param.intValue = p.value("int", 0);
-                        param.boolValue = p.value("bool", false);
-                        param.triggerValue = false;
-                        if (!param.name.empty()) {
-                            params.push_back(param);
-                        }
-                    }
-                    animator->setParameters(params);
-                }
-
-                if (a.contains("blendTrees") && a["blendTrees"].is_array()) {
-                    std::vector<AnimatorBlendTree> trees;
-                    for (const auto& t : a["blendTrees"]) {
-                        AnimatorBlendTree tree;
-                        tree.name = t.value("name", "");
-                        tree.type = AnimatorBlendTypeFromString(t.value("type", "Blend1D"));
-                        tree.parameter = t.value("parameter", "");
-                        if (t.contains("motions") && t["motions"].is_array()) {
-                            for (const auto& m : t["motions"]) {
-                                AnimatorBlendMotion motion;
-                                motion.clipIndex = m.value("clipIndex", -1);
-                                motion.threshold = m.value("threshold", 0.0f);
-                                tree.motions.push_back(motion);
-                            }
-                        }
-                        trees.push_back(tree);
-                    }
-                    animator->setBlendTrees(trees);
-                }
-
-                if (a.contains("states") && a["states"].is_array()) {
-                    std::vector<AnimatorState> states;
-                    for (const auto& s : a["states"]) {
-                        AnimatorState state;
-                        state.name = s.value("name", "");
-                        state.type = AnimatorStateTypeFromString(s.value("type", "Clip"));
-                        state.clipIndex = s.value("clipIndex", -1);
-                        state.blendTreeIndex = s.value("blendTree", -1);
-                        state.speed = s.value("speed", 1.0f);
-                        state.loop = s.value("loop", true);
-                        states.push_back(state);
-                    }
-                    animator->setStates(states);
-                }
-
-                if (a.contains("transitions") && a["transitions"].is_array()) {
-                    std::vector<AnimatorTransition> transitions;
-                    for (const auto& t : a["transitions"]) {
-                        AnimatorTransition transition;
-                        transition.fromState = t.value("from", -1);
-                        transition.toState = t.value("to", -1);
-                        transition.duration = t.value("duration", 0.25f);
-                        transition.hasExitTime = t.value("hasExitTime", false);
-                        transition.exitTime = t.value("exitTime", 0.9f);
-                        transition.fixedDuration = t.value("fixedDuration", true);
-                        if (t.contains("conditions") && t["conditions"].is_array()) {
-                            for (const auto& c : t["conditions"]) {
-                                AnimatorCondition cond;
-                                cond.parameter = c.value("parameter", "");
-                                cond.op = AnimatorCondOpFromString(c.value("op", "IfTrue"));
-                                cond.threshold = c.value("threshold", 0.0f);
-                                cond.intThreshold = c.value("intThreshold", 0);
-                                cond.boolThreshold = c.value("boolThreshold", false);
-                                if (!cond.parameter.empty()) {
-                                    transition.conditions.push_back(cond);
-                                }
-                            }
-                        }
-                        transitions.push_back(transition);
-                    }
-                    animator->setTransitions(transitions);
-                }
-
-                int stateIndex = a.value("stateIndex", animator->getCurrentStateIndex());
-                animator->setCurrentStateIndex(stateIndex, 0.0f, true);
-            }
-        }
-
-        if (components.contains("IKConstraint")) {
-            const json& k = components["IKConstraint"];
-            IKConstraint* ik = entity->getComponent<IKConstraint>();
-            if (!ik) {
-                ik = entity->addComponent<IKConstraint>();
-            }
-            ik->setRootBone(k.value("root", ""));
-            ik->setMidBone(k.value("mid", ""));
-            ik->setEndBone(k.value("end", ""));
-            if (k.contains("target")) {
-                ik->setTargetPosition(JsonToVec3(k["target"], ik->getTargetPosition()));
-            }
-            ik->setTargetInWorld(k.value("world", ik->getTargetInWorld()));
-            ik->setWeight(k.value("weight", ik->getWeight()));
-        }
-
-        if (components.contains("Rigidbody")) {
-            const json& r = components["Rigidbody"];
-            Rigidbody* rb = entity->getComponent<Rigidbody>();
-            if (!rb) {
-                rb = entity->addComponent<Rigidbody>();
-            }
-            rb->setType(RigidbodyTypeFromString(r.value("type", std::string("Dynamic"))));
-            rb->setMass(r.value("mass", rb->getMass()));
-            rb->setLinearDamping(r.value("linearDamping", rb->getLinearDamping()));
-            rb->setAngularDamping(r.value("angularDamping", rb->getAngularDamping()));
-            rb->setUseGravity(r.value("useGravity", rb->getUseGravity()));
-            rb->setContinuousCollision(r.value("continuous", rb->getContinuousCollision()));
-            rb->setAllowSleep(r.value("allowSleep", rb->getAllowSleep()));
-        }
-
-        if (components.contains("PhysicsCollider")) {
-            const json& c = components["PhysicsCollider"];
-            PhysicsCollider* collider = entity->getComponent<PhysicsCollider>();
-            if (!collider) {
-                collider = entity->addComponent<PhysicsCollider>();
-            }
-            collider->setShapeType(ColliderShapeFromString(c.value("shape", std::string("Box"))));
-            if (c.contains("size")) {
-                collider->setSize(JsonToVec3(c["size"], collider->getSize()));
-            }
-            collider->setRadius(c.value("radius", collider->getRadius()));
-            collider->setHeight(c.value("height", collider->getHeight()));
-            if (c.contains("center")) {
-                collider->setCenter(JsonToVec3(c["center"], collider->getCenter()));
-            }
-            collider->setTrigger(c.value("trigger", collider->isTrigger()));
-            collider->setFriction(c.value("friction", collider->getFriction()));
-            collider->setRestitution(c.value("restitution", collider->getRestitution()));
-            collider->setFrictionCombine(CombineModeFromString(c.value("frictionCombine", std::string("Average"))));
-            collider->setRestitutionCombine(CombineModeFromString(c.value("restitutionCombine", std::string("Average"))));
-            collider->setCollisionLayer(c.value("collisionLayer", collider->getCollisionLayer()));
-            collider->setCollisionMask(c.value("collisionMask", collider->getCollisionMask()));
-        }
-
-        if (components.contains("CharacterController")) {
-            const json& c = components["CharacterController"];
-            CharacterController* controller = entity->getComponent<CharacterController>();
-            if (!controller) {
-                controller = entity->addComponent<CharacterController>();
-            }
-            controller->setRadius(c.value("radius", controller->getRadius()));
-            controller->setHeight(c.value("height", controller->getHeight()));
-            controller->setSkinWidth(c.value("skinWidth", controller->getSkinWidth()));
-            controller->setMoveSpeed(c.value("moveSpeed", controller->getMoveSpeed()));
-            controller->setAcceleration(c.value("acceleration", controller->getAcceleration()));
-            controller->setAirAcceleration(c.value("airAcceleration", controller->getAirAcceleration()));
-            controller->setJumpSpeed(c.value("jumpSpeed", controller->getJumpSpeed()));
-            controller->setGravity(c.value("gravity", controller->getGravity()));
-            controller->setMaxFallSpeed(c.value("maxFallSpeed", controller->getMaxFallSpeed()));
-            controller->setGroundSnapSpeed(c.value("groundSnapSpeed", controller->getGroundSnapSpeed()));
-            controller->setStepOffset(c.value("stepOffset", controller->getStepOffset()));
-            controller->setSlopeLimit(c.value("slopeLimit", controller->getSlopeLimit()));
-            controller->setSlopeSlideSpeed(c.value("slopeSlideSpeed", controller->getSlopeSlideSpeed()));
-            controller->setGroundCheckDistance(c.value("groundCheckDistance", controller->getGroundCheckDistance()));
-            controller->setUseInput(c.value("useInput", controller->getUseInput()));
-            controller->setUseGravity(c.value("useGravity", controller->getUseGravity()));
-            controller->setEnableStep(c.value("enableStep", controller->getEnableStep()));
-            controller->setEnableSlopeLimit(c.value("enableSlopeLimit", controller->getEnableSlopeLimit()));
-            controller->setSnapToGround(c.value("snapToGround", controller->getSnapToGround()));
-            controller->setCollisionMask(c.value("collisionMask", controller->getCollisionMask()));
-        }
-
-        if (components.contains("FirstPersonController")) {
-            const json& c = components["FirstPersonController"];
-            FirstPersonController* controller = entity->getComponent<FirstPersonController>();
-            if (!controller) {
-                controller = entity->addComponent<FirstPersonController>();
-            }
-            controller->setMouseSensitivity(c.value("mouseSensitivity", controller->getMouseSensitivity()));
-            controller->setInvertY(c.value("invertY", controller->getInvertY()));
-            controller->setRequireLookButton(c.value("requireLookButton", controller->getRequireLookButton()));
-            controller->setLookButton(static_cast<MouseButton>(c.value("lookButton", static_cast<int>(controller->getLookButton()))));
-            controller->setMinPitch(c.value("minPitch", controller->getMinPitch()));
-            controller->setMaxPitch(c.value("maxPitch", controller->getMaxPitch()));
-            controller->setWalkSpeed(c.value("walkSpeed", controller->getWalkSpeed()));
-            controller->setSprintMultiplier(c.value("sprintMultiplier", controller->getSprintMultiplier()));
-            controller->setEnableSprint(c.value("enableSprint", controller->getEnableSprint()));
-            controller->setEnableCrouch(c.value("enableCrouch", controller->getEnableCrouch()));
-            controller->setCrouchHeight(c.value("crouchHeight", controller->getCrouchHeight()));
-            controller->setCrouchEyeHeight(c.value("crouchEyeHeight", controller->getCrouchEyeHeight()));
-            controller->setCrouchSpeed(c.value("crouchSpeed", controller->getCrouchSpeed()));
-            controller->setEyeHeight(c.value("eyeHeight", controller->getEyeHeight()));
-            controller->setUseEyeHeight(c.value("useEyeHeight", controller->getUseEyeHeight()));
-            controller->setDriveCharacterController(c.value("driveCharacterController", controller->getDriveCharacterController()));
-            controller->setFireCooldown(c.value("fireCooldown", controller->getFireCooldown()));
-            if (c.contains("muzzleTexture")) {
-                std::string resolved = ResolveTextureEntryPath(c["muzzleTexture"]);
-                if (!resolved.empty()) {
-                    controller->setMuzzleTexturePath(resolved);
-                } else if (c["muzzleTexture"].is_string()) {
-                    controller->setMuzzleTexturePath(c["muzzleTexture"].get<std::string>());
-                }
-            }
-        }
-
-        if (components.contains("AudioSource")) {
-            const json& a = components["AudioSource"];
-            AudioSource* audio = entity->getComponent<AudioSource>();
-            if (!audio) {
-                audio = entity->addComponent<AudioSource>();
-            }
-            audio->setStreaming(a.value("stream", audio->isStreaming()));
-            if (a.contains("file")) {
-                std::string resolved = ResolveTextureEntryPath(a["file"]);
-                if (!resolved.empty()) {
-                    audio->setFilePath(resolved);
-                } else if (a["file"].is_string()) {
-                    audio->setFilePath(a["file"].get<std::string>());
-                }
-            }
-            audio->setVolume(a.value("volume", audio->getVolume()));
-            audio->setPitch(a.value("pitch", audio->getPitch()));
-            audio->setLooping(a.value("looping", audio->isLooping()));
-            audio->setPlayOnStart(a.value("playOnStart", audio->getPlayOnStart()));
-            audio->setSpatial(a.value("spatial", audio->isSpatial()));
-            audio->setMinDistance(a.value("minDistance", audio->getMinDistance()));
-            audio->setMaxDistance(a.value("maxDistance", audio->getMaxDistance()));
-            audio->setRolloff(a.value("rolloff", audio->getRolloff()));
-        }
-
-        if (components.contains("Light")) {
-            const json& l = components["Light"];
-            Light* light = entity->addComponent<Light>();
-            light->setType(static_cast<Light::Type>(l.value("type", static_cast<int>(light->getType()))));
-            if (l.contains("temperatureK")) {
-                light->setColorTemperature(l.value("temperatureK", light->getColorTemperature()));
-            }
-            if (l.contains("color")) {
-                light->setColor(JsonToVec3(l["color"], light->getColor()));
-            }
-            light->setIntensity(l.value("intensity", light->getIntensity()));
-            light->setIntensityUnit(static_cast<Light::IntensityUnit>(l.value("intensityUnit", static_cast<int>(light->getIntensityUnit()))));
-            light->setRange(l.value("range", light->getRange()));
-            light->setSpotAngle(l.value("spotAngle", light->getSpotAngle()));
-            light->setInnerSpotAngle(l.value("innerSpotAngle", light->getInnerSpotAngle()));
-            light->setCastShadows(l.value("castsShadows", light->getCastShadows()));
-            light->setSoftShadows(l.value("softShadows", light->getSoftShadows()));
-            light->setShadowMapResolution(l.value("shadowResolution", light->getShadowMapResolution()));
-            light->setShadowBias(l.value("shadowBias", light->getShadowBias()));
-            light->setShadowNormalBias(l.value("shadowNormalBias", light->getShadowNormalBias()));
-            if (l.contains("shadowNearPlane") || l.contains("shadowFarPlane")) {
-                float nearPlane = l.value("shadowNearPlane", light->getShadowNearPlane());
-                float farPlane = l.value("shadowFarPlane", light->getShadowFarPlane());
-                light->setShadowRange(nearPlane, farPlane);
-            }
-            light->setPenumbra(l.value("penumbra", light->getPenumbra()));
-            light->setContactShadows(l.value("contactShadows", light->getContactShadows()));
-            light->setCascadeCount(static_cast<uint8_t>(l.value("cascadeCount", light->getCascadeCount())));
-            if (l.contains("cascadeSplits") && l["cascadeSplits"].is_array() && l["cascadeSplits"].size() == 4) {
-                std::array<float, 4> splits = {
-                    l["cascadeSplits"][0].get<float>(),
-                    l["cascadeSplits"][1].get<float>(),
-                    l["cascadeSplits"][2].get<float>(),
-                    l["cascadeSplits"][3].get<float>()
-                };
-                light->setCascadeSplits(splits);
-            }
-            light->setVolumetric(l.value("volumetric", light->getVolumetric()));
-        }
-
-        if (components.contains("Decal")) {
-            const json& d = components["Decal"];
-            Decal* decal = entity->addComponent<Decal>();
-            if (d.contains("color")) {
-                decal->setTint(JsonToVec4(d["color"], decal->getTint()));
-            }
-            decal->setOpacity(d.value("opacity", decal->getOpacity()));
-            if (d.contains("tiling")) {
-                decal->setTiling(JsonToVec2(d["tiling"], decal->getTiling()));
-            }
-            if (d.contains("offset")) {
-                decal->setOffset(JsonToVec2(d["offset"], decal->getOffset()));
-            }
-            decal->setEdgeSoftness(d.value("softness", decal->getEdgeSoftness()));
-            auto loadDecal = [&](const char* key, bool srgb,
-                                 auto setPath, auto setTexture) {
-                if (!d.contains(key)) {
-                    return;
-                }
-                std::string resolved = ResolveTextureEntryPath(d[key]);
-                if (resolved.empty()) {
-                    return;
-                }
-                setPath(resolved);
-                if (auto tex = LoadTexturePath(textureLoader, resolved, srgb)) {
-                    setTexture(tex);
-                }
-            };
-            loadDecal("albedo", true,
-                      [&](const std::string& path){ decal->setAlbedoPath(path); },
-                      [&](const std::shared_ptr<Texture2D>& tex){ decal->setAlbedoTexture(tex); });
-            if (d.contains("texture")) {
-                loadDecal("texture", true,
-                          [&](const std::string& path){ decal->setAlbedoPath(path); },
-                          [&](const std::shared_ptr<Texture2D>& tex){ decal->setAlbedoTexture(tex); });
-            }
-            loadDecal("normal", false,
-                      [&](const std::string& path){ decal->setNormalPath(path); },
-                      [&](const std::shared_ptr<Texture2D>& tex){ decal->setNormalTexture(tex); });
-            loadDecal("orm", false,
-                      [&](const std::string& path){ decal->setORMPath(path); },
-                      [&](const std::shared_ptr<Texture2D>& tex){ decal->setORMTexture(tex); });
-            loadDecal("mask", false,
-                      [&](const std::string& path){ decal->setMaskPath(path); },
-                      [&](const std::shared_ptr<Texture2D>& tex){ decal->setMaskTexture(tex); });
-        }
-
-        if (components.contains("Camera")) {
-            const json& c = components["Camera"];
-            Camera* camera = entity->addComponent<Camera>();
-            camera->setProjectionType(static_cast<Camera::ProjectionType>(c.value("projection", static_cast<int>(camera->getProjectionType()))));
-            camera->setFieldOfView(c.value("fov", camera->getFieldOfView()));
-            camera->setOrthographicSize(c.value("orthoSize", camera->getOrthographicSize()));
-            camera->setNearClip(c.value("nearClip", camera->getNearClip()));
-            camera->setFarClip(c.value("farClip", camera->getFarClip()));
-            camera->setAspectRatio(c.value("aspect", camera->getAspectRatio()));
-            if (c.contains("viewport")) {
-                camera->setViewport(JsonToVec4(c["viewport"], camera->getViewport()));
-            }
-            if (c.contains("clearColor")) {
-                camera->setClearColor(JsonToVec4(c["clearColor"], camera->getClearColor()));
-            }
-            camera->setClearDepth(c.value("clearDepth", camera->getClearDepth()));
-            camera->setEditorCamera(c.value("editorCamera", false));
-        }
-
-        if (components.contains("CameraController")) {
-            const json& cc = components["CameraController"];
-            CameraController* controller = entity->addComponent<CameraController>();
-            controller->setMoveSpeed(cc.value("moveSpeed", controller->getMoveSpeed()));
-            controller->setRotationSpeed(cc.value("rotationSpeed", controller->getRotationSpeed()));
-        }
+        record.entity->setEditorOnly(record.editorOnly);
+        ApplyEntityComponents(record.entity, record.components, scene, scenePath, textureLoader, modelCache);
     }
 
     if (wasActive) {
@@ -1993,6 +2077,121 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
     }
 
     return true;
+}
+
+std::vector<Entity*> SceneSerializer::DuplicateEntities(Scene* scene, const std::vector<Entity*>& entities) {
+    using json = nlohmann::json;
+    std::vector<Entity*> duplicates;
+    if (!scene || entities.empty()) {
+        return duplicates;
+    }
+
+    std::unordered_set<UUID> selectionRoots;
+    selectionRoots.reserve(entities.size());
+    for (Entity* entity : entities) {
+        if (entity) {
+            selectionRoots.insert(entity->getUUID());
+        }
+    }
+
+    std::vector<Entity*> rootEntities;
+    rootEntities.reserve(entities.size());
+    for (Entity* entity : entities) {
+        if (!entity) {
+            continue;
+        }
+        Transform* parent = entity->getTransform() ? entity->getTransform()->getParent() : nullptr;
+        bool hasAncestorSelected = false;
+        while (parent) {
+            Entity* parentEntity = parent->getEntity();
+            if (parentEntity && selectionRoots.count(parentEntity->getUUID()) > 0) {
+                hasAncestorSelected = true;
+                break;
+            }
+            parent = parent->getParent();
+        }
+        if (!hasAncestorSelected) {
+            rootEntities.push_back(entity);
+        }
+    }
+
+    std::unordered_set<std::string> selection;
+    for (Entity* root : rootEntities) {
+        Transform* rootTransform = root ? root->getTransform() : nullptr;
+        if (!rootTransform) {
+            continue;
+        }
+        std::vector<Transform*> stack;
+        stack.push_back(rootTransform);
+        while (!stack.empty()) {
+            Transform* node = stack.back();
+            stack.pop_back();
+            if (!node) {
+                continue;
+            }
+            Entity* nodeEntity = node->getEntity();
+            if (nodeEntity) {
+                selection.insert(nodeEntity->getUUID().toString());
+            }
+            const auto& children = node->getChildren();
+            for (auto it = children.rbegin(); it != children.rend(); ++it) {
+                stack.push_back(*it);
+            }
+        }
+    }
+
+    if (selection.empty()) {
+        return duplicates;
+    }
+
+    json rootJson = json::parse(SerializeScene(scene, true), nullptr, false);
+    if (rootJson.is_discarded() || !rootJson.contains("entities") || !rootJson["entities"].is_array()) {
+        return duplicates;
+    }
+
+    json subset = json::array();
+    for (const auto& entry : rootJson["entities"]) {
+        if (!entry.is_object()) {
+            continue;
+        }
+        std::string uuidStr = entry.value("uuid", std::string());
+        if (selection.count(uuidStr) > 0) {
+            subset.push_back(entry);
+        }
+    }
+
+    auto records = BuildEntityRecords(scene, subset, false);
+    ResolveEntityParents(scene, records);
+
+    Renderer* renderer = Engine::getInstance().getRenderer();
+    TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
+    std::unordered_map<std::string, ModelCacheEntry> modelCache;
+    for (auto& [uuid, record] : records) {
+        if (!record.entity) {
+            continue;
+        }
+        record.entity->setEditorOnly(record.editorOnly);
+        ApplyEntityComponents(record.entity, record.components, scene, "", textureLoader, modelCache);
+    }
+
+    for (auto& [uuid, record] : records) {
+        if (record.entity && !record.active) {
+            record.entity->setActive(false);
+        }
+    }
+
+    for (Entity* root : rootEntities) {
+        if (!root) {
+            continue;
+        }
+        std::string key = root->getUUID().toString();
+        auto it = records.find(key);
+        if (it != records.end() && it->second.entity) {
+            duplicates.push_back(it->second.entity);
+        }
+    }
+
+    return duplicates;
 }
 
 } // namespace Crescent
