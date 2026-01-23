@@ -1,6 +1,5 @@
 # Crescent Engine - Jolt Physics Integration Guide
 
-
 ## Quick Map (Where Things Live)
 
 Core integration:
