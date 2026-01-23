@@ -1,11 +1,7 @@
 # Crescent Engine - Jolt Physics Integration Guide
 
 This document describes how Crescent Engine integrates Jolt Physics, with a focus on
-memory allocation hooks and the custom contact listener pipeline. It is written to
-answer the two questions below:
-
-- "How is Jolt initialized and where do memory hooks live?"
-- "Where is the custom collision/contact listener and how do events flow to ECS?"
+memory allocation hooks and the custom contact listener pipeline. 
 
 ## Quick Map (Where Things Live)
 
@@ -193,21 +189,4 @@ Color coding:
 - Kinematic: yellow
 - Trigger: orange
 
-## Extending the Contact Listener (Recommended Approach)
 
-If you want to customize or extend collision events, the cleanest path is:
-
-1) Extend `ContactEvent` (add your fields)
-2) Update `recordEvent(...)` to capture that data
-3) Update `dispatchContactEvents()` to send it to ECS
-
-If you need completely different behavior, you can replace
-`ContactListenerImpl` with your own, but keep the event queue thread-safe.
-
-## Notes / Common Pitfalls
-
-- Very thin capsules can assert in Jolt; this code clamps tiny capsule height.
-- If you add new collider shapes, update both `buildShape()` and debug draw.
-- Always keep Jolt initialization and shutdown balanced across scenes.
-
----
