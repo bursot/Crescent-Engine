@@ -2,6 +2,11 @@
 
 A modern, real-time 3D game engine and editor for macOS, built with Metal, C++17/20, and SwiftUI.
 
+<img width="1512" height="982" alt="Ekran Resmi 2026-01-24 03 02 04" src="https://github.com/user-attachments/assets/90cd4f22-fca4-4b27-bb47-95a8952df112" />
+
+<img width="1512" height="982" alt="Ekran Resmi 2026-01-24 03 02 45" src="https://github.com/user-attachments/assets/20b71f9f-126a-473e-abf5-083dd4490da6" />
+
+
 <img width="1624" height="1001" alt="Ekran Resmi 2026-01-11 23 30 11" src="https://github.com/user-attachments/assets/8aaa2dce-6dcd-4a69-ab87-c17e4eea0177" />
 
 <img width="1624" height="1001" alt="Ekran Resmi 2026-01-08 18 48 05" src="https://github.com/user-attachments/assets/44671059-f3dd-4032-8aa0-62fd67162dad" /><img width="1624" height="1001" alt="Ekran Resmi 2026-01-08 18 42 30" src="https://github.com/user-attachments/assets/8312aaac-450a-4b3b-b03e-1a00a18a4fc0" />
