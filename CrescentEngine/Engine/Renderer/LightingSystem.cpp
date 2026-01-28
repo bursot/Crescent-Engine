@@ -148,13 +148,13 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
     const uint8_t cascadeCount = std::max<uint8_t>(1, std::min<uint8_t>(light.light->getCascadeCount(), 4));
     
     Math::Vector3 lightDir = light.directionWS.normalized();
-    
+
     float prevSplit = 0.0f;
     for (uint8_t cascadeIdx = 0; cascadeIdx < cascadeCount; ++cascadeIdx) {
         float split = splits[cascadeIdx];
         float cascadeNear = Math::Lerp(shadowNear, shadowFar, prevSplit);
         float cascadeFar = Math::Lerp(shadowNear, shadowFar, split);
-        
+
         auto frustumCorners = computeFrustumCornersWS(camera, cascadeNear, cascadeFar);
 
         Math::Vector3 center(0.0f, 0.0f, 0.0f);
@@ -162,12 +162,6 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
             center += corner;
         }
         center /= static_cast<float>(frustumCorners.size());
-
-        float radius = 0.0f;
-        for (const auto& corner : frustumCorners) {
-            radius = std::max(radius, (corner - center).length());
-        }
-        radius = std::ceil(radius * 16.0f) / 16.0f;
 
         Math::Vector3 up = Math::Vector3::Up;
         if (std::abs(lightDir.dot(up)) > 0.99f) {
@@ -180,33 +174,56 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
         }
         cascadeRes = std::min<uint32_t>(cascadeRes, m_shadowAtlas.getResolution());
 
-        float lightDistance = radius + 10.0f;
-        Math::Vector3 lightPos = center - lightDir * lightDistance;
-        Math::Matrix4x4 view = Math::Matrix4x4::LookAt(lightPos, center, up);
+        Math::Matrix4x4 view = Math::Matrix4x4::LookAt(center - lightDir, center, up);
 
-        float texelSize = (radius * 2.0f) / static_cast<float>(cascadeRes);
-        Math::Vector3 centerLS = view.transformPoint(center);
-        centerLS.x = std::floor(centerLS.x / texelSize) * texelSize;
-        centerLS.y = std::floor(centerLS.y / texelSize) * texelSize;
-        centerLS.z = std::floor(centerLS.z / texelSize) * texelSize;
-        Math::Vector3 snappedCenter = view.inversed().transformPoint(centerLS);
-        lightPos = snappedCenter - lightDir * lightDistance;
-        view = Math::Matrix4x4::LookAt(lightPos, snappedCenter, up);
+        Math::Vector3 minLS(std::numeric_limits<float>::max());
+        Math::Vector3 maxLS(std::numeric_limits<float>::lowest());
+        for (const auto& corner : frustumCorners) {
+            Math::Vector3 ls = view.transformPoint(corner);
+            minLS.x = std::min(minLS.x, ls.x);
+            minLS.y = std::min(minLS.y, ls.y);
+            minLS.z = std::min(minLS.z, ls.z);
+            maxLS.x = std::max(maxLS.x, ls.x);
+            maxLS.y = std::max(maxLS.y, ls.y);
+            maxLS.z = std::max(maxLS.z, ls.z);
+        }
 
-        float lightNear = 0.1f;
-        float lightFar = lightDistance + radius;
-        Math::Matrix4x4 proj = Math::Matrix4x4::Orthographic(-radius, radius, -radius, radius, lightNear, lightFar);
-        
+        float extent = std::max(maxLS.x - minLS.x, maxLS.y - minLS.y);
+        float centerX = (minLS.x + maxLS.x) * 0.5f;
+        float centerY = (minLS.y + maxLS.y) * 0.5f;
+        minLS.x = centerX - extent * 0.5f;
+        maxLS.x = centerX + extent * 0.5f;
+        minLS.y = centerY - extent * 0.5f;
+        maxLS.y = centerY + extent * 0.5f;
+
+        float texelSize = extent / static_cast<float>(cascadeRes);
+        if (texelSize > Math::EPSILON) {
+            centerX = std::floor(centerX / texelSize) * texelSize;
+            centerY = std::floor(centerY / texelSize) * texelSize;
+            minLS.x = centerX - extent * 0.5f;
+            maxLS.x = centerX + extent * 0.5f;
+            minLS.y = centerY - extent * 0.5f;
+            maxLS.y = centerY + extent * 0.5f;
+        }
+
+        float zMargin = 10.0f;
+        minLS.z -= zMargin;
+        maxLS.z += zMargin;
+
+        float lightNear = std::max(0.1f, -maxLS.z);
+        float lightFar = std::max(lightNear + 0.1f, -minLS.z);
+        Math::Matrix4x4 proj = Math::Matrix4x4::Orthographic(minLS.x, maxLS.x, minLS.y, maxLS.y, lightNear, lightFar);
+
         CascadedSlice slice;
         slice.view = view;
         slice.proj = proj;
         slice.viewProj = proj * view;
         slice.resolution = cascadeRes;
-        slice.texelWorldSize = (radius * 2.0f) / static_cast<float>(cascadeRes);
+        slice.texelWorldSize = texelSize;
         slice.splitNear = cascadeNear;
         slice.splitFar = cascadeFar;
         m_cascades.push_back(slice);
-        
+
         prevSplit = split;
     }
 }
