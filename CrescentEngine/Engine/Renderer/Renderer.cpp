@@ -2,15 +2,20 @@
 #include "../Rendering/Mesh.hpp"
 #include "../Rendering/Material.hpp"
 #include "../Rendering/Texture.hpp"
+#include "../Rendering/stb_image_write.h"
 #include "../Components/Camera.hpp"
 #include "../Components/Light.hpp"
 #include "../Components/MeshRenderer.hpp"
 #include "../Components/SkinnedMeshRenderer.hpp"
+#include "../Components/InstancedMeshRenderer.hpp"
 #include "../Components/Decal.hpp"
+#include "../Components/HLODProxy.hpp"
 #include "../Scene/Scene.hpp"
 #include "../Scene/SceneManager.hpp"
+#include "../Core/Time.hpp"
 #include "../ECS/Entity.hpp"
 #include "../ECS/Transform.hpp"
+#include "../Assets/AssetDatabase.hpp"
 #include "DebugRenderer.hpp"
 #include "../IBL/IBLGenerator.hpp"
 #include "LightingSystem.hpp"
@@ -23,6 +28,8 @@
 #include <fstream>
 #include <sstream>
 #include <filesystem>
+#include <cctype>
+#include <unordered_set>
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
@@ -169,8 +176,7 @@ struct CameraUniforms {
     Math::Matrix4x4 viewProjectionMatrix;
     Math::Matrix4x4 viewMatrixInverse;
     Math::Matrix4x4 projectionMatrixInverse;
-    Math::Vector3 cameraPosition;
-    float _padding;
+    Math::Vector4 cameraPositionTime;
 };
 
 struct SSAOParamsGPU {
@@ -273,9 +279,20 @@ struct MaterialUniformsGPU {
     Math::Vector4 uvTilingOffset;  // 16 bytes (tiling.xy, offset.xy)
     Math::Vector4 textureFlags;    // 16 bytes (albedo, normal, metallic, roughness)
     Math::Vector4 textureFlags2;   // 16 bytes (ao, emission, height, invertHeight)
-    Math::Vector4 textureFlags3;   // 16 bytes (packedORM, unused, unused, unused)
+    Math::Vector4 textureFlags3;   // 16 bytes (packedORM, alphaClip, alphaCutoff, unused)
     Math::Vector4 heightParams;    // 16 bytes (scale, minLayers, maxLayers, receiveShadows)
-};  // Total = 128 bytes
+    Math::Vector4 foliageParams0;  // 16 bytes (windStrength, windSpeed, windScale, windGust)
+    Math::Vector4 foliageParams1;  // 16 bytes (lodStart, lodEnd, billboardStart, billboardEnd)
+    Math::Vector4 foliageParams2;  // 16 bytes (windEnabled, lodEnabled, billboardEnabled, ditherEnabled)
+    Math::Vector4 foliageParams3;  // 16 bytes (windDir.xyz, padding)
+    Math::Vector4 impostorParams0; // 16 bytes (enabled, rows, cols, padding)
+};  // Total = 208 bytes
+
+struct MeshUniformsGPU {
+    Math::Vector4 boundsCenter;
+    Math::Vector4 boundsSize;
+    Math::Vector4 flags;
+};
 
 struct LightDataGPU {
     Math::Vector4 direction;       // 16 bytes (direction.xyz, intensity)
@@ -307,6 +324,72 @@ struct ClusterParams {
     float _pad[3]; // pad to 16-byte multiple to match Metal constant buffer
 };
 
+struct InstanceDataGPU {
+    Math::Matrix4x4 modelMatrix;
+    Math::Matrix4x4 normalMatrix;
+};
+
+struct InstanceCullParams {
+    Math::Vector4 frustumPlanes[6];
+    Math::Vector4 boundsCenterRadius;
+    uint32_t inputOffset;
+    uint32_t outputOffset;
+    uint32_t instanceCount;
+    uint32_t _pad;
+    Math::Vector2 screenSize;
+    uint32_t hzbMipCount;
+    uint32_t _pad2;
+};
+
+struct DrawIndexedIndirectArgs {
+    uint32_t indexCount;
+    uint32_t instanceCount;
+    uint32_t indexStart;
+    int32_t baseVertex;
+    uint32_t baseInstance;
+};
+
+static std::array<Math::Vector4, 6> ExtractFrustumPlanes(const Math::Matrix4x4& m) {
+    auto row = [&](int r) {
+        return Math::Vector4(m(r, 0), m(r, 1), m(r, 2), m(r, 3));
+    };
+    Math::Vector4 r0 = row(0);
+    Math::Vector4 r1 = row(1);
+    Math::Vector4 r2 = row(2);
+    Math::Vector4 r3 = row(3);
+
+    std::array<Math::Vector4, 6> planes = {
+        r3 + r0, // left
+        r3 - r0, // right
+        r3 + r1, // bottom
+        r3 - r1, // top
+        r3 + r2, // near
+        r3 - r2  // far
+    };
+    for (auto& p : planes) {
+        float len = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        if (len > 0.0f) {
+            p.x /= len;
+            p.y /= len;
+            p.z /= len;
+            p.w /= len;
+        }
+    }
+    return planes;
+}
+
+static bool SphereInFrustum(const std::array<Math::Vector4, 6>& planes,
+                            const Math::Vector3& center,
+                            float radius) {
+    for (const auto& p : planes) {
+        float d = p.x * center.x + p.y * center.y + p.z * center.z + p.w;
+        if (d < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
 Renderer::Renderer()
     : m_device(nullptr)
     , m_commandQueue(nullptr)
@@ -317,10 +400,17 @@ Renderer::Renderer()
     , m_depthReadState(nullptr)
     , m_prepassPipelineState(nullptr)
     , m_prepassPipelineSkinned(nullptr)
+    , m_prepassPipelineInstanced(nullptr)
+    , m_instanceCullPipeline(nullptr)
+    , m_instanceCullHzbPipeline(nullptr)
+    , m_instanceIndirectPipeline(nullptr)
+    , m_hzbInitPipeline(nullptr)
+    , m_hzbDownsamplePipeline(nullptr)
     , m_velocityPipelineState(nullptr)
     , m_velocityPipelineSkinned(nullptr)
     , m_ssaoPipelineState(nullptr)
     , m_ssaoBlurPipelineState(nullptr)
+    , m_impostorBakePipeline(nullptr)
     , m_ssrPipelineState(nullptr)
     , m_decalPipelineState(nullptr)
     , m_bloomPrefilterPipelineState(nullptr)
@@ -334,6 +424,9 @@ Renderer::Renderer()
     , m_motionBlurPipelineState(nullptr)
     , m_depthTexture(nullptr)
     , m_msaaDepthTexture(nullptr)
+    , m_hzbTexture(nullptr)
+    , m_hzbMipViews()
+    , m_hzbMipCount(0)
     , m_normalTexture(nullptr)
     , m_ssaoTexture(nullptr)
     , m_ssaoBlurTexture(nullptr)
@@ -379,9 +472,19 @@ Renderer::Renderer()
     , m_prevSkinningBuffer(nullptr)
     , m_skinningBufferCapacity(0)
     , m_prevSkinningBufferCapacity(0)
+    , m_instanceBuffer(nullptr)
+    , m_instanceBufferCapacity(0)
+    , m_instanceBufferOffset(0)
+    , m_instanceCullBuffer(nullptr)
+    , m_instanceCountBuffer(nullptr)
+    , m_instanceIndirectBuffer(nullptr)
+    , m_instanceCullCapacity(0)
+    , m_instanceCountCapacity(0)
+    , m_instanceIndirectCapacity(0)
     , m_samplerState(nullptr)
     , m_shadowSampler(nullptr)
     , m_linearClampSampler(nullptr)
+    , m_pointClampSampler(nullptr)
     , m_debugLibrary(nullptr)
     , m_debugLinePipelineState(nullptr)
     , m_debugGridPipelineState(nullptr)
@@ -490,6 +593,15 @@ bool Renderer::initialize() {
     clampDesc->setTAddressMode(MTL::SamplerAddressModeClampToEdge);
     m_linearClampSampler = m_device->newSamplerState(clampDesc);
     clampDesc->release();
+
+    MTL::SamplerDescriptor* pointDesc = MTL::SamplerDescriptor::alloc()->init();
+    pointDesc->setMinFilter(MTL::SamplerMinMagFilterNearest);
+    pointDesc->setMagFilter(MTL::SamplerMinMagFilterNearest);
+    pointDesc->setMipFilter(MTL::SamplerMipFilterNearest);
+    pointDesc->setSAddressMode(MTL::SamplerAddressModeClampToEdge);
+    pointDesc->setTAddressMode(MTL::SamplerAddressModeClampToEdge);
+    m_pointClampSampler = m_device->newSamplerState(pointDesc);
+    pointDesc->release();
     
     // Texture loader and built-in defaults
     m_textureLoader = std::make_unique<TextureLoader>(m_device, m_commandQueue);
@@ -499,6 +611,10 @@ bool Renderer::initialize() {
     m_defaultHeightTexture = m_textureLoader->createSolidTexture(0.5f, 0.5f, 0.5f, 1.0f, false); // mid-height
     m_defaultEnvironmentTexture = m_textureLoader->createSolidTexture(0.18f, 0.2f, 0.26f, 1.0f, false);
     m_environmentTexture = m_defaultEnvironmentTexture;
+    m_billboardMesh = Mesh::CreatePlane(1.0f, 1.0f, 1, 1);
+    if (m_billboardMesh) {
+        m_billboardMesh->setName("BillboardQuad");
+    }
     if (m_textureLoader) {
         const int lutSize = 32;
         const int width = lutSize * lutSize;
@@ -531,9 +647,12 @@ bool Renderer::initialize() {
     buildEnvironmentPipeline();
     buildBlitPipeline();
     buildPrepassPipeline();
+    buildInstanceCullingPipeline();
+    buildHZBPipelines();
     buildVelocityPipelines();
     buildSSAOPipelines();
     buildSSAONoiseTexture();
+    buildImpostorPipeline();
     buildSSRPipeline();
     buildDecalPipeline();
     buildMotionBlurPipeline();
@@ -961,6 +1080,99 @@ void Renderer::buildPrepassPipeline() {
 
     buildPipeline("vertex_prepass", false, m_prepassPipelineState);
     buildPipeline("vertex_prepass_skinned", true, m_prepassPipelineSkinned);
+    buildPipeline("vertex_prepass_instanced", false, m_prepassPipelineInstanced);
+}
+
+void Renderer::buildInstanceCullingPipeline() {
+    if (!m_device || !m_library) {
+        return;
+    }
+
+    if (m_instanceCullPipeline) {
+        m_instanceCullPipeline->release();
+        m_instanceCullPipeline = nullptr;
+    }
+    if (m_instanceCullHzbPipeline) {
+        m_instanceCullHzbPipeline->release();
+        m_instanceCullHzbPipeline = nullptr;
+    }
+    if (m_instanceIndirectPipeline) {
+        m_instanceIndirectPipeline->release();
+        m_instanceIndirectPipeline = nullptr;
+    }
+
+    NS::Error* error = nullptr;
+    MTL::Function* cullFn = m_library->newFunction(NS::String::string("instance_cull", NS::UTF8StringEncoding));
+    MTL::Function* cullHzbFn = m_library->newFunction(NS::String::string("instance_cull_hzb", NS::UTF8StringEncoding));
+    MTL::Function* indirectFn = m_library->newFunction(NS::String::string("instance_build_indirect", NS::UTF8StringEncoding));
+    if (!cullFn || !indirectFn) {
+        std::cerr << "Missing instance culling shaders (instance_cull / instance_build_indirect)\n";
+        if (cullFn) cullFn->release();
+        if (cullHzbFn) cullHzbFn->release();
+        if (indirectFn) indirectFn->release();
+        return;
+    }
+
+    m_instanceCullPipeline = m_device->newComputePipelineState(cullFn, &error);
+    if (!m_instanceCullPipeline && error) {
+        std::cerr << "Failed to create instance cull pipeline: " << error->localizedDescription()->utf8String() << std::endl;
+    }
+    error = nullptr;
+    if (cullHzbFn) {
+        m_instanceCullHzbPipeline = m_device->newComputePipelineState(cullHzbFn, &error);
+        if (!m_instanceCullHzbPipeline && error) {
+            std::cerr << "Failed to create instance HZB cull pipeline: " << error->localizedDescription()->utf8String() << std::endl;
+        }
+    }
+    error = nullptr;
+    m_instanceIndirectPipeline = m_device->newComputePipelineState(indirectFn, &error);
+    if (!m_instanceIndirectPipeline && error) {
+        std::cerr << "Failed to create instance indirect pipeline: " << error->localizedDescription()->utf8String() << std::endl;
+    }
+
+    cullFn->release();
+    if (cullHzbFn) {
+        cullHzbFn->release();
+    }
+    indirectFn->release();
+}
+
+void Renderer::buildHZBPipelines() {
+    if (!m_device || !m_library) {
+        return;
+    }
+
+    if (m_hzbInitPipeline) {
+        m_hzbInitPipeline->release();
+        m_hzbInitPipeline = nullptr;
+    }
+    if (m_hzbDownsamplePipeline) {
+        m_hzbDownsamplePipeline->release();
+        m_hzbDownsamplePipeline = nullptr;
+    }
+
+    NS::Error* error = nullptr;
+    MTL::Function* initFn = m_library->newFunction(NS::String::string("hzb_init", NS::UTF8StringEncoding));
+    MTL::Function* downFn = m_library->newFunction(NS::String::string("hzb_downsample", NS::UTF8StringEncoding));
+    if (!initFn || !downFn) {
+        std::cerr << "Missing HZB shaders (hzb_init / hzb_downsample)\n";
+        if (initFn) initFn->release();
+        if (downFn) downFn->release();
+        return;
+    }
+
+    m_hzbInitPipeline = m_device->newComputePipelineState(initFn, &error);
+    if (!m_hzbInitPipeline && error) {
+        std::cerr << "Failed to create HZB init pipeline: " << error->localizedDescription()->utf8String() << std::endl;
+    }
+    error = nullptr;
+    m_hzbDownsamplePipeline = m_device->newComputePipelineState(downFn, &error);
+    if (!m_hzbDownsamplePipeline && error) {
+        std::cerr << "Failed to create HZB downsample pipeline: " << error->localizedDescription()->utf8String() << std::endl;
+    }
+
+    initFn->release();
+    downFn->release();
 }
 
 void Renderer::buildVelocityPipelines() {
@@ -1142,6 +1354,47 @@ void Renderer::buildSSAONoiseTexture() {
     }
 }
 
+void Renderer::buildImpostorPipeline() {
+    if (!m_device || !m_library) {
+        return;
+    }
+    if (m_impostorBakePipeline) {
+        m_impostorBakePipeline->release();
+        m_impostorBakePipeline = nullptr;
+    }
+
+    NS::String* vsName = NS::String::string("impostor_bake_vertex", NS::UTF8StringEncoding);
+    NS::String* fsName = NS::String::string("impostor_bake_fragment", NS::UTF8StringEncoding);
+    MTL::Function* vertexFunction = m_library->newFunction(vsName);
+    MTL::Function* fragmentFunction = m_library->newFunction(fsName);
+    if (!vertexFunction || !fragmentFunction) {
+        std::cerr << "Missing impostor bake shader functions\n";
+        if (vertexFunction) vertexFunction->release();
+        if (fragmentFunction) fragmentFunction->release();
+        return;
+    }
+
+    MTL::RenderPipelineDescriptor* descriptor = MTL::RenderPipelineDescriptor::alloc()->init();
+    descriptor->setVertexFunction(vertexFunction);
+    descriptor->setFragmentFunction(fragmentFunction);
+    descriptor->setSampleCount(1);
+    descriptor->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    descriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+
+    NS::Error* error = nullptr;
+    m_impostorBakePipeline = m_device->newRenderPipelineState(descriptor, &error);
+    if (!m_impostorBakePipeline) {
+        std::cerr << "Failed to create impostor bake pipeline state" << std::endl;
+        if (error) {
+            std::cerr << "Error: " << error->localizedDescription()->utf8String() << std::endl;
+        }
+    }
+
+    descriptor->release();
+    vertexFunction->release();
+    fragmentFunction->release();
+}
+
 void Renderer::buildSSRPipeline() {
     if (!m_device || !m_library) {
         return;
@@ -1150,6 +1403,10 @@ void Renderer::buildSSRPipeline() {
     if (m_ssrPipelineState) {
         m_ssrPipelineState->release();
         m_ssrPipelineState = nullptr;
+    }
+    if (m_impostorBakePipeline) {
+        m_impostorBakePipeline->release();
+        m_impostorBakePipeline = nullptr;
     }
     if (m_decalPipelineState) {
         m_decalPipelineState->release();
@@ -1378,6 +1635,26 @@ void Renderer::buildMotionBlurPipeline() {
         m_motionBlurPipelineState->release();
         m_motionBlurPipelineState = nullptr;
     }
+    if (m_instanceCullPipeline) {
+        m_instanceCullPipeline->release();
+        m_instanceCullPipeline = nullptr;
+    }
+    if (m_instanceCullHzbPipeline) {
+        m_instanceCullHzbPipeline->release();
+        m_instanceCullHzbPipeline = nullptr;
+    }
+    if (m_instanceIndirectPipeline) {
+        m_instanceIndirectPipeline->release();
+        m_instanceIndirectPipeline = nullptr;
+    }
+    if (m_hzbInitPipeline) {
+        m_hzbInitPipeline->release();
+        m_hzbInitPipeline = nullptr;
+    }
+    if (m_hzbDownsamplePipeline) {
+        m_hzbDownsamplePipeline->release();
+        m_hzbDownsamplePipeline = nullptr;
+    }
 
     NS::String* vsName = NS::String::string("blit_vertex", NS::UTF8StringEncoding);
     NS::String* fsName = NS::String::string("motion_blur_fragment", NS::UTF8StringEncoding);
@@ -1525,12 +1802,18 @@ MTL::RenderPipelineState* Renderer::getPipelineState(const PipelineStateKey& key
     if (it != m_pipelineStates.end()) {
         return it->second;
     }
+
+    if (key.isInstanced && key.isSkinned) {
+        std::cerr << "Invalid pipeline key: instanced + skinned not supported\n";
+        return nullptr;
+    }
     
     // Create new pipeline state
     MTL::RenderPipelineDescriptor* descriptor = MTL::RenderPipelineDescriptor::alloc()->init();
     
     // Load shaders
-    const char* vertexName = key.isSkinned ? "vertex_skinned" : "vertex_main";
+    const char* vertexName = key.isInstanced ? "vertex_main_instanced"
+        : (key.isSkinned ? "vertex_skinned" : "vertex_main");
     NS::String* vertexFunctionName = NS::String::string(vertexName, NS::UTF8StringEncoding);
     NS::String* fragmentFunctionName = NS::String::string("fragment_main", NS::UTF8StringEncoding);
     
@@ -1595,6 +1878,10 @@ MTL::RenderPipelineState* Renderer::getPipelineState(const PipelineStateKey& key
     
     descriptor->setVertexDescriptor(vertexDescriptor);
     
+    if (key.alphaToCoverage && key.sampleCount > 1) {
+        descriptor->setAlphaToCoverageEnabled(true);
+    }
+
     // Color attachment
     descriptor->colorAttachments()->object(0)->setPixelFormat(key.hdrTarget ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatBGRA8Unorm);
     
@@ -1677,6 +1964,9 @@ Renderer::RenderTargetState& Renderer::getRenderTargetState(RenderTargetPool poo
 void Renderer::storeRenderTargetState(RenderTargetState& state) {
     state.depthTexture = m_depthTexture;
     state.msaaDepthTexture = m_msaaDepthTexture;
+    state.hzbTexture = m_hzbTexture;
+    state.hzbMipViews = m_hzbMipViews;
+    state.hzbMipCount = m_hzbMipCount;
     state.normalTexture = m_normalTexture;
     state.ssaoTexture = m_ssaoTexture;
     state.ssaoBlurTexture = m_ssaoBlurTexture;
@@ -1721,6 +2011,9 @@ void Renderer::storeRenderTargetState(RenderTargetState& state) {
 void Renderer::loadRenderTargetState(const RenderTargetState& state) {
     m_depthTexture = state.depthTexture;
     m_msaaDepthTexture = state.msaaDepthTexture;
+    m_hzbTexture = state.hzbTexture;
+    m_hzbMipViews = state.hzbMipViews;
+    m_hzbMipCount = state.hzbMipCount;
     m_normalTexture = state.normalTexture;
     m_ssaoTexture = state.ssaoTexture;
     m_ssaoBlurTexture = state.ssaoBlurTexture;
@@ -1771,6 +2064,17 @@ void Renderer::releaseRenderTargetState(RenderTargetState& state) {
         state.msaaDepthTexture->release();
         state.msaaDepthTexture = nullptr;
     }
+    for (MTL::Texture* tex : state.hzbMipViews) {
+        if (tex) {
+            tex->release();
+        }
+    }
+    state.hzbMipViews.clear();
+    if (state.hzbTexture) {
+        state.hzbTexture->release();
+        state.hzbTexture = nullptr;
+    }
+    state.hzbMipCount = 0;
     if (state.colorTexture) {
         state.colorTexture->release();
         state.colorTexture = nullptr;
@@ -1879,6 +2183,7 @@ void Renderer::invalidateRenderTargetState(RenderTargetState& state, uint32_t ms
     state.fogVolumeWidth = 0;
     state.fogVolumeHeight = 0;
     state.fogVolumeDepth = 0;
+    state.hzbMipCount = 0;
 }
 
 void Renderer::setRenderTargetPool(RenderTargetPool pool) {
@@ -1983,7 +2288,8 @@ void Renderer::ensureRenderTargets(uint32_t width, uint32_t height, uint32_t msa
     if (!sizeChanged && !samplesChanged && !formatChanged && m_colorTexture && m_depthTexture && m_normalTexture
         && m_ssaoTexture && m_ssaoBlurTexture && m_velocityTexture && m_dofTexture && m_fogTexture && m_postColorTexture
         && m_decalAlbedoTexture && m_decalNormalTexture && m_decalOrmTexture && m_motionBlurTexture
-        && !m_bloomMipTextures.empty() && m_taaHistoryTexture && m_taaCurrentTexture) {
+        && !m_bloomMipTextures.empty() && m_taaHistoryTexture && m_taaCurrentTexture
+        && m_hzbTexture && !m_hzbMipViews.empty()) {
         return;
     }
     
@@ -2080,6 +2386,17 @@ void Renderer::ensureRenderTargets(uint32_t width, uint32_t height, uint32_t msa
         m_msaaDepthTexture->release();
         m_msaaDepthTexture = nullptr;
     }
+    for (MTL::Texture* tex : m_hzbMipViews) {
+        if (tex) {
+            tex->release();
+        }
+    }
+    m_hzbMipViews.clear();
+    if (m_hzbTexture) {
+        m_hzbTexture->release();
+        m_hzbTexture = nullptr;
+    }
+    m_hzbMipCount = 0;
     if (m_normalTexture) {
         m_normalTexture->release();
         m_normalTexture = nullptr;
@@ -2182,6 +2499,44 @@ void Renderer::ensureRenderTargets(uint32_t width, uint32_t height, uint32_t msa
     depthDesc->setStorageMode(MTL::StorageModePrivate);
     m_depthTexture = m_device->newTexture(depthDesc);
     depthDesc->release();
+
+    auto calcHzbMipCount = [](uint32_t w, uint32_t h) -> uint32_t {
+        uint32_t levels = 1;
+        while (w > 1 || h > 1) {
+            w = std::max(1u, w / 2);
+            h = std::max(1u, h / 2);
+            levels++;
+        }
+        return levels;
+    };
+    m_hzbMipCount = calcHzbMipCount(width, height);
+    MTL::TextureDescriptor* hzbDesc = MTL::TextureDescriptor::alloc()->init();
+    hzbDesc->setTextureType(MTL::TextureType2D);
+    hzbDesc->setWidth(width);
+    hzbDesc->setHeight(height);
+    hzbDesc->setPixelFormat(MTL::PixelFormatR32Float);
+    hzbDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    hzbDesc->setStorageMode(MTL::StorageModePrivate);
+    hzbDesc->setMipmapLevelCount(m_hzbMipCount);
+    m_hzbTexture = m_device->newTexture(hzbDesc);
+    hzbDesc->release();
+    m_hzbMipViews.clear();
+    if (m_hzbTexture) {
+        m_hzbMipViews.reserve(m_hzbMipCount);
+        for (uint32_t mip = 0; mip < m_hzbMipCount; ++mip) {
+            NS::Range mipRange = NS::Range::Make(mip, 1);
+            NS::Range sliceRange = NS::Range::Make(0, 1);
+            MTL::Texture* view = m_hzbTexture->newTextureView(
+                MTL::PixelFormatR32Float,
+                MTL::TextureType2D,
+                mipRange,
+                sliceRange
+            );
+            if (view) {
+                m_hzbMipViews.push_back(view);
+            }
+        }
+    }
 
     MTL::TextureDescriptor* normalDesc = MTL::TextureDescriptor::alloc()->init();
     normalDesc->setTextureType(MTL::TextureType2D);
@@ -2534,6 +2889,24 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         return;
     }
 
+    struct StatsScope {
+        Renderer* renderer;
+        std::chrono::high_resolution_clock::time_point start;
+        explicit StatsScope(Renderer* r)
+        : renderer(r)
+        , start(std::chrono::high_resolution_clock::now()) {
+            if (renderer) {
+                renderer->m_stats.reset();
+            }
+        }
+        ~StatsScope() {
+            if (!renderer) return;
+            auto endTime = std::chrono::high_resolution_clock::now();
+            renderer->m_stats.frameTime =
+                std::chrono::duration<float, std::milli>(endTime - start).count();
+        }
+    } statsScope(this);
+
     if (m_viewportHeight > 0.0f) {
         float aspectRatio = m_viewportWidth / m_viewportHeight;
         camera->setAspectRatio(aspectRatio);
@@ -2616,6 +2989,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
     size_t skinningOffset = 0;
     size_t prevSkinningOffset = 0;
+    m_instanceBufferOffset = 0;
     auto allocateSkinningSlice = [&](MTL::Buffer*& buffer,
                                      size_t& capacity,
                                      size_t& offset,
@@ -2641,17 +3015,28 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         offset = alignedOffset + bytes;
         return true;
     };
-    
-    // Ensure meshes are uploaded before any pass uses them
-    const auto& entitiesPre = scene->getAllEntities();
-    for (const auto& entPtr : entitiesPre) {
-        MeshRenderer* mr = entPtr->getComponent<MeshRenderer>();
-        if (!mr || !mr->isEnabled()) continue;
-        std::shared_ptr<Mesh> mesh = mr->getMesh();
-        if (mesh && !mesh->isUploaded()) {
-            uploadMesh(mesh.get());
+
+    auto allocateInstanceSlice = [&](size_t bytes, size_t& outOffset) -> bool {
+        constexpr size_t kAlignment = 256;
+        size_t alignedOffset = (m_instanceBufferOffset + (kAlignment - 1)) & ~(kAlignment - 1);
+        size_t required = alignedOffset + bytes;
+        if (!m_instanceBuffer || required > m_instanceBufferCapacity) {
+            size_t newCapacity = std::max(required, m_instanceBufferCapacity > 0 ? m_instanceBufferCapacity * 2 : required);
+            if (m_instanceBuffer) {
+                m_instanceBuffer->release();
+            }
+            m_instanceBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
+            m_instanceBufferCapacity = m_instanceBuffer ? m_instanceBuffer->length() : 0;
+            alignedOffset = 0;
+            required = bytes;
         }
-    }
+        if (!m_instanceBuffer || m_instanceBufferCapacity < required) {
+            return false;
+        }
+        outOffset = alignedOffset;
+        m_instanceBufferOffset = alignedOffset + bytes;
+        return true;
+    };
     
     // Prepare lighting once so both shadow and clustered passes use fresh data
     if (m_lightingSystem) {
@@ -2707,11 +3092,6 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         ensureBuffer(m_clusterParamsBuffer, sizeof(ClusterParams), &clusterParams);
     }
     
-    // Render shadow maps first
-    if (m_shadowPass && m_lightingSystem) {
-        m_shadowPass->execute(commandBuffer, scene, camera, *m_lightingSystem);
-    }
-    
     // Build clustered light lists
     if (m_clusterPass && m_lightGPUBuffer) {
         m_clusterPass->dispatch(
@@ -2750,8 +3130,501 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     cameraUniforms->viewProjectionMatrix = viewProjection;
     cameraUniforms->viewMatrixInverse = cameraUniforms->viewMatrix.inversed();
     cameraUniforms->projectionMatrixInverse = cameraUniforms->projectionMatrix.inversed();
-    cameraUniforms->cameraPosition = camera->getEntity()->getTransform()->getPosition();
+    Math::Vector3 camPos = camera->getEntity()->getTransform()->getPosition();
+    cameraUniforms->cameraPositionTime = Math::Vector4(camPos.x, camPos.y, camPos.z, Time::time());
+
+    std::unordered_set<std::string> hlodHidden;
+    std::unordered_set<std::string> hlodActiveProxies;
+    {
+        const auto& hlodEntities = scene->getAllEntities();
+        for (const auto& entityPtr : hlodEntities) {
+            Entity* entity = entityPtr.get();
+            if (!entity || !entity->isActiveInHierarchy()) {
+                continue;
+            }
+            HLODProxy* proxy = entity->getComponent<HLODProxy>();
+            if (!proxy || !proxy->isEnabled()) {
+                continue;
+            }
+            MeshRenderer* mr = entity->getComponent<MeshRenderer>();
+            if (!mr || !mr->isEnabled() || !mr->getMesh()) {
+                continue;
+            }
+            Math::Vector3 center = mr->getBoundsCenter();
+            float dist = (center - camPos).length();
+            bool active = dist >= proxy->getLodStart();
+            if (!active) {
+                continue;
+            }
+            std::string proxyId = entity->getUUID().toString();
+            hlodActiveProxies.insert(proxyId);
+            for (const auto& src : proxy->getSourceUuids()) {
+                hlodHidden.insert(src);
+            }
+        }
+    }
+
+    auto shouldSkipEntity = [&](Entity* entity) -> bool {
+        if (!entity) {
+            return true;
+        }
+        std::string id = entity->getUUID().toString();
+        if (hlodHidden.find(id) != hlodHidden.end()) {
+            return true;
+        }
+        if (auto* proxy = entity->getComponent<HLODProxy>()) {
+            return hlodActiveProxies.find(id) == hlodActiveProxies.end();
+        }
+        return false;
+    };
+
+    // Ensure meshes are uploaded before any pass uses them
+    const auto& entitiesPre = scene->getAllEntities();
+    for (const auto& entPtr : entitiesPre) {
+        if (shouldSkipEntity(entPtr.get())) {
+            continue;
+        }
+        MeshRenderer* mr = entPtr->getComponent<MeshRenderer>();
+        if (!mr || !mr->isEnabled()) continue;
+        std::shared_ptr<Mesh> mesh = mr->getMesh();
+        if (mesh && !mesh->isUploaded()) {
+            uploadMesh(mesh.get());
+        }
+    }
+
+    auto resolveCullMode = [](Material* material) -> MTL::CullMode {
+        if (!material) {
+            return MTL::CullModeBack;
+        }
+        if (material->isTwoSided() || material->getCullMode() == Material::CullMode::Off) {
+            return MTL::CullModeNone;
+        }
+        if (material->getCullMode() == Material::CullMode::Front) {
+            return MTL::CullModeFront;
+        }
+        return MTL::CullModeBack;
+    };
     
+    struct InstancedBatchKey {
+        Mesh* mesh = nullptr;
+        Mesh* sourceMesh = nullptr;
+        Material* material = nullptr;
+        bool isTransparent = false;
+        bool receiveShadows = true;
+        bool castShadows = true;
+
+        bool operator==(const InstancedBatchKey& other) const {
+            return mesh == other.mesh &&
+                   sourceMesh == other.sourceMesh &&
+                   material == other.material &&
+                   isTransparent == other.isTransparent &&
+                   receiveShadows == other.receiveShadows &&
+                   castShadows == other.castShadows;
+        }
+    };
+
+    struct InstancedBatchKeyHash {
+        size_t operator()(const InstancedBatchKey& key) const {
+            size_t h = reinterpret_cast<size_t>(key.mesh);
+            h ^= reinterpret_cast<size_t>(key.sourceMesh) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            h ^= reinterpret_cast<size_t>(key.material) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            h ^= static_cast<size_t>(key.isTransparent) << 1;
+            h ^= static_cast<size_t>(key.receiveShadows) << 2;
+            h ^= static_cast<size_t>(key.castShadows) << 3;
+            return h;
+        }
+    };
+
+    struct InstancedBatch {
+        InstancedBatchKey key;
+        std::shared_ptr<Material> material;
+        std::vector<InstanceDataGPU> instances;
+        Math::Vector3 boundsCenter;
+        Math::Vector3 boundsSize;
+    };
+
+    struct InstancedDraw {
+        Mesh* mesh = nullptr;
+        std::shared_ptr<Material> material;
+        bool isTransparent = false;
+        bool receiveShadows = true;
+        size_t instanceOffset = 0;
+        uint32_t instanceCount = 0;
+        Math::Vector3 boundsCenter;
+        Math::Vector3 boundsSize;
+        bool isBillboard = false;
+    };
+
+    struct InstanceBatchGPU {
+        Mesh* mesh = nullptr;
+        Mesh* sourceMesh = nullptr;
+        std::shared_ptr<Material> material;
+        bool isTransparent = false;
+        bool receiveShadows = true;
+        bool castShadows = true;
+        uint32_t inputOffset = 0;
+        uint32_t inputCount = 0;
+        uint32_t outputOffset = 0;
+        Math::Vector3 boundsCenter;
+        Math::Vector3 boundsSize;
+        bool isBillboard = false;
+    };
+
+    std::unordered_map<InstancedBatchKey, InstancedBatch, InstancedBatchKeyHash> instancedVisible;
+    std::unordered_map<InstancedBatchKey, InstancedBatch, InstancedBatchKeyHash> instancedShadow;
+    std::vector<InstancedDraw> instancedDraws;
+    std::vector<InstancedShadowDraw> instancedShadowDraws;
+    std::vector<InstanceBatchGPU> instancedBatches;
+    std::shared_ptr<Mesh> billboardMesh = m_billboardMesh;
+    if (billboardMesh && !billboardMesh->isUploaded()) {
+        uploadMesh(billboardMesh.get());
+    }
+    Math::Vector3 cameraPos = camera->getEntity()->getTransform()->getPosition();
+
+    {
+        const auto& instancedEntities = scene->getAllEntities();
+        for (const auto& entityPtr : instancedEntities) {
+            Entity* entity = entityPtr.get();
+            if (!entity || !entity->isActiveInHierarchy()) {
+                continue;
+            }
+            InstancedMeshRenderer* instanced = entity->getComponent<InstancedMeshRenderer>();
+            if (!instanced || !instanced->isEnabled()) {
+                continue;
+            }
+            std::shared_ptr<Mesh> mesh = instanced->getMesh();
+            if (!mesh) {
+                continue;
+            }
+            if (!mesh->isUploaded()) {
+                uploadMesh(mesh.get());
+            }
+
+            std::shared_ptr<Material> material = instanced->getMaterial(0);
+            bool isTransparent = false;
+            if (material) {
+                isTransparent = material->getRenderMode() == Material::RenderMode::Transparent
+                    || material->getAlpha() < 0.999f;
+            }
+
+            Math::Vector3 meshCenter = mesh->getBoundsCenter();
+            Math::Vector3 meshSize = mesh->getBoundsSize();
+            bool billboardEnabled = material && material->getBillboardEnabled() && billboardMesh;
+            float billboardStart = material ? material->getBillboardStart() : 0.0f;
+            float billboardEnd = material ? material->getBillboardEnd() : 0.0f;
+            bool billboardRangeValid = billboardEnabled && billboardEnd > billboardStart + 0.01f;
+
+            const auto& instanceTransforms = instanced->getInstances();
+            if (instanceTransforms.empty()) {
+                continue;
+            }
+
+            Math::Matrix4x4 parentMatrix = entity->getTransform()->getWorldMatrix();
+
+            for (const auto& local : instanceTransforms) {
+                Math::Matrix4x4 world = parentMatrix * local;
+
+                InstanceDataGPU data{};
+                data.modelMatrix = world;
+                data.normalMatrix = world.inversed().transposed();
+
+                if (instanced->getCastShadows()) {
+                    auto addShadowInstance = [&](Mesh* drawMesh, Mesh* sourceMesh) {
+                        InstancedBatchKey key{};
+                        key.mesh = drawMesh;
+                        key.sourceMesh = sourceMesh;
+                        key.material = material.get();
+                        key.isTransparent = isTransparent;
+                        key.receiveShadows = instanced->getReceiveShadows();
+                        key.castShadows = instanced->getCastShadows();
+                        auto& batch = instancedShadow[key];
+                        batch.key = key;
+                        batch.material = material;
+                        batch.boundsCenter = meshCenter;
+                        batch.boundsSize = meshSize;
+                        batch.instances.push_back(data);
+                    };
+
+                    if (billboardRangeValid) {
+                        Math::Vector3 worldCenter = world.transformPoint(meshCenter);
+                        float dist = (worldCenter - cameraPos).length();
+                        if (dist <= billboardStart) {
+                            addShadowInstance(mesh.get(), mesh.get());
+                        } else if (dist >= billboardEnd) {
+                            addShadowInstance(billboardMesh.get(), mesh.get());
+                        } else {
+                            addShadowInstance(mesh.get(), mesh.get());
+                            addShadowInstance(billboardMesh.get(), mesh.get());
+                        }
+                    } else {
+                        addShadowInstance(mesh.get(), mesh.get());
+                    }
+                }
+                auto addVisibleInstance = [&](Mesh* drawMesh, Mesh* sourceMesh) {
+                    InstancedBatchKey key{};
+                    key.mesh = drawMesh;
+                    key.sourceMesh = sourceMesh;
+                    key.material = material.get();
+                    key.isTransparent = isTransparent;
+                    key.receiveShadows = instanced->getReceiveShadows();
+                    key.castShadows = instanced->getCastShadows();
+                    auto& batch = instancedVisible[key];
+                    batch.key = key;
+                    batch.material = material;
+                    batch.boundsCenter = meshCenter;
+                    batch.boundsSize = meshSize;
+                    batch.instances.push_back(data);
+                };
+
+                if (billboardRangeValid) {
+                    Math::Vector3 worldCenter = world.transformPoint(meshCenter);
+                    float dist = (worldCenter - cameraPos).length();
+                    if (dist <= billboardStart) {
+                        addVisibleInstance(mesh.get(), mesh.get());
+                    } else if (dist >= billboardEnd) {
+                        addVisibleInstance(billboardMesh.get(), mesh.get());
+                    } else {
+                        addVisibleInstance(mesh.get(), mesh.get());
+                        addVisibleInstance(billboardMesh.get(), mesh.get());
+                    }
+                } else {
+                    addVisibleInstance(mesh.get(), mesh.get());
+                }
+            }
+        }
+    }
+
+    auto align256 = [](size_t value) {
+        constexpr size_t kAlignment = 256;
+        return (value + (kAlignment - 1)) & ~(kAlignment - 1);
+    };
+
+    uint32_t totalInputCount = 0;
+    instancedBatches.reserve(instancedVisible.size());
+    for (auto& entry : instancedVisible) {
+        auto& batch = entry.second;
+        if (batch.instances.empty()) {
+            continue;
+        }
+        InstanceBatchGPU gpu{};
+        gpu.mesh = batch.key.mesh;
+        gpu.sourceMesh = batch.key.sourceMesh;
+        gpu.material = batch.material;
+        gpu.isTransparent = batch.key.isTransparent;
+        gpu.receiveShadows = batch.key.receiveShadows;
+        gpu.castShadows = batch.key.castShadows;
+        gpu.inputOffset = totalInputCount;
+        gpu.inputCount = static_cast<uint32_t>(batch.instances.size());
+        gpu.outputOffset = totalInputCount;
+        gpu.boundsCenter = batch.boundsCenter;
+        gpu.boundsSize = batch.boundsSize;
+        gpu.isBillboard = billboardMesh && batch.key.mesh == billboardMesh.get();
+        totalInputCount += gpu.inputCount;
+        instancedBatches.push_back(gpu);
+    }
+
+    size_t totalInputBytes = totalInputCount * sizeof(InstanceDataGPU);
+    if (totalInputBytes > 0) {
+        if (!m_instanceBuffer || m_instanceBufferCapacity < totalInputBytes) {
+            size_t newCapacity = std::max(totalInputBytes, m_instanceBufferCapacity > 0 ? m_instanceBufferCapacity * 2 : totalInputBytes);
+            if (m_instanceBuffer) {
+                m_instanceBuffer->release();
+            }
+            m_instanceBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
+            m_instanceBufferCapacity = m_instanceBuffer ? m_instanceBuffer->length() : 0;
+        }
+    }
+
+    if (m_instanceBuffer && totalInputCount > 0) {
+        for (auto& entry : instancedVisible) {
+            auto& batch = entry.second;
+            if (batch.instances.empty()) {
+                continue;
+            }
+            uint32_t offset = 0;
+            for (const auto& gpu : instancedBatches) {
+                if (gpu.mesh == batch.key.mesh && gpu.material.get() == batch.material.get() &&
+                    gpu.sourceMesh == batch.key.sourceMesh &&
+                    gpu.isTransparent == batch.key.isTransparent &&
+                    gpu.receiveShadows == batch.key.receiveShadows &&
+                    gpu.castShadows == batch.key.castShadows) {
+                    offset = gpu.inputOffset;
+                    break;
+                }
+            }
+            size_t bytes = batch.instances.size() * sizeof(InstanceDataGPU);
+            std::memcpy(static_cast<uint8_t*>(m_instanceBuffer->contents()) + offset * sizeof(InstanceDataGPU),
+                        batch.instances.data(),
+                        bytes);
+        }
+    }
+
+    for (auto& entry : instancedShadow) {
+        auto& batch = entry.second;
+        if (batch.instances.empty()) {
+            continue;
+        }
+        uint32_t offset = 0;
+        for (const auto& gpu : instancedBatches) {
+            if (gpu.mesh == batch.key.mesh && gpu.material.get() == batch.material.get() &&
+                gpu.sourceMesh == batch.key.sourceMesh &&
+                gpu.isTransparent == batch.key.isTransparent &&
+                gpu.receiveShadows == batch.key.receiveShadows &&
+                gpu.castShadows == batch.key.castShadows) {
+                offset = gpu.inputOffset;
+                break;
+            }
+        }
+        InstancedShadowDraw draw{};
+        draw.mesh = batch.key.mesh;
+        draw.instanceBuffer = m_instanceBuffer;
+        draw.instanceOffset = offset * sizeof(InstanceDataGPU);
+        draw.instanceCount = static_cast<uint32_t>(batch.instances.size());
+        draw.material = batch.material;
+        draw.boundsCenter = batch.boundsCenter;
+        draw.boundsSize = batch.boundsSize;
+        draw.isBillboard = billboardMesh && batch.key.mesh == billboardMesh.get();
+        instancedShadowDraws.push_back(draw);
+    }
+
+    // Render shadow maps first
+    if (m_shadowPass && m_lightingSystem) {
+        m_shadowPass->execute(commandBuffer, scene, camera, *m_lightingSystem, instancedShadowDraws);
+    }
+
+    const bool useGpuInstanceCulling = m_instanceCullPipeline && m_instanceIndirectPipeline && totalInputCount > 0;
+    auto resetInstanceCullingBuffers = [&]() {
+        if (m_instanceCountBuffer) {
+            std::memset(m_instanceCountBuffer->contents(), 0, instancedBatches.size() * sizeof(uint32_t));
+        }
+        if (m_instanceIndirectBuffer) {
+            auto* args = static_cast<DrawIndexedIndirectArgs*>(m_instanceIndirectBuffer->contents());
+            for (size_t i = 0; i < instancedBatches.size(); ++i) {
+                args[i].indexCount = instancedBatches[i].mesh ? instancedBatches[i].mesh->getIndices().size() : 0;
+                args[i].instanceCount = 0;
+                args[i].indexStart = 0;
+                args[i].baseVertex = 0;
+                args[i].baseInstance = 0;
+            }
+        }
+    };
+
+    auto dispatchInstanceCulling = [&](MTL::ComputePipelineState* cullPipeline, bool useHzb) {
+        if (!cullPipeline || !m_instanceCullBuffer || !m_instanceCountBuffer || !m_instanceIndirectBuffer) {
+            return;
+        }
+
+        resetInstanceCullingBuffers();
+
+        MTL::ComputeCommandEncoder* cullEncoder = commandBuffer->computeCommandEncoder();
+        cullEncoder->setComputePipelineState(cullPipeline);
+        cullEncoder->setBuffer(m_instanceBuffer, 0, 0);
+        cullEncoder->setBuffer(m_instanceCullBuffer, 0, 1);
+        if (useHzb && m_hzbTexture) {
+            cullEncoder->setTexture(m_hzbTexture, 0);
+            cullEncoder->setBuffer(m_cameraUniformBuffer, 0, 4);
+        }
+
+        const auto frustumPlanes = ExtractFrustumPlanes(viewProjectionNoJitter);
+        Math::Vector2 screenSize(
+            static_cast<float>(m_depthTexture ? m_depthTexture->width() : targetWidth),
+            static_cast<float>(m_depthTexture ? m_depthTexture->height() : targetHeight)
+        );
+        uint32_t hzbMipCount = std::max(1u, m_hzbMipCount);
+
+        for (size_t i = 0; i < instancedBatches.size(); ++i) {
+            const auto& batch = instancedBatches[i];
+            Math::Vector3 meshCenter = batch.boundsCenter;
+            Math::Vector3 meshSize = batch.boundsSize;
+            float baseRadius = 0.5f * meshSize.length();
+
+            InstanceCullParams params{};
+            for (int p = 0; p < 6; ++p) {
+                params.frustumPlanes[p] = frustumPlanes[p];
+            }
+            params.boundsCenterRadius = Math::Vector4(meshCenter.x, meshCenter.y, meshCenter.z, baseRadius);
+            params.inputOffset = batch.inputOffset;
+            params.outputOffset = batch.outputOffset;
+            params.instanceCount = batch.inputCount;
+            params.screenSize = screenSize;
+            params.hzbMipCount = hzbMipCount;
+
+            cullEncoder->setBuffer(m_instanceCountBuffer, i * sizeof(uint32_t), 2);
+            cullEncoder->setBytes(&params, sizeof(InstanceCullParams), 3);
+
+            const uint32_t threads = 64;
+            const uint32_t grid = (batch.inputCount + threads - 1) / threads;
+            MTL::Size tgSize = MTL::Size(threads, 1, 1);
+            MTL::Size gridSize = MTL::Size(grid * threads, 1, 1);
+            cullEncoder->dispatchThreads(gridSize, tgSize);
+        }
+        cullEncoder->endEncoding();
+
+        MTL::ComputeCommandEncoder* indirectEncoder = commandBuffer->computeCommandEncoder();
+        indirectEncoder->setComputePipelineState(m_instanceIndirectPipeline);
+        indirectEncoder->setBuffer(m_instanceCountBuffer, 0, 0);
+        indirectEncoder->setBuffer(m_instanceIndirectBuffer, 0, 1);
+        const uint32_t batchCount = static_cast<uint32_t>(instancedBatches.size());
+        if (batchCount > 0) {
+            const uint32_t threads = 64;
+            const uint32_t grid = (batchCount + threads - 1) / threads;
+            MTL::Size tgSize = MTL::Size(threads, 1, 1);
+            MTL::Size gridSize = MTL::Size(grid * threads, 1, 1);
+            indirectEncoder->dispatchThreads(gridSize, tgSize);
+        }
+        indirectEncoder->endEncoding();
+    };
+
+    if (useGpuInstanceCulling) {
+        size_t outputBytes = totalInputBytes;
+        if (!m_instanceCullBuffer || m_instanceCullCapacity < outputBytes) {
+            size_t newCapacity = std::max(outputBytes, m_instanceCullCapacity > 0 ? m_instanceCullCapacity * 2 : outputBytes);
+            if (m_instanceCullBuffer) {
+                m_instanceCullBuffer->release();
+            }
+            m_instanceCullBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
+            m_instanceCullCapacity = m_instanceCullBuffer ? m_instanceCullBuffer->length() : 0;
+        }
+
+        size_t countBytes = instancedBatches.size() * sizeof(uint32_t);
+        if (!m_instanceCountBuffer || m_instanceCountCapacity < countBytes) {
+            if (m_instanceCountBuffer) {
+                m_instanceCountBuffer->release();
+            }
+            m_instanceCountBuffer = m_device->newBuffer(std::max<size_t>(countBytes, 256), MTL::ResourceStorageModeShared);
+            m_instanceCountCapacity = m_instanceCountBuffer ? m_instanceCountBuffer->length() : 0;
+        }
+
+        size_t indirectBytes = instancedBatches.size() * sizeof(DrawIndexedIndirectArgs);
+        if (!m_instanceIndirectBuffer || m_instanceIndirectCapacity < indirectBytes) {
+            if (m_instanceIndirectBuffer) {
+                m_instanceIndirectBuffer->release();
+            }
+            m_instanceIndirectBuffer = m_device->newBuffer(std::max<size_t>(indirectBytes, 256), MTL::ResourceStorageModeShared);
+            m_instanceIndirectCapacity = m_instanceIndirectBuffer ? m_instanceIndirectBuffer->length() : 0;
+        }
+
+        dispatchInstanceCulling(m_instanceCullPipeline, false);
+    }
+    if (!useGpuInstanceCulling) {
+        for (const auto& batch : instancedBatches) {
+            if (batch.inputCount == 0) {
+                continue;
+            }
+            InstancedDraw draw{};
+            draw.mesh = batch.mesh;
+            draw.material = batch.material;
+            draw.isTransparent = batch.isTransparent;
+            draw.receiveShadows = batch.receiveShadows;
+            draw.instanceOffset = batch.inputOffset * sizeof(InstanceDataGPU);
+            draw.instanceCount = batch.inputCount;
+            draw.boundsCenter = batch.boundsCenter;
+            draw.boundsSize = batch.boundsSize;
+            draw.isBillboard = batch.isBillboard;
+            instancedDraws.push_back(draw);
+        }
+    }
+
     // Setup light uniforms
     LightDataGPU* lightData = static_cast<LightDataGPU*>(m_lightUniformBuffer->contents());
     if (mainLight) {
@@ -2797,7 +3670,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             if (!entity->isActiveInHierarchy()) {
                 continue;
             }
-            
+            if (shouldSkipEntity(entity)) {
+                continue;
+            }
+
             MeshRenderer* meshRenderer = entity->getComponent<MeshRenderer>();
             if (!meshRenderer || !meshRenderer->isEnabled()) {
                 continue;
@@ -2891,10 +3767,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     material->getHeightTexture() ? 1.0f : 0.0f,
                     material->getHeightInvert() ? 1.0f : 0.0f
                 );
+                bool alphaClip = material->getRenderMode() == Material::RenderMode::Cutout;
+                float alphaCutoff = material->getAlphaCutoff();
                 matUniforms.textureFlags3 = Math::Vector4(
                     hasORMTex ? 1.0f : 0.0f,
-                    0.0f,
-                    0.0f,
+                    alphaClip ? 1.0f : 0.0f,
+                    alphaCutoff,
                     0.0f
                 );
                 matUniforms.heightParams = Math::Vector4(
@@ -2902,6 +3780,34 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     16.0f,
                     48.0f,
                     meshRenderer->getReceiveShadows() ? 1.0f : 0.0f
+                );
+                Math::Vector3 windDir = material->getWindDirection();
+                matUniforms.foliageParams0 = Math::Vector4(
+                    material->getWindStrength(),
+                    material->getWindSpeed(),
+                    material->getWindScale(),
+                    material->getWindGust()
+                );
+                matUniforms.foliageParams1 = Math::Vector4(
+                    material->getLodFadeStart(),
+                    material->getLodFadeEnd(),
+                    material->getBillboardStart(),
+                    material->getBillboardEnd()
+                );
+                matUniforms.foliageParams2 = Math::Vector4(
+                    material->getWindEnabled() ? 1.0f : 0.0f,
+                    material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                    material->getBillboardEnabled() ? 1.0f : 0.0f,
+                    material->getDitherEnabled() ? 1.0f : 0.0f
+                );
+                matUniforms.foliageParams3 = Math::Vector4(
+                    windDir.x, windDir.y, windDir.z, 0.0f
+                );
+                matUniforms.impostorParams0 = Math::Vector4(
+                    material->getImpostorEnabled() ? 1.0f : 0.0f,
+                    static_cast<float>(material->getImpostorRows()),
+                    static_cast<float>(material->getImpostorCols()),
+                    0.0f
                 );
             } else {
                 matUniforms.albedo = Math::Vector4(1.0f);
@@ -2912,16 +3818,34 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 matUniforms.textureFlags2 = Math::Vector4(0.0f);
                 matUniforms.textureFlags3 = Math::Vector4(0.0f);
                 matUniforms.heightParams = Math::Vector4(0.0f);
+                matUniforms.foliageParams0 = Math::Vector4(0.0f);
+                matUniforms.foliageParams1 = Math::Vector4(0.0f);
+                matUniforms.foliageParams2 = Math::Vector4(0.0f);
+                matUniforms.foliageParams3 = Math::Vector4(0.0f);
+                matUniforms.impostorParams0 = Math::Vector4(0.0f);
             }
 
             preEncoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 0);
+            if (!isSkinned) {
+                MeshUniformsGPU meshUniforms{};
+                Math::Vector3 boundsCenter = mesh->getBoundsCenter();
+                Math::Vector3 boundsSize = mesh->getBoundsSize();
+                meshUniforms.boundsCenter = Math::Vector4(boundsCenter.x, boundsCenter.y, boundsCenter.z, 0.0f);
+                meshUniforms.boundsSize = Math::Vector4(boundsSize.x, boundsSize.y, boundsSize.z, 0.0f);
+                meshUniforms.flags = Math::Vector4(0.0f);
+                preEncoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
+                preEncoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+            }
+            auto albedoTex = (material && material->getAlbedoTexture()) ? material->getAlbedoTexture() : m_defaultWhiteTexture;
             auto roughnessTex = (material && material->getRoughnessTexture()) ? material->getRoughnessTexture() : m_defaultWhiteTexture;
             auto ormTex = (material && material->getORMTexture()) ? material->getORMTexture() : m_defaultBlackTexture;
+            preEncoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 2);
             preEncoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 0);
             preEncoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 1);
             if (m_samplerState) {
                 preEncoder->setFragmentSamplerState(m_samplerState, 0);
             }
+            preEncoder->setCullMode(resolveCullMode(material.get()));
             
             preEncoder->drawIndexedPrimitives(
                 MTL::PrimitiveTypeTriangle,
@@ -2931,9 +3855,328 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 0
             );
         }
+
+        if (m_prepassPipelineInstanced) {
+            if (useGpuInstanceCulling && m_instanceCullBuffer && m_instanceIndirectBuffer) {
+                for (size_t i = 0; i < instancedBatches.size(); ++i) {
+                    const auto& batch = instancedBatches[i];
+                    if (!batch.mesh || batch.isTransparent) {
+                        continue;
+                    }
+
+                    MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(batch.mesh->getVertexBuffer());
+                    MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(batch.mesh->getIndexBuffer());
+                    if (!vertexBuffer || !indexBuffer) {
+                        continue;
+                    }
+
+                    preEncoder->setRenderPipelineState(m_prepassPipelineInstanced);
+                    preEncoder->setVertexBuffer(vertexBuffer, 0, 0);
+                    preEncoder->setVertexBuffer(m_instanceCullBuffer, batch.outputOffset * sizeof(InstanceDataGPU), 1);
+                    preEncoder->setVertexBuffer(m_cameraUniformBuffer, 0, 2);
+
+                    MaterialUniformsGPU matUniforms{};
+                    if (batch.material) {
+                        matUniforms.albedo = batch.material->getAlbedo();
+                        matUniforms.properties = Math::Vector4(
+                            batch.material->getMetallic(),
+                            batch.material->getRoughness(),
+                            batch.material->getAO(),
+                            batch.material->getNormalScale()
+                        );
+                        Math::Vector3 emis = batch.material->getEmission();
+                        matUniforms.emission = Math::Vector4(
+                            emis.x, emis.y, emis.z,
+                            batch.material->getEmissionStrength()
+                        );
+                        Math::Vector2 tiling = batch.material->getUVTiling();
+                        Math::Vector2 offset = batch.material->getUVOffset();
+                        matUniforms.uvTilingOffset = Math::Vector4(tiling.x, tiling.y, offset.x, offset.y);
+
+                        bool hasRoughnessTex = batch.material->getRoughnessTexture() != nullptr;
+                        bool hasORMTex = batch.material->getORMTexture() != nullptr;
+                        matUniforms.textureFlags = Math::Vector4(
+                            batch.material->getAlbedoTexture() ? 1.0f : 0.0f,
+                            batch.material->getNormalTexture() ? 1.0f : 0.0f,
+                            batch.material->getMetallicTexture() ? 1.0f : 0.0f,
+                            hasRoughnessTex ? 1.0f : 0.0f
+                        );
+                        matUniforms.textureFlags2 = Math::Vector4(
+                            batch.material->getAOTexture() ? 1.0f : 0.0f,
+                            batch.material->getEmissionTexture() ? 1.0f : 0.0f,
+                            batch.material->getHeightTexture() ? 1.0f : 0.0f,
+                            batch.material->getHeightInvert() ? 1.0f : 0.0f
+                        );
+                        bool alphaClip = batch.material->getRenderMode() == Material::RenderMode::Cutout;
+                        float alphaCutoff = batch.material->getAlphaCutoff();
+                        matUniforms.textureFlags3 = Math::Vector4(
+                            hasORMTex ? 1.0f : 0.0f,
+                            alphaClip ? 1.0f : 0.0f,
+                            alphaCutoff,
+                            0.0f
+                        );
+                        matUniforms.heightParams = Math::Vector4(
+                            batch.material->getHeightScale(),
+                            16.0f,
+                            48.0f,
+                            batch.receiveShadows ? 1.0f : 0.0f
+                        );
+                        Math::Vector3 windDir = batch.material->getWindDirection();
+                        matUniforms.foliageParams0 = Math::Vector4(
+                            batch.material->getWindStrength(),
+                            batch.material->getWindSpeed(),
+                            batch.material->getWindScale(),
+                            batch.material->getWindGust()
+                        );
+                        matUniforms.foliageParams1 = Math::Vector4(
+                            batch.material->getLodFadeStart(),
+                            batch.material->getLodFadeEnd(),
+                            batch.material->getBillboardStart(),
+                            batch.material->getBillboardEnd()
+                        );
+                        matUniforms.foliageParams2 = Math::Vector4(
+                            batch.material->getWindEnabled() ? 1.0f : 0.0f,
+                            batch.material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                            batch.material->getBillboardEnabled() ? 1.0f : 0.0f,
+                            batch.material->getDitherEnabled() ? 1.0f : 0.0f
+                        );
+                        matUniforms.foliageParams3 = Math::Vector4(
+                            windDir.x, windDir.y, windDir.z, 0.0f
+                        );
+                        matUniforms.impostorParams0 = Math::Vector4(
+                            batch.material->getImpostorEnabled() ? 1.0f : 0.0f,
+                            static_cast<float>(batch.material->getImpostorRows()),
+                            static_cast<float>(batch.material->getImpostorCols()),
+                            0.0f
+                        );
+                    } else {
+                        matUniforms.albedo = Math::Vector4(1.0f);
+                        matUniforms.properties = Math::Vector4(0.0f, 1.0f, 1.0f, 1.0f);
+                        matUniforms.emission = Math::Vector4(0.0f);
+                        matUniforms.uvTilingOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
+                        matUniforms.textureFlags = Math::Vector4(0.0f);
+                        matUniforms.textureFlags2 = Math::Vector4(0.0f);
+                        matUniforms.textureFlags3 = Math::Vector4(0.0f);
+                        matUniforms.heightParams = Math::Vector4(0.0f);
+                        matUniforms.foliageParams0 = Math::Vector4(0.0f);
+                        matUniforms.foliageParams1 = Math::Vector4(0.0f);
+                        matUniforms.foliageParams2 = Math::Vector4(0.0f);
+                        matUniforms.foliageParams3 = Math::Vector4(0.0f);
+                        matUniforms.impostorParams0 = Math::Vector4(0.0f);
+                    }
+
+                    preEncoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 0);
+                    MeshUniformsGPU meshUniforms{};
+                    meshUniforms.boundsCenter = Math::Vector4(batch.boundsCenter.x, batch.boundsCenter.y, batch.boundsCenter.z, 0.0f);
+                    meshUniforms.boundsSize = Math::Vector4(batch.boundsSize.x, batch.boundsSize.y, batch.boundsSize.z, 0.0f);
+                    meshUniforms.flags = Math::Vector4(batch.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                    preEncoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
+                    preEncoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+                    auto albedoTex = (batch.material && batch.material->getAlbedoTexture()) ? batch.material->getAlbedoTexture() : m_defaultWhiteTexture;
+                    auto roughnessTex = (batch.material && batch.material->getRoughnessTexture()) ? batch.material->getRoughnessTexture() : m_defaultWhiteTexture;
+                    auto ormTex = (batch.material && batch.material->getORMTexture()) ? batch.material->getORMTexture() : m_defaultBlackTexture;
+                    preEncoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 2);
+                    preEncoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 0);
+                    preEncoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 1);
+                    if (m_samplerState) {
+                        preEncoder->setFragmentSamplerState(m_samplerState, 0);
+                    }
+                    preEncoder->setCullMode(resolveCullMode(batch.material.get()));
+
+                    preEncoder->drawIndexedPrimitives(
+                        MTL::PrimitiveTypeTriangle,
+                        MTL::IndexTypeUInt32,
+                        indexBuffer,
+                        0,
+                        m_instanceIndirectBuffer,
+                        i * sizeof(DrawIndexedIndirectArgs)
+                    );
+                }
+            } else if (m_instanceBuffer) {
+                for (const auto& draw : instancedDraws) {
+                    if (!draw.mesh || draw.instanceCount == 0 || draw.isTransparent) {
+                        continue;
+                    }
+
+                    MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(draw.mesh->getVertexBuffer());
+                    MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(draw.mesh->getIndexBuffer());
+                    if (!vertexBuffer || !indexBuffer) {
+                        continue;
+                    }
+
+                    preEncoder->setRenderPipelineState(m_prepassPipelineInstanced);
+                    preEncoder->setVertexBuffer(vertexBuffer, 0, 0);
+                    preEncoder->setVertexBuffer(m_instanceBuffer, draw.instanceOffset, 1);
+                    preEncoder->setVertexBuffer(m_cameraUniformBuffer, 0, 2);
+
+                    MaterialUniformsGPU matUniforms{};
+                    if (draw.material) {
+                        matUniforms.albedo = draw.material->getAlbedo();
+                        matUniforms.properties = Math::Vector4(
+                            draw.material->getMetallic(),
+                            draw.material->getRoughness(),
+                            draw.material->getAO(),
+                            draw.material->getNormalScale()
+                        );
+                        Math::Vector3 emis = draw.material->getEmission();
+                        matUniforms.emission = Math::Vector4(
+                            emis.x, emis.y, emis.z,
+                            draw.material->getEmissionStrength()
+                        );
+                        Math::Vector2 tiling = draw.material->getUVTiling();
+                        Math::Vector2 offset = draw.material->getUVOffset();
+                        matUniforms.uvTilingOffset = Math::Vector4(tiling.x, tiling.y, offset.x, offset.y);
+
+                        bool hasRoughnessTex = draw.material->getRoughnessTexture() != nullptr;
+                        bool hasORMTex = draw.material->getORMTexture() != nullptr;
+                        matUniforms.textureFlags = Math::Vector4(
+                            draw.material->getAlbedoTexture() ? 1.0f : 0.0f,
+                            draw.material->getNormalTexture() ? 1.0f : 0.0f,
+                            draw.material->getMetallicTexture() ? 1.0f : 0.0f,
+                            hasRoughnessTex ? 1.0f : 0.0f
+                        );
+                        matUniforms.textureFlags2 = Math::Vector4(
+                            draw.material->getAOTexture() ? 1.0f : 0.0f,
+                            draw.material->getEmissionTexture() ? 1.0f : 0.0f,
+                            draw.material->getHeightTexture() ? 1.0f : 0.0f,
+                            draw.material->getHeightInvert() ? 1.0f : 0.0f
+                        );
+                        bool alphaClip = draw.material->getRenderMode() == Material::RenderMode::Cutout;
+                        float alphaCutoff = draw.material->getAlphaCutoff();
+                        matUniforms.textureFlags3 = Math::Vector4(
+                            hasORMTex ? 1.0f : 0.0f,
+                            alphaClip ? 1.0f : 0.0f,
+                            alphaCutoff,
+                            0.0f
+                        );
+                        matUniforms.heightParams = Math::Vector4(
+                            draw.material->getHeightScale(),
+                            16.0f,
+                            48.0f,
+                            draw.receiveShadows ? 1.0f : 0.0f
+                        );
+                        Math::Vector3 windDir = draw.material->getWindDirection();
+                        matUniforms.foliageParams0 = Math::Vector4(
+                            draw.material->getWindStrength(),
+                            draw.material->getWindSpeed(),
+                            draw.material->getWindScale(),
+                            draw.material->getWindGust()
+                        );
+                        matUniforms.foliageParams1 = Math::Vector4(
+                            draw.material->getLodFadeStart(),
+                            draw.material->getLodFadeEnd(),
+                            draw.material->getBillboardStart(),
+                            draw.material->getBillboardEnd()
+                        );
+                        matUniforms.foliageParams2 = Math::Vector4(
+                            draw.material->getWindEnabled() ? 1.0f : 0.0f,
+                            draw.material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                            draw.material->getBillboardEnabled() ? 1.0f : 0.0f,
+                            draw.material->getDitherEnabled() ? 1.0f : 0.0f
+                        );
+                        matUniforms.foliageParams3 = Math::Vector4(
+                            windDir.x, windDir.y, windDir.z, 0.0f
+                        );
+                        matUniforms.impostorParams0 = Math::Vector4(
+                            draw.material->getImpostorEnabled() ? 1.0f : 0.0f,
+                            static_cast<float>(draw.material->getImpostorRows()),
+                            static_cast<float>(draw.material->getImpostorCols()),
+                            0.0f
+                        );
+                    } else {
+                        matUniforms.albedo = Math::Vector4(1.0f);
+                        matUniforms.properties = Math::Vector4(0.0f, 1.0f, 1.0f, 1.0f);
+                        matUniforms.emission = Math::Vector4(0.0f);
+                        matUniforms.uvTilingOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
+                        matUniforms.textureFlags = Math::Vector4(0.0f);
+                        matUniforms.textureFlags2 = Math::Vector4(0.0f);
+                        matUniforms.textureFlags3 = Math::Vector4(0.0f);
+                        matUniforms.heightParams = Math::Vector4(0.0f);
+                        matUniforms.foliageParams0 = Math::Vector4(0.0f);
+                        matUniforms.foliageParams1 = Math::Vector4(0.0f);
+                        matUniforms.foliageParams2 = Math::Vector4(0.0f);
+                        matUniforms.foliageParams3 = Math::Vector4(0.0f);
+                        matUniforms.impostorParams0 = Math::Vector4(0.0f);
+                    }
+
+                    preEncoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 0);
+                    MeshUniformsGPU meshUniforms{};
+                    meshUniforms.boundsCenter = Math::Vector4(draw.boundsCenter.x, draw.boundsCenter.y, draw.boundsCenter.z, 0.0f);
+                    meshUniforms.boundsSize = Math::Vector4(draw.boundsSize.x, draw.boundsSize.y, draw.boundsSize.z, 0.0f);
+                    meshUniforms.flags = Math::Vector4(draw.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                    preEncoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
+                    preEncoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+                    auto albedoTex = (draw.material && draw.material->getAlbedoTexture()) ? draw.material->getAlbedoTexture() : m_defaultWhiteTexture;
+                    auto roughnessTex = (draw.material && draw.material->getRoughnessTexture()) ? draw.material->getRoughnessTexture() : m_defaultWhiteTexture;
+                    auto ormTex = (draw.material && draw.material->getORMTexture()) ? draw.material->getORMTexture() : m_defaultBlackTexture;
+                    preEncoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 2);
+                    preEncoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 0);
+                    preEncoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 1);
+                    if (m_samplerState) {
+                        preEncoder->setFragmentSamplerState(m_samplerState, 0);
+                    }
+                    preEncoder->setCullMode(resolveCullMode(draw.material.get()));
+
+                    preEncoder->drawIndexedPrimitives(
+                        MTL::PrimitiveTypeTriangle,
+                        draw.mesh->getIndices().size(),
+                        MTL::IndexTypeUInt32,
+                        indexBuffer,
+                        0,
+                        draw.instanceCount
+                    );
+                }
+            }
+        }
         
         preEncoder->endEncoding();
         prepass->release();
+    }
+
+    bool canBuildHzb = runPrepass && useGpuInstanceCulling && m_instanceCullHzbPipeline && m_hzbTexture
+        && m_hzbInitPipeline && m_hzbDownsamplePipeline && !m_hzbMipViews.empty();
+    if (canBuildHzb) {
+        MTL::ComputeCommandEncoder* hzbInit = commandBuffer->computeCommandEncoder();
+        hzbInit->setComputePipelineState(m_hzbInitPipeline);
+        hzbInit->setTexture(m_depthTexture, 0);
+        hzbInit->setTexture(m_hzbMipViews[0], 1);
+        if (m_pointClampSampler) {
+            hzbInit->setSamplerState(m_pointClampSampler, 0);
+        } else if (m_linearClampSampler) {
+            hzbInit->setSamplerState(m_linearClampSampler, 0);
+        }
+        const uint32_t hzbWidth = m_hzbMipViews[0]->width();
+        const uint32_t hzbHeight = m_hzbMipViews[0]->height();
+        const uint32_t threads = 8;
+        MTL::Size tgSize = MTL::Size(threads, threads, 1);
+        MTL::Size gridSize = MTL::Size((hzbWidth + threads - 1) / threads * threads,
+                                       (hzbHeight + threads - 1) / threads * threads,
+                                       1);
+        hzbInit->dispatchThreads(gridSize, tgSize);
+        hzbInit->endEncoding();
+
+        for (size_t mip = 1; mip < m_hzbMipViews.size(); ++mip) {
+            MTL::Texture* src = m_hzbMipViews[mip - 1];
+            MTL::Texture* dst = m_hzbMipViews[mip];
+            if (!src || !dst) {
+                continue;
+            }
+            MTL::ComputeCommandEncoder* downEncoder = commandBuffer->computeCommandEncoder();
+            downEncoder->setComputePipelineState(m_hzbDownsamplePipeline);
+            downEncoder->setTexture(src, 0);
+            downEncoder->setTexture(dst, 1);
+            const uint32_t mipWidth = dst->width();
+            const uint32_t mipHeight = dst->height();
+            MTL::Size downGrid = MTL::Size((mipWidth + threads - 1) / threads * threads,
+                                           (mipHeight + threads - 1) / threads * threads,
+                                           1);
+            downEncoder->dispatchThreads(downGrid, tgSize);
+            downEncoder->endEncoding();
+        }
+
+        if (m_instanceCullHzbPipeline) {
+            dispatchInstanceCulling(m_instanceCullHzbPipeline, true);
+        }
     }
 
     bool useDecals = runPrepass && m_decalPipelineState && m_decalAlbedoTexture && m_decalNormalTexture
@@ -3067,12 +4310,19 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         velEncoder->setCullMode(MTL::CullModeBack);
         velEncoder->setViewport(viewport);
 
-        Math::Matrix4x4 prevViewProjection = m_motionHistoryValid ? m_prevViewProjectionNoJitter : viewProjectionNoJitter;
+        bool velocityUseJitter = taaEnabled;
+        Math::Matrix4x4 currViewProjection = velocityUseJitter ? viewProjection : viewProjectionNoJitter;
+        Math::Matrix4x4 prevViewProjection = velocityUseJitter
+            ? (m_motionHistoryValid ? m_prevViewProjection : viewProjection)
+            : (m_motionHistoryValid ? m_prevViewProjectionNoJitter : viewProjectionNoJitter);
 
         const auto& velEntities = scene->getAllEntities();
         for (const auto& entityPtr : velEntities) {
             Entity* entity = entityPtr.get();
             if (!entity->isActiveInHierarchy()) {
+                continue;
+            }
+            if (shouldSkipEntity(entity)) {
                 continue;
             }
 
@@ -3109,7 +4359,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
             VelocityUniformsGPU velocityUniforms{};
             velocityUniforms.prevModelMatrix = entity->getTransform()->getPreviousWorldMatrix();
-            velocityUniforms.currViewProjection = viewProjectionNoJitter;
+            velocityUniforms.currViewProjection = currViewProjection;
             velocityUniforms.prevViewProjection = prevViewProjection;
 
             velEncoder->setVertexBuffer(vertexBuffer, 0, 0);
@@ -3320,6 +4570,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         if (!entity->isActiveInHierarchy()) {
             continue;
         }
+        if (shouldSkipEntity(entity)) {
+            continue;
+        }
         
         MeshRenderer* meshRenderer = entity->getComponent<MeshRenderer>();
         if (!meshRenderer || !meshRenderer->isEnabled()) {
@@ -3353,7 +4606,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             isTransparent = material->getRenderMode() == Material::RenderMode::Transparent
                 || material->getAlpha() < 0.999f;
         }
-        PipelineStateKey pipelineKey{true, true, true, isTransparent, isSkinned, m_outputHDR, static_cast<uint8_t>(m_msaaSamples)};
+        bool alphaToCoverage = material && material->getRenderMode() == Material::RenderMode::Cutout
+            && material->getAlphaToCoverage();
+        PipelineStateKey pipelineKey{true, true, true, isTransparent, isSkinned, false, alphaToCoverage, m_outputHDR, static_cast<uint8_t>(m_msaaSamples)};
         MTL::RenderPipelineState* pipelineState = getPipelineState(pipelineKey);
         if (!pipelineState) {
             continue;
@@ -3407,10 +4662,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 hasHeightTex ? 1.0f : 0.0f,
                 invertHeight ? 1.0f : 0.0f
             );
+            bool alphaClip = material->getRenderMode() == Material::RenderMode::Cutout;
+            float alphaCutoff = material->getAlphaCutoff();
             matUniforms.textureFlags3 = Math::Vector4(
                 hasORMTex ? 1.0f : 0.0f,
-                0.0f,
-                0.0f,
+                alphaClip ? 1.0f : 0.0f,
+                alphaCutoff,
                 0.0f
             );
             matUniforms.heightParams = Math::Vector4(
@@ -3419,8 +4676,46 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 48.0f,  // max layers
                 meshRenderer->getReceiveShadows() ? 1.0f : 0.0f
             );
+            Math::Vector3 windDir = material->getWindDirection();
+            matUniforms.foliageParams0 = Math::Vector4(
+                material->getWindStrength(),
+                material->getWindSpeed(),
+                material->getWindScale(),
+                material->getWindGust()
+            );
+            matUniforms.foliageParams1 = Math::Vector4(
+                material->getLodFadeStart(),
+                material->getLodFadeEnd(),
+                material->getBillboardStart(),
+                material->getBillboardEnd()
+            );
+            matUniforms.foliageParams2 = Math::Vector4(
+                material->getWindEnabled() ? 1.0f : 0.0f,
+                material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                material->getBillboardEnabled() ? 1.0f : 0.0f,
+                material->getDitherEnabled() ? 1.0f : 0.0f
+            );
+            matUniforms.foliageParams3 = Math::Vector4(
+                windDir.x, windDir.y, windDir.z, 0.0f
+            );
+            matUniforms.impostorParams0 = Math::Vector4(
+                material->getImpostorEnabled() ? 1.0f : 0.0f,
+                static_cast<float>(material->getImpostorRows()),
+                static_cast<float>(material->getImpostorCols()),
+                0.0f
+            );
             
             encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
+            if (!isSkinned) {
+                MeshUniformsGPU meshUniforms{};
+                Math::Vector3 boundsCenter = mesh->getBoundsCenter();
+                Math::Vector3 boundsSize = mesh->getBoundsSize();
+                meshUniforms.boundsCenter = Math::Vector4(boundsCenter.x, boundsCenter.y, boundsCenter.z, 0.0f);
+                meshUniforms.boundsSize = Math::Vector4(boundsSize.x, boundsSize.y, boundsSize.z, 0.0f);
+                meshUniforms.flags = Math::Vector4(0.0f);
+                encoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
+                encoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+            }
             
             // Bind textures (fall back to engine defaults)
             auto albedoTex = hasAlbedoTex ? material->getAlbedoTexture() : m_defaultWhiteTexture;
@@ -3511,6 +4806,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         if (m_clusterParamsBuffer) {
             encoder->setFragmentBuffer(m_clusterParamsBuffer, 0, 9);
         }
+        encoder->setCullMode(resolveCullMode(material.get()));
         
         // Draw
         encoder->drawIndexedPrimitives(
@@ -3525,6 +4821,393 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         m_stats.drawCalls++;
         m_stats.triangles += mesh->getIndices().size() / 3;
         m_stats.vertices += mesh->getVertices().size();
+    }
+
+    if (useGpuInstanceCulling && m_instanceCullBuffer && m_instanceIndirectBuffer) {
+        for (size_t i = 0; i < instancedBatches.size(); ++i) {
+            const auto& batch = instancedBatches[i];
+            if (!batch.mesh) {
+                continue;
+            }
+
+            MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(batch.mesh->getVertexBuffer());
+            MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(batch.mesh->getIndexBuffer());
+            if (!vertexBuffer || !indexBuffer) {
+                continue;
+            }
+
+            bool alphaToCoverage = batch.material && batch.material->getRenderMode() == Material::RenderMode::Cutout
+                && batch.material->getAlphaToCoverage();
+            PipelineStateKey pipelineKey{true, true, true, batch.isTransparent, false, true, alphaToCoverage, m_outputHDR, static_cast<uint8_t>(m_msaaSamples)};
+            MTL::RenderPipelineState* pipelineState = getPipelineState(pipelineKey);
+            if (!pipelineState) {
+                continue;
+            }
+            encoder->setRenderPipelineState(pipelineState);
+
+            MaterialUniformsGPU matUniforms{};
+            if (batch.material) {
+                matUniforms.albedo = batch.material->getAlbedo();
+                matUniforms.properties = Math::Vector4(
+                    batch.material->getMetallic(),
+                    batch.material->getRoughness(),
+                    batch.material->getAO(),
+                    batch.material->getNormalScale()
+                );
+                Math::Vector3 emis = batch.material->getEmission();
+                matUniforms.emission = Math::Vector4(
+                    emis.x, emis.y, emis.z,
+                    batch.material->getEmissionStrength()
+                );
+
+                Math::Vector2 tiling = batch.material->getUVTiling();
+                Math::Vector2 offset = batch.material->getUVOffset();
+                matUniforms.uvTilingOffset = Math::Vector4(tiling.x, tiling.y, offset.x, offset.y);
+
+                bool hasAlbedoTex = batch.material->getAlbedoTexture() != nullptr;
+                bool hasNormalTex = batch.material->getNormalTexture() != nullptr;
+                bool hasMetallicTex = batch.material->getMetallicTexture() != nullptr;
+                bool hasRoughnessTex = batch.material->getRoughnessTexture() != nullptr;
+                bool hasAOTex = batch.material->getAOTexture() != nullptr;
+                bool hasEmissionTex = batch.material->getEmissionTexture() != nullptr;
+                bool hasHeightTex = batch.material->getHeightTexture() != nullptr;
+                bool hasORMTex = batch.material->getORMTexture() != nullptr;
+                bool invertHeight = batch.material->getHeightInvert();
+
+                matUniforms.textureFlags = Math::Vector4(
+                    hasAlbedoTex ? 1.0f : 0.0f,
+                    hasNormalTex ? 1.0f : 0.0f,
+                    hasMetallicTex ? 1.0f : 0.0f,
+                    hasRoughnessTex ? 1.0f : 0.0f
+                );
+                matUniforms.textureFlags2 = Math::Vector4(
+                    hasAOTex ? 1.0f : 0.0f,
+                    hasEmissionTex ? 1.0f : 0.0f,
+                    hasHeightTex ? 1.0f : 0.0f,
+                    invertHeight ? 1.0f : 0.0f
+                );
+                bool alphaClip = batch.material->getRenderMode() == Material::RenderMode::Cutout;
+                float alphaCutoff = batch.material->getAlphaCutoff();
+                matUniforms.textureFlags3 = Math::Vector4(
+                    hasORMTex ? 1.0f : 0.0f,
+                    alphaClip ? 1.0f : 0.0f,
+                    alphaCutoff,
+                    0.0f
+                );
+                matUniforms.heightParams = Math::Vector4(
+                    batch.material->getHeightScale(),
+                    16.0f,
+                    48.0f,
+                    batch.receiveShadows ? 1.0f : 0.0f
+                );
+                Math::Vector3 windDir = batch.material->getWindDirection();
+                matUniforms.foliageParams0 = Math::Vector4(
+                    batch.material->getWindStrength(),
+                    batch.material->getWindSpeed(),
+                    batch.material->getWindScale(),
+                    batch.material->getWindGust()
+                );
+                matUniforms.foliageParams1 = Math::Vector4(
+                    batch.material->getLodFadeStart(),
+                    batch.material->getLodFadeEnd(),
+                    batch.material->getBillboardStart(),
+                    batch.material->getBillboardEnd()
+                );
+                matUniforms.foliageParams2 = Math::Vector4(
+                    batch.material->getWindEnabled() ? 1.0f : 0.0f,
+                    batch.material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                    batch.material->getBillboardEnabled() ? 1.0f : 0.0f,
+                    batch.material->getDitherEnabled() ? 1.0f : 0.0f
+                );
+                matUniforms.foliageParams3 = Math::Vector4(
+                    windDir.x, windDir.y, windDir.z, 0.0f
+                );
+
+                encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
+                MeshUniformsGPU meshUniforms{};
+                meshUniforms.boundsCenter = Math::Vector4(batch.boundsCenter.x, batch.boundsCenter.y, batch.boundsCenter.z, 0.0f);
+                meshUniforms.boundsSize = Math::Vector4(batch.boundsSize.x, batch.boundsSize.y, batch.boundsSize.z, 0.0f);
+                meshUniforms.flags = Math::Vector4(batch.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                encoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
+                encoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+
+                auto albedoTex = hasAlbedoTex ? batch.material->getAlbedoTexture() : m_defaultWhiteTexture;
+                auto normalTex = hasNormalTex ? batch.material->getNormalTexture() : m_defaultNormalTexture;
+                auto metallicTex = hasMetallicTex ? batch.material->getMetallicTexture() : m_defaultBlackTexture;
+                auto roughnessTex = hasRoughnessTex ? batch.material->getRoughnessTexture() : m_defaultWhiteTexture;
+                auto aoTex = hasAOTex ? batch.material->getAOTexture() : m_defaultWhiteTexture;
+                auto emissionTex = hasEmissionTex ? batch.material->getEmissionTexture() : m_defaultBlackTexture;
+                auto heightTex = hasHeightTex ? batch.material->getHeightTexture() : m_defaultHeightTexture;
+                auto ormTex = hasORMTex ? batch.material->getORMTexture() : m_defaultBlackTexture;
+
+                encoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 0);
+                encoder->setFragmentTexture(normalTex ? normalTex->getHandle() : nullptr, 1);
+                encoder->setFragmentTexture(metallicTex ? metallicTex->getHandle() : nullptr, 2);
+                encoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 3);
+                encoder->setFragmentTexture(aoTex ? aoTex->getHandle() : nullptr, 4);
+                encoder->setFragmentTexture(emissionTex ? emissionTex->getHandle() : nullptr, 5);
+                encoder->setFragmentTexture(heightTex ? heightTex->getHandle() : nullptr, 6);
+                encoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 16);
+
+                if (m_hasIBL && m_iblIrradiance && m_iblPrefiltered && m_iblBRDFLUT) {
+                    encoder->setFragmentTexture(m_iblIrradiance, 8);
+                    encoder->setFragmentTexture(m_iblPrefiltered, 9);
+                    encoder->setFragmentTexture(m_iblBRDFLUT, 10);
+                }
+
+                if (m_samplerState) {
+                    encoder->setFragmentSamplerState(m_samplerState, 0);
+                }
+            }
+
+            encoder->setVertexBuffer(vertexBuffer, 0, 0);
+            encoder->setVertexBuffer(m_instanceCullBuffer, batch.outputOffset * sizeof(InstanceDataGPU), 1);
+            encoder->setVertexBuffer(m_cameraUniformBuffer, 0, 2);
+
+            encoder->setFragmentBuffer(m_cameraUniformBuffer, 0, 0);
+            encoder->setFragmentBuffer(m_lightUniformBuffer, 0, 2);
+
+            if (m_lightGPUBuffer) {
+                encoder->setFragmentBuffer(m_lightGPUBuffer, 0, 4);
+            }
+            if (m_shadowGPUBuffer) {
+                encoder->setFragmentBuffer(m_shadowGPUBuffer, 0, 5);
+            }
+            if (m_lightCountBuffer) {
+                encoder->setFragmentBuffer(m_lightCountBuffer, 0, 6);
+            } else {
+                uint32_t zero = 0;
+                encoder->setFragmentBytes(&zero, sizeof(uint32_t), 6);
+            }
+            if (m_shadowPass) {
+                encoder->setFragmentTexture(m_shadowPass->getShadowAtlas(), 11);
+                const auto& cubes = m_shadowPass->getPointCubeTextures();
+                for (size_t j = 0; j < cubes.size() && j < 4; ++j) {
+                    if (cubes[j]) {
+                        encoder->setFragmentTexture(cubes[j], 12 + j);
+                    }
+                }
+            }
+            if (m_shadowSampler) {
+                encoder->setFragmentSamplerState(m_shadowSampler, 2);
+            }
+            if (m_clusterHeaderBuffer) {
+                encoder->setFragmentBuffer(m_clusterHeaderBuffer, 0, 7);
+            }
+            if (m_clusterIndexBuffer) {
+                encoder->setFragmentBuffer(m_clusterIndexBuffer, 0, 8);
+            }
+            if (m_clusterParamsBuffer) {
+                encoder->setFragmentBuffer(m_clusterParamsBuffer, 0, 9);
+            }
+            encoder->setCullMode(resolveCullMode(batch.material.get()));
+
+            encoder->drawIndexedPrimitives(
+                MTL::PrimitiveTypeTriangle,
+                MTL::IndexTypeUInt32,
+                indexBuffer,
+                0,
+                m_instanceIndirectBuffer,
+                i * sizeof(DrawIndexedIndirectArgs)
+            );
+
+            renderedCount += static_cast<int>(batch.inputCount);
+            m_stats.drawCalls++;
+            m_stats.triangles += (batch.mesh->getIndices().size() / 3) * batch.inputCount;
+            m_stats.vertices += batch.mesh->getVertices().size() * batch.inputCount;
+        }
+    } else {
+        for (const auto& draw : instancedDraws) {
+            if (!draw.mesh || draw.instanceCount == 0) {
+                continue;
+            }
+
+            MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(draw.mesh->getVertexBuffer());
+            MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(draw.mesh->getIndexBuffer());
+            if (!vertexBuffer || !indexBuffer) {
+                continue;
+            }
+
+            bool alphaToCoverage = draw.material && draw.material->getRenderMode() == Material::RenderMode::Cutout
+                && draw.material->getAlphaToCoverage();
+            PipelineStateKey pipelineKey{true, true, true, draw.isTransparent, false, true, alphaToCoverage, m_outputHDR, static_cast<uint8_t>(m_msaaSamples)};
+            MTL::RenderPipelineState* pipelineState = getPipelineState(pipelineKey);
+            if (!pipelineState) {
+                continue;
+            }
+            encoder->setRenderPipelineState(pipelineState);
+
+            MaterialUniformsGPU matUniforms{};
+            if (draw.material) {
+                matUniforms.albedo = draw.material->getAlbedo();
+                matUniforms.properties = Math::Vector4(
+                    draw.material->getMetallic(),
+                    draw.material->getRoughness(),
+                    draw.material->getAO(),
+                    draw.material->getNormalScale()
+                );
+                Math::Vector3 emis = draw.material->getEmission();
+                matUniforms.emission = Math::Vector4(
+                    emis.x, emis.y, emis.z,
+                    draw.material->getEmissionStrength()
+                );
+
+                Math::Vector2 tiling = draw.material->getUVTiling();
+                Math::Vector2 offset = draw.material->getUVOffset();
+                matUniforms.uvTilingOffset = Math::Vector4(tiling.x, tiling.y, offset.x, offset.y);
+
+                bool hasAlbedoTex = draw.material->getAlbedoTexture() != nullptr;
+                bool hasNormalTex = draw.material->getNormalTexture() != nullptr;
+                bool hasMetallicTex = draw.material->getMetallicTexture() != nullptr;
+                bool hasRoughnessTex = draw.material->getRoughnessTexture() != nullptr;
+                bool hasAOTex = draw.material->getAOTexture() != nullptr;
+                bool hasEmissionTex = draw.material->getEmissionTexture() != nullptr;
+                bool hasHeightTex = draw.material->getHeightTexture() != nullptr;
+                bool hasORMTex = draw.material->getORMTexture() != nullptr;
+                bool invertHeight = draw.material->getHeightInvert();
+
+                matUniforms.textureFlags = Math::Vector4(
+                    hasAlbedoTex ? 1.0f : 0.0f,
+                    hasNormalTex ? 1.0f : 0.0f,
+                    hasMetallicTex ? 1.0f : 0.0f,
+                    hasRoughnessTex ? 1.0f : 0.0f
+                );
+                matUniforms.textureFlags2 = Math::Vector4(
+                    hasAOTex ? 1.0f : 0.0f,
+                    hasEmissionTex ? 1.0f : 0.0f,
+                    hasHeightTex ? 1.0f : 0.0f,
+                    invertHeight ? 1.0f : 0.0f
+                );
+                bool alphaClip = draw.material->getRenderMode() == Material::RenderMode::Cutout;
+                float alphaCutoff = draw.material->getAlphaCutoff();
+                matUniforms.textureFlags3 = Math::Vector4(
+                    hasORMTex ? 1.0f : 0.0f,
+                    alphaClip ? 1.0f : 0.0f,
+                    alphaCutoff,
+                    0.0f
+                );
+                matUniforms.heightParams = Math::Vector4(
+                    draw.material->getHeightScale(),
+                    16.0f,
+                    48.0f,
+                    draw.receiveShadows ? 1.0f : 0.0f
+                );
+                Math::Vector3 windDir = draw.material->getWindDirection();
+                matUniforms.foliageParams0 = Math::Vector4(
+                    draw.material->getWindStrength(),
+                    draw.material->getWindSpeed(),
+                    draw.material->getWindScale(),
+                    draw.material->getWindGust()
+                );
+                matUniforms.foliageParams1 = Math::Vector4(
+                    draw.material->getLodFadeStart(),
+                    draw.material->getLodFadeEnd(),
+                    draw.material->getBillboardStart(),
+                    draw.material->getBillboardEnd()
+                );
+                matUniforms.foliageParams2 = Math::Vector4(
+                    draw.material->getWindEnabled() ? 1.0f : 0.0f,
+                    draw.material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                    draw.material->getBillboardEnabled() ? 1.0f : 0.0f,
+                    draw.material->getDitherEnabled() ? 1.0f : 0.0f
+                );
+                matUniforms.foliageParams3 = Math::Vector4(
+                    windDir.x, windDir.y, windDir.z, 0.0f
+                );
+
+                encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
+                MeshUniformsGPU meshUniforms{};
+                meshUniforms.boundsCenter = Math::Vector4(draw.boundsCenter.x, draw.boundsCenter.y, draw.boundsCenter.z, 0.0f);
+                meshUniforms.boundsSize = Math::Vector4(draw.boundsSize.x, draw.boundsSize.y, draw.boundsSize.z, 0.0f);
+                meshUniforms.flags = Math::Vector4(draw.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                encoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
+                encoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+
+                auto albedoTex = hasAlbedoTex ? draw.material->getAlbedoTexture() : m_defaultWhiteTexture;
+                auto normalTex = hasNormalTex ? draw.material->getNormalTexture() : m_defaultNormalTexture;
+                auto metallicTex = hasMetallicTex ? draw.material->getMetallicTexture() : m_defaultBlackTexture;
+                auto roughnessTex = hasRoughnessTex ? draw.material->getRoughnessTexture() : m_defaultWhiteTexture;
+                auto aoTex = hasAOTex ? draw.material->getAOTexture() : m_defaultWhiteTexture;
+                auto emissionTex = hasEmissionTex ? draw.material->getEmissionTexture() : m_defaultBlackTexture;
+                auto heightTex = hasHeightTex ? draw.material->getHeightTexture() : m_defaultHeightTexture;
+                auto ormTex = hasORMTex ? draw.material->getORMTexture() : m_defaultBlackTexture;
+
+                encoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 0);
+                encoder->setFragmentTexture(normalTex ? normalTex->getHandle() : nullptr, 1);
+                encoder->setFragmentTexture(metallicTex ? metallicTex->getHandle() : nullptr, 2);
+                encoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 3);
+                encoder->setFragmentTexture(aoTex ? aoTex->getHandle() : nullptr, 4);
+                encoder->setFragmentTexture(emissionTex ? emissionTex->getHandle() : nullptr, 5);
+                encoder->setFragmentTexture(heightTex ? heightTex->getHandle() : nullptr, 6);
+                encoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 16);
+
+                if (m_hasIBL && m_iblIrradiance && m_iblPrefiltered && m_iblBRDFLUT) {
+                    encoder->setFragmentTexture(m_iblIrradiance, 8);
+                    encoder->setFragmentTexture(m_iblPrefiltered, 9);
+                    encoder->setFragmentTexture(m_iblBRDFLUT, 10);
+                }
+
+                if (m_samplerState) {
+                    encoder->setFragmentSamplerState(m_samplerState, 0);
+                }
+            }
+
+            encoder->setVertexBuffer(vertexBuffer, 0, 0);
+            encoder->setVertexBuffer(m_instanceBuffer, draw.instanceOffset, 1);
+            encoder->setVertexBuffer(m_cameraUniformBuffer, 0, 2);
+
+            encoder->setFragmentBuffer(m_cameraUniformBuffer, 0, 0);
+            encoder->setFragmentBuffer(m_lightUniformBuffer, 0, 2);
+
+            if (m_lightGPUBuffer) {
+                encoder->setFragmentBuffer(m_lightGPUBuffer, 0, 4);
+            }
+            if (m_shadowGPUBuffer) {
+                encoder->setFragmentBuffer(m_shadowGPUBuffer, 0, 5);
+            }
+            if (m_lightCountBuffer) {
+                encoder->setFragmentBuffer(m_lightCountBuffer, 0, 6);
+            } else {
+                uint32_t zero = 0;
+                encoder->setFragmentBytes(&zero, sizeof(uint32_t), 6);
+            }
+            if (m_shadowPass) {
+                encoder->setFragmentTexture(m_shadowPass->getShadowAtlas(), 11);
+                const auto& cubes = m_shadowPass->getPointCubeTextures();
+                for (size_t i = 0; i < cubes.size() && i < 4; ++i) {
+                    if (cubes[i]) {
+                        encoder->setFragmentTexture(cubes[i], 12 + i);
+                    }
+                }
+            }
+            if (m_shadowSampler) {
+                encoder->setFragmentSamplerState(m_shadowSampler, 2);
+            }
+            if (m_clusterHeaderBuffer) {
+                encoder->setFragmentBuffer(m_clusterHeaderBuffer, 0, 7);
+            }
+            if (m_clusterIndexBuffer) {
+                encoder->setFragmentBuffer(m_clusterIndexBuffer, 0, 8);
+            }
+            if (m_clusterParamsBuffer) {
+                encoder->setFragmentBuffer(m_clusterParamsBuffer, 0, 9);
+            }
+            encoder->setCullMode(resolveCullMode(draw.material.get()));
+
+            encoder->drawIndexedPrimitives(
+                MTL::PrimitiveTypeTriangle,
+                draw.mesh->getIndices().size(),
+                MTL::IndexTypeUInt32,
+                indexBuffer,
+                0,
+                draw.instanceCount
+            );
+
+            renderedCount += static_cast<int>(draw.instanceCount);
+            m_stats.drawCalls++;
+            m_stats.triangles += (draw.mesh->getIndices().size() / 3) * draw.instanceCount;
+            m_stats.vertices += draw.mesh->getVertices().size() * draw.instanceCount;
+        }
     }
     
     static int frameCount = 0;
@@ -3672,7 +5355,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             feedback,
             m_taaHistoryValid ? 1.0f : 0.0f
         );
-        float useVelocity = (m_velocityTexture != nullptr) ? 1.0f : 0.0f;
+        float useVelocity = runVelocity ? 1.0f : 0.0f;
         taaParams.params1 = Math::Vector4(sharpness, useVelocity, 0.01f, 0.2f);
 
         MTL::RenderPassDescriptor* taaPass = MTL::RenderPassDescriptor::alloc()->init();
@@ -4143,6 +5826,195 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     renderPass->release();
 }
 
+std::shared_ptr<Texture2D> Renderer::bakeImpostorAtlas(Mesh* mesh,
+                                                       Material* material,
+                                                       uint32_t rows,
+                                                       uint32_t cols,
+                                                       uint32_t tileSize,
+                                                       std::string* outPath) {
+    if (!m_device || !m_commandQueue || !mesh || rows == 0 || cols == 0 || tileSize == 0) {
+        return nullptr;
+    }
+    if (!m_impostorBakePipeline) {
+        buildImpostorPipeline();
+    }
+    if (!m_impostorBakePipeline) {
+        return nullptr;
+    }
+    if (!mesh->isUploaded()) {
+        uploadMesh(mesh);
+    }
+
+    MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(mesh->getVertexBuffer());
+    MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(mesh->getIndexBuffer());
+    if (!vertexBuffer || !indexBuffer) {
+        return nullptr;
+    }
+
+    uint32_t width = cols * tileSize;
+    uint32_t height = rows * tileSize;
+
+    MTL::TextureDescriptor* colorDesc = MTL::TextureDescriptor::alloc()->init();
+    colorDesc->setTextureType(MTL::TextureType2D);
+    colorDesc->setWidth(width);
+    colorDesc->setHeight(height);
+    colorDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    colorDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    colorDesc->setStorageMode(MTL::StorageModeShared);
+    MTL::Texture* colorTex = m_device->newTexture(colorDesc);
+    colorDesc->release();
+
+    MTL::TextureDescriptor* depthDesc = MTL::TextureDescriptor::alloc()->init();
+    depthDesc->setTextureType(MTL::TextureType2D);
+    depthDesc->setWidth(width);
+    depthDesc->setHeight(height);
+    depthDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+    depthDesc->setUsage(MTL::TextureUsageRenderTarget);
+    depthDesc->setStorageMode(MTL::StorageModeShared);
+    MTL::Texture* depthTex = m_device->newTexture(depthDesc);
+    depthDesc->release();
+
+    if (!colorTex || !depthTex) {
+        if (colorTex) colorTex->release();
+        if (depthTex) depthTex->release();
+        return nullptr;
+    }
+
+    struct BakeParams {
+        Math::Matrix4x4 viewProjection;
+        Math::Vector4 albedo;
+        Math::Vector4 uvTilingOffset;
+        Math::Vector4 lightDirHasTex;
+    };
+
+    Math::Vector3 boundsCenter = mesh->getBoundsCenter();
+    Math::Vector3 boundsSize = mesh->getBoundsSize();
+    float radius = std::max(0.1f, std::max(boundsSize.x, std::max(boundsSize.y, boundsSize.z)) * 0.5f);
+    float orthoSize = radius * 1.2f;
+    float nearZ = 0.01f;
+    float farZ = radius * 6.0f;
+
+    MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::alloc()->init();
+    pass->colorAttachments()->object(0)->setTexture(colorTex);
+    pass->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
+    pass->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+    pass->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(0.0, 0.0, 0.0, 0.0));
+    pass->depthAttachment()->setTexture(depthTex);
+    pass->depthAttachment()->setLoadAction(MTL::LoadActionClear);
+    pass->depthAttachment()->setStoreAction(MTL::StoreActionDontCare);
+    pass->depthAttachment()->setClearDepth(1.0);
+
+    MTL::CommandBuffer* commandBuffer = m_commandQueue->commandBuffer();
+    MTL::RenderCommandEncoder* encoder = commandBuffer->renderCommandEncoder(pass);
+    encoder->setRenderPipelineState(m_impostorBakePipeline);
+    if (m_depthStencilState) {
+        encoder->setDepthStencilState(m_depthStencilState);
+    }
+    encoder->setCullMode(MTL::CullModeBack);
+
+    BakeParams params{};
+    if (material) {
+        params.albedo = material->getAlbedo();
+        Math::Vector2 tiling = material->getUVTiling();
+        Math::Vector2 offset = material->getUVOffset();
+        params.uvTilingOffset = Math::Vector4(tiling.x, tiling.y, offset.x, offset.y);
+    } else {
+        params.albedo = Math::Vector4(1.0f);
+        params.uvTilingOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
+    }
+    params.lightDirHasTex = Math::Vector4(0.3f, 0.8f, 0.4f, material && material->getAlbedoTexture() ? 1.0f : 0.0f);
+
+    auto albedoTex = material && material->getAlbedoTexture() ? material->getAlbedoTexture() : m_defaultWhiteTexture;
+    encoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 0);
+    if (m_samplerState) {
+        encoder->setFragmentSamplerState(m_samplerState, 0);
+    }
+    encoder->setVertexBuffer(vertexBuffer, 0, 0);
+
+    MTL::ScissorRect scissor{};
+    for (uint32_t row = 0; row < rows; ++row) {
+        for (uint32_t col = 0; col < cols; ++col) {
+            float azimuth = (static_cast<float>(col) + 0.5f) / static_cast<float>(cols) * Math::TWO_PI - Math::PI;
+            float elevation = (static_cast<float>(row) + 0.5f) / static_cast<float>(rows) * Math::PI - Math::HALF_PI;
+            float cosEl = std::cos(elevation);
+            Math::Vector3 dir(
+                std::sin(azimuth) * cosEl,
+                std::sin(elevation),
+                std::cos(azimuth) * cosEl
+            );
+            Math::Vector3 cameraPos = boundsCenter + dir * (radius * 2.5f);
+            Math::Matrix4x4 view = Math::Matrix4x4::LookAt(cameraPos, boundsCenter, Math::Vector3::Up);
+            Math::Matrix4x4 proj = Math::Matrix4x4::Orthographic(-orthoSize, orthoSize, -orthoSize, orthoSize, nearZ, farZ);
+            params.viewProjection = proj * view;
+
+            MTL::Viewport vp = {
+                static_cast<double>(col * tileSize),
+                static_cast<double>(row * tileSize),
+                static_cast<double>(tileSize),
+                static_cast<double>(tileSize),
+                0.0,
+                1.0
+            };
+            encoder->setViewport(vp);
+            scissor.x = col * tileSize;
+            scissor.y = row * tileSize;
+            scissor.width = tileSize;
+            scissor.height = tileSize;
+            encoder->setScissorRect(scissor);
+            encoder->setVertexBytes(&params, sizeof(BakeParams), 1);
+            encoder->setFragmentBytes(&params, sizeof(BakeParams), 0);
+            encoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
+                                           mesh->getIndices().size(),
+                                           MTL::IndexTypeUInt32,
+                                           indexBuffer,
+                                           0);
+        }
+    }
+
+    encoder->endEncoding();
+    pass->release();
+    commandBuffer->commit();
+    commandBuffer->waitUntilCompleted();
+
+    std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+    MTL::Region region = MTL::Region::Make2D(0, 0, width, height);
+    colorTex->getBytes(pixels.data(), width * 4, region, 0);
+
+    std::string outputPath;
+    AssetDatabase& db = AssetDatabase::getInstance();
+    std::string root = db.getRootPath();
+    if (root.empty()) {
+        root = std::filesystem::current_path().string();
+    }
+    std::filesystem::path outDir = std::filesystem::path(root) / "Assets" / "Generated" / "Impostors";
+    std::filesystem::create_directories(outDir);
+    auto sanitize = [](std::string name) {
+        for (char& c : name) {
+            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) {
+                c = '_';
+            }
+        }
+        return name;
+    };
+    std::string meshName = sanitize(mesh->getName().empty() ? "Mesh" : mesh->getName());
+    std::string matName = sanitize(material ? material->getName() : "Material");
+    outputPath = (outDir / (meshName + "_" + matName + "_impostor.png")).string();
+
+    stbi_write_png(outputPath.c_str(), static_cast<int>(width), static_cast<int>(height), 4, pixels.data(), static_cast<int>(width * 4));
+
+    if (outPath) {
+        *outPath = outputPath;
+    }
+
+    if (depthTex) depthTex->release();
+    if (colorTex) colorTex->release();
+
+    if (!m_textureLoader) {
+        return nullptr;
+    }
+    return m_textureLoader->loadTexture(outputPath, true, false);
+}
+
 void Renderer::renderSkybox(MTL::RenderCommandEncoder* encoder, Camera* camera) {
     if (!encoder || !camera || !m_skyboxPipelineState) {
         return;
@@ -4575,6 +6447,27 @@ void Renderer::shutdown() {
         m_prevSkinningBuffer = nullptr;
         m_prevSkinningBufferCapacity = 0;
     }
+    if (m_instanceBuffer) {
+        m_instanceBuffer->release();
+        m_instanceBuffer = nullptr;
+        m_instanceBufferCapacity = 0;
+        m_instanceBufferOffset = 0;
+    }
+    if (m_instanceCullBuffer) {
+        m_instanceCullBuffer->release();
+        m_instanceCullBuffer = nullptr;
+        m_instanceCullCapacity = 0;
+    }
+    if (m_instanceCountBuffer) {
+        m_instanceCountBuffer->release();
+        m_instanceCountBuffer = nullptr;
+        m_instanceCountCapacity = 0;
+    }
+    if (m_instanceIndirectBuffer) {
+        m_instanceIndirectBuffer->release();
+        m_instanceIndirectBuffer = nullptr;
+        m_instanceIndirectCapacity = 0;
+    }
     
     if (m_samplerState) {
         m_samplerState->release();
@@ -4587,6 +6480,10 @@ void Renderer::shutdown() {
     if (m_linearClampSampler) {
         m_linearClampSampler->release();
         m_linearClampSampler = nullptr;
+    }
+    if (m_pointClampSampler) {
+        m_pointClampSampler->release();
+        m_pointClampSampler = nullptr;
     }
     
     if (m_skyboxVertexBuffer) {

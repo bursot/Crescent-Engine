@@ -35,12 +35,18 @@ struct VertexOut {
     float3 tangent;
     float3 bitangent;
     float4 color;
+    float lodFade;
+    float billboardFade;
+    float billboardFlag;
 };
 
 struct PrepassOut {
     float4 position [[position]];
     float3 normalVS;
     float2 texCoord;
+    float lodFade;
+    float billboardFade;
+    float billboardFlag;
 };
 
 struct VelocityOut {
@@ -163,7 +169,7 @@ inline float3 reconstructViewPosition(float2 uv,
                                       constant CameraUniforms& camera) {
     float2 ndc = uvToNdc(uv);
     float4 clip = float4(ndc, depth, 1.0);
-    float4 view = camera.projectionMatrixNoJitterInverse * clip;
+    float4 view = camera.projectionMatrixInverse * clip;
     return view.xyz / max(view.w, 0.0001);
 }
 
@@ -172,6 +178,55 @@ inline float linearizeDepth(float depth, constant CameraUniforms& camera) {
     float b = camera.projectionMatrix[3][2];
     float viewZ = b / (-depth - a);
     return -viewZ;
+}
+
+inline float computeFade(float dist, float start, float end) {
+    float span = end - start;
+    if (span <= 0.0001) {
+        return 0.0;
+    }
+    return saturate((dist - start) / span);
+}
+
+inline float2 impostorAtlasUV(float2 baseUV,
+                              float3 toCamDir,
+                              float3x3 worldToLocal,
+                              constant MaterialUniforms& material) {
+    if (material.impostorParams0.x < 0.5) {
+        return baseUV;
+    }
+    float rows = max(material.impostorParams0.y, 1.0);
+    float cols = max(material.impostorParams0.z, 1.0);
+    float3 localDir = normalize(worldToLocal * toCamDir);
+    float azimuth = atan2(localDir.x, localDir.z);
+    float elevation = asin(clamp(localDir.y, -1.0, 1.0));
+    float u = azimuth / TWO_PI + 0.5;
+    float v = 1.0 - (elevation / PI + 0.5);
+    float col = clamp(floor(u * cols), 0.0, cols - 1.0);
+    float row = clamp(floor(v * rows), 0.0, rows - 1.0);
+    float2 scale = float2(1.0 / cols, 1.0 / rows);
+    float2 offset = float2(col, row) * scale;
+    return baseUV * scale + offset;
+}
+
+inline float3 applyWindOffset(float3 worldPos,
+                              float weight,
+                              constant MaterialUniforms& material,
+                              constant CameraUniforms& camera) {
+    if (material.foliageParams2.x < 0.5 || material.foliageParams0.x <= 0.0001) {
+        return worldPos;
+    }
+    float3 dir = material.foliageParams3.xyz;
+    if (dot(dir, dir) < 0.0001) {
+        dir = float3(1.0, 0.0, 0.0);
+    }
+    dir = normalize(dir);
+    float time = camera.cameraPositionTime.w;
+    float phase = dot(worldPos.xz, dir.xz) * material.foliageParams0.z + time * material.foliageParams0.y;
+    float sway = sin(phase) * material.foliageParams0.x;
+    float gust = sin(phase * 0.7 + time * material.foliageParams0.y * 0.5) * material.foliageParams0.w;
+    float offset = (sway + gust) * weight;
+    return worldPos + dir * offset;
 }
 
 inline float henyeyGreensteinPhase(float cosTheta, float g) {
@@ -617,14 +672,100 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
 vertex PrepassOut vertex_prepass(
     VertexIn in [[stage_in]],
     constant ModelUniforms& model [[buffer(1)]],
-    constant CameraUniforms& camera [[buffer(2)]]
+    constant CameraUniforms& camera [[buffer(2)]],
+    constant MaterialUniforms& material [[buffer(3)]],
+    constant MeshUniforms& mesh [[buffer(4)]]
 ) {
     PrepassOut out;
-    float4 worldPos = model.modelMatrix * float4(in.position, 1.0);
-    out.position = camera.viewProjectionMatrix * worldPos;
-    float3 worldNormal = normalize((model.normalMatrix * float4(in.normal, 0.0)).xyz);
+    float3 boundsCenter = mesh.boundsCenter.xyz;
+    float3 boundsSize = mesh.boundsSize.xyz;
+    float3 centerWS = (model.modelMatrix * float4(boundsCenter, 1.0)).xyz;
+    float dist = distance(camera.cameraPositionTime.xyz, centerWS);
+    float lodFade = (material.foliageParams2.y > 0.5) ? computeFade(dist, material.foliageParams1.x, material.foliageParams1.y) : 0.0;
+    float billboardFade = (material.foliageParams2.z > 0.5) ? computeFade(dist, material.foliageParams1.z, material.foliageParams1.w) : 0.0;
+
+    float weight = saturate(in.color.a);
+    float3 worldNormal = float3(0.0, 1.0, 0.0);
+    float3 worldPos = float3(0.0);
+    if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5) {
+        float3 windCenter = applyWindOffset(centerWS, weight, material, camera);
+        float3 toCam = normalize(camera.cameraPositionTime.xyz - windCenter);
+        float3 up = float3(0.0, 1.0, 0.0);
+        float3 right = normalize(cross(up, toCam));
+        float3 billUp = normalize(cross(toCam, right));
+        float3 axisX = model.modelMatrix[0].xyz;
+        float3 axisY = model.modelMatrix[1].xyz;
+        float3 axisZ = model.modelMatrix[2].xyz;
+        float uniformScale = max(length(axisX), max(length(axisY), length(axisZ)));
+        float width = max(boundsSize.x, boundsSize.z) * uniformScale;
+        float height = max(boundsSize.y, 0.0001) * uniformScale;
+        float2 quad = float2(in.position.x, in.position.z);
+        worldPos = windCenter + right * (quad.x * width) + billUp * (quad.y * height);
+        worldNormal = normalize(toCam);
+    } else {
+        float4 wp = model.modelMatrix * float4(in.position, 1.0);
+        wp.xyz = applyWindOffset(wp.xyz, weight, material, camera);
+        worldPos = wp.xyz;
+        worldNormal = normalize((model.normalMatrix * float4(in.normal, 0.0)).xyz);
+    }
+
+    out.position = camera.viewProjectionMatrix * float4(worldPos, 1.0);
     out.normalVS = normalize((camera.viewMatrix * float4(worldNormal, 0.0)).xyz);
     out.texCoord = in.texCoord;
+    out.lodFade = lodFade;
+    out.billboardFade = billboardFade;
+    out.billboardFlag = mesh.flags.x;
+    return out;
+}
+
+vertex PrepassOut vertex_prepass_instanced(
+    VertexIn in [[stage_in]],
+    const device InstanceData* instances [[buffer(1)]],
+    constant CameraUniforms& camera [[buffer(2)]],
+    constant MaterialUniforms& material [[buffer(3)]],
+    constant MeshUniforms& mesh [[buffer(4)]],
+    uint instanceId [[instance_id]]
+) {
+    PrepassOut out;
+    InstanceData inst = instances[instanceId];
+    float3 boundsCenter = mesh.boundsCenter.xyz;
+    float3 boundsSize = mesh.boundsSize.xyz;
+    float3 centerWS = (inst.modelMatrix * float4(boundsCenter, 1.0)).xyz;
+    float dist = distance(camera.cameraPositionTime.xyz, centerWS);
+    float lodFade = (material.foliageParams2.y > 0.5) ? computeFade(dist, material.foliageParams1.x, material.foliageParams1.y) : 0.0;
+    float billboardFade = (material.foliageParams2.z > 0.5) ? computeFade(dist, material.foliageParams1.z, material.foliageParams1.w) : 0.0;
+
+    float weight = saturate(in.color.a);
+    float3 worldNormal = float3(0.0, 1.0, 0.0);
+    float3 worldPos = float3(0.0);
+    if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5) {
+        float3 windCenter = applyWindOffset(centerWS, weight, material, camera);
+        float3 toCam = normalize(camera.cameraPositionTime.xyz - windCenter);
+        float3 up = float3(0.0, 1.0, 0.0);
+        float3 right = normalize(cross(up, toCam));
+        float3 billUp = normalize(cross(toCam, right));
+        float3 axisX = inst.modelMatrix[0].xyz;
+        float3 axisY = inst.modelMatrix[1].xyz;
+        float3 axisZ = inst.modelMatrix[2].xyz;
+        float uniformScale = max(length(axisX), max(length(axisY), length(axisZ)));
+        float width = max(boundsSize.x, boundsSize.z) * uniformScale;
+        float height = max(boundsSize.y, 0.0001) * uniformScale;
+        float2 quad = float2(in.position.x, in.position.z);
+        worldPos = windCenter + right * (quad.x * width) + billUp * (quad.y * height);
+        worldNormal = normalize(toCam);
+    } else {
+        float4 wp = inst.modelMatrix * float4(in.position, 1.0);
+        wp.xyz = applyWindOffset(wp.xyz, weight, material, camera);
+        worldPos = wp.xyz;
+        worldNormal = normalize((inst.normalMatrix * float4(in.normal, 0.0)).xyz);
+    }
+
+    out.position = camera.viewProjectionMatrix * float4(worldPos, 1.0);
+    out.normalVS = normalize((camera.viewMatrix * float4(worldNormal, 0.0)).xyz);
+    out.texCoord = in.texCoord;
+    out.lodFade = lodFade;
+    out.billboardFade = billboardFade;
+    out.billboardFlag = mesh.flags.x;
     return out;
 }
 
@@ -656,6 +797,9 @@ vertex PrepassOut vertex_prepass_skinned(
     float3 worldNormal = normalize(model3 * (skin3 * in.normal));
     out.normalVS = normalize((camera.viewMatrix * float4(worldNormal, 0.0)).xyz);
     out.texCoord = in.texCoord;
+    out.lodFade = 0.0;
+    out.billboardFade = 0.0;
+    out.billboardFlag = 0.0;
     return out;
 }
 
@@ -714,26 +858,137 @@ vertex VelocityOut vertex_velocity_skinned(
 vertex VertexOut vertex_main(
     VertexIn in [[stage_in]],
     constant ModelUniforms& model [[buffer(1)]],
-    constant CameraUniforms& camera [[buffer(2)]]
+    constant CameraUniforms& camera [[buffer(2)]],
+    constant MaterialUniforms& material [[buffer(3)]],
+    constant MeshUniforms& mesh [[buffer(4)]]
 ) {
     VertexOut out;
-    
-    // Transform to world space
-    float4 worldPos = model.modelMatrix * float4(in.position, 1.0);
-    out.worldPosition = worldPos.xyz;
-    
-    // Transform to clip space
-    out.position = camera.viewProjectionMatrix * worldPos;
-    
-    // Transform normal, tangent, bitangent to world space
-    out.normal = normalize((model.normalMatrix * float4(in.normal, 0.0)).xyz);
-    out.tangent = normalize((model.modelMatrix * float4(in.tangent, 0.0)).xyz);
-    out.bitangent = normalize((model.modelMatrix * float4(in.bitangent, 0.0)).xyz);
-    
-    // Pass through
-    out.texCoord = in.texCoord;
+    float3 boundsCenter = mesh.boundsCenter.xyz;
+    float3 boundsSize = mesh.boundsSize.xyz;
+    float3 centerWS = (model.modelMatrix * float4(boundsCenter, 1.0)).xyz;
+    float dist = distance(camera.cameraPositionTime.xyz, centerWS);
+    float lodFade = (material.foliageParams2.y > 0.5) ? computeFade(dist, material.foliageParams1.x, material.foliageParams1.y) : 0.0;
+    float billboardFade = (material.foliageParams2.z > 0.5) ? computeFade(dist, material.foliageParams1.z, material.foliageParams1.w) : 0.0;
+
+    float weight = saturate(in.color.a);
+    float3 worldNormal = float3(0.0, 1.0, 0.0);
+    float3 worldPos = float3(0.0);
+    float3 tangent = float3(1.0, 0.0, 0.0);
+    float3 bitangent = float3(0.0, 0.0, 1.0);
+    float3 toCamDir = float3(0.0, 0.0, 1.0);
+    if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5) {
+        float3 windCenter = applyWindOffset(centerWS, weight, material, camera);
+        float3 toCam = normalize(camera.cameraPositionTime.xyz - windCenter);
+        toCamDir = toCam;
+        float3 up = float3(0.0, 1.0, 0.0);
+        float3 right = normalize(cross(up, toCam));
+        float3 billUp = normalize(cross(toCam, right));
+        float3 axisX = model.modelMatrix[0].xyz;
+        float3 axisY = model.modelMatrix[1].xyz;
+        float3 axisZ = model.modelMatrix[2].xyz;
+        float uniformScale = max(length(axisX), max(length(axisY), length(axisZ)));
+        float width = max(boundsSize.x, boundsSize.z) * uniformScale;
+        float height = max(boundsSize.y, 0.0001) * uniformScale;
+        float2 quad = float2(in.position.x, in.position.z);
+        worldPos = windCenter + right * (quad.x * width) + billUp * (quad.y * height);
+        worldNormal = normalize(toCam);
+        tangent = right;
+        bitangent = billUp;
+    } else {
+        float4 wp = model.modelMatrix * float4(in.position, 1.0);
+        wp.xyz = applyWindOffset(wp.xyz, weight, material, camera);
+        worldPos = wp.xyz;
+        worldNormal = normalize((model.normalMatrix * float4(in.normal, 0.0)).xyz);
+        tangent = normalize((model.modelMatrix * float4(in.tangent, 0.0)).xyz);
+        bitangent = normalize((model.modelMatrix * float4(in.bitangent, 0.0)).xyz);
+    }
+
+    out.worldPosition = worldPos;
+    out.position = camera.viewProjectionMatrix * float4(worldPos, 1.0);
+    out.normal = worldNormal;
+    out.tangent = tangent;
+    out.bitangent = bitangent;
+    float2 texCoord = in.texCoord;
+    if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5 && material.impostorParams0.x > 0.5) {
+        float3x3 model3 = float3x3(model.modelMatrix[0].xyz, model.modelMatrix[1].xyz, model.modelMatrix[2].xyz);
+        float3x3 worldToLocal = transpose(model3);
+        texCoord = impostorAtlasUV(texCoord, toCamDir, worldToLocal, material);
+    }
+    out.texCoord = texCoord;
     out.color = in.color;
-    
+    out.lodFade = lodFade;
+    out.billboardFade = billboardFade;
+    out.billboardFlag = mesh.flags.x;
+
+    return out;
+}
+
+vertex VertexOut vertex_main_instanced(
+    VertexIn in [[stage_in]],
+    const device InstanceData* instances [[buffer(1)]],
+    constant CameraUniforms& camera [[buffer(2)]],
+    constant MaterialUniforms& material [[buffer(3)]],
+    constant MeshUniforms& mesh [[buffer(4)]],
+    uint instanceId [[instance_id]]
+) {
+    VertexOut out;
+    InstanceData inst = instances[instanceId];
+    float3 boundsCenter = mesh.boundsCenter.xyz;
+    float3 boundsSize = mesh.boundsSize.xyz;
+    float3 centerWS = (inst.modelMatrix * float4(boundsCenter, 1.0)).xyz;
+    float dist = distance(camera.cameraPositionTime.xyz, centerWS);
+    float lodFade = (material.foliageParams2.y > 0.5) ? computeFade(dist, material.foliageParams1.x, material.foliageParams1.y) : 0.0;
+    float billboardFade = (material.foliageParams2.z > 0.5) ? computeFade(dist, material.foliageParams1.z, material.foliageParams1.w) : 0.0;
+
+    float weight = saturate(in.color.a);
+    float3 worldNormal = float3(0.0, 1.0, 0.0);
+    float3 worldPos = float3(0.0);
+    float3 tangent = float3(1.0, 0.0, 0.0);
+    float3 bitangent = float3(0.0, 0.0, 1.0);
+    float3 toCamDir = float3(0.0, 0.0, 1.0);
+    if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5) {
+        float3 windCenter = applyWindOffset(centerWS, weight, material, camera);
+        float3 toCam = normalize(camera.cameraPositionTime.xyz - windCenter);
+        toCamDir = toCam;
+        float3 up = float3(0.0, 1.0, 0.0);
+        float3 right = normalize(cross(up, toCam));
+        float3 billUp = normalize(cross(toCam, right));
+        float3 axisX = inst.modelMatrix[0].xyz;
+        float3 axisY = inst.modelMatrix[1].xyz;
+        float3 axisZ = inst.modelMatrix[2].xyz;
+        float uniformScale = max(length(axisX), max(length(axisY), length(axisZ)));
+        float width = max(boundsSize.x, boundsSize.z) * uniformScale;
+        float height = max(boundsSize.y, 0.0001) * uniformScale;
+        float2 quad = float2(in.position.x, in.position.z);
+        worldPos = windCenter + right * (quad.x * width) + billUp * (quad.y * height);
+        worldNormal = normalize(toCam);
+        tangent = right;
+        bitangent = billUp;
+    } else {
+        float4 wp = inst.modelMatrix * float4(in.position, 1.0);
+        wp.xyz = applyWindOffset(wp.xyz, weight, material, camera);
+        worldPos = wp.xyz;
+        worldNormal = normalize((inst.normalMatrix * float4(in.normal, 0.0)).xyz);
+        tangent = normalize((inst.modelMatrix * float4(in.tangent, 0.0)).xyz);
+        bitangent = normalize((inst.modelMatrix * float4(in.bitangent, 0.0)).xyz);
+    }
+
+    out.worldPosition = worldPos;
+    out.position = camera.viewProjectionMatrix * float4(worldPos, 1.0);
+    out.normal = worldNormal;
+    out.tangent = tangent;
+    out.bitangent = bitangent;
+    float2 texCoord = in.texCoord;
+    if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5 && material.impostorParams0.x > 0.5) {
+        float3x3 model3 = float3x3(inst.modelMatrix[0].xyz, inst.modelMatrix[1].xyz, inst.modelMatrix[2].xyz);
+        float3x3 worldToLocal = transpose(model3);
+        texCoord = impostorAtlasUV(texCoord, toCamDir, worldToLocal, material);
+    }
+    out.texCoord = texCoord;
+    out.color = in.color;
+    out.lodFade = lodFade;
+    out.billboardFade = billboardFade;
+    out.billboardFlag = mesh.flags.x;
     return out;
 }
 
@@ -771,6 +1026,9 @@ vertex VertexOut vertex_skinned(
 
     out.texCoord = in.texCoord;
     out.color = in.color;
+    out.lodFade = 0.0;
+    out.billboardFade = 0.0;
+    out.billboardFlag = 0.0;
 
     return out;
 }
@@ -784,10 +1042,34 @@ fragment float4 fragment_prepass(
     constant MaterialUniforms& material [[buffer(0)]],
     texture2d<float> roughnessMap [[texture(0)]],
     texture2d<float> ormMap [[texture(1)]],
+    texture2d<float> albedoMap [[texture(2)]],
     sampler textureSampler [[sampler(0)]]
 ) {
     float3 n = normalize(in.normalVS);
     float2 uv = in.texCoord * material.uvTilingOffset.xy + material.uvTilingOffset.zw;
+    float alpha = material.albedo.a;
+    if (material.textureFlags.x > 0.5) {
+        alpha *= albedoMap.sample(textureSampler, uv).a;
+    }
+    if (material.textureFlags3.y > 0.5 && alpha < material.textureFlags3.z) {
+        discard_fragment();
+    }
+    if (material.foliageParams2.w > 0.5) {
+        float fade = 1.0;
+        if (material.foliageParams2.z > 0.5) {
+            fade *= (in.billboardFlag > 0.5) ? in.billboardFade : (1.0 - in.billboardFade);
+        }
+        if (material.foliageParams2.y > 0.5) {
+            fade *= (1.0 - in.lodFade);
+        }
+        if (fade < 0.999) {
+            float2 p = floor(in.position.xy);
+            float noise = fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+            if (noise > fade) {
+                discard_fragment();
+            }
+        }
+    }
     float roughness = clamp(material.properties.y, 0.04, 1.0);
     if (material.textureFlags3.x > 0.5) {
         float3 orm = ormMap.sample(textureSampler, uv).rgb;
@@ -817,6 +1099,153 @@ fragment float4 fragment_velocity(
                            1.0 - (prevNdc.y * 0.5 + 0.5));
     float2 velocity = currUV - prevUV;
     return float4(velocity, 0.0, 1.0);
+}
+
+// ========================================================================
+// INSTANCE GPU CULLING
+// ========================================================================
+
+kernel void hzb_init(depth2d<float, access::sample> depthTex [[texture(0)]],
+                     texture2d<float, access::write> hzbTex [[texture(1)]],
+                     sampler depthSampler [[sampler(0)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= hzbTex.get_width() || gid.y >= hzbTex.get_height()) {
+        return;
+    }
+
+    float2 texSize = float2(hzbTex.get_width(), hzbTex.get_height());
+    float2 uv = (float2(gid) + 0.5) / texSize;
+    float depth = depthTex.sample(depthSampler, uv);
+    hzbTex.write(depth, gid);
+}
+
+kernel void hzb_downsample(texture2d<float, access::read> srcTex [[texture(0)]],
+                           texture2d<float, access::write> dstTex [[texture(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dstTex.get_width() || gid.y >= dstTex.get_height()) {
+        return;
+    }
+
+    uint2 base = gid * 2;
+    uint srcWidth = srcTex.get_width();
+    uint srcHeight = srcTex.get_height();
+    uint2 p0 = uint2(min(base.x, srcWidth - 1), min(base.y, srcHeight - 1));
+    uint2 p1 = uint2(min(base.x + 1, srcWidth - 1), min(base.y, srcHeight - 1));
+    uint2 p2 = uint2(min(base.x, srcWidth - 1), min(base.y + 1, srcHeight - 1));
+    uint2 p3 = uint2(min(base.x + 1, srcWidth - 1), min(base.y + 1, srcHeight - 1));
+
+    float d0 = srcTex.read(p0).r;
+    float d1 = srcTex.read(p1).r;
+    float d2 = srcTex.read(p2).r;
+    float d3 = srcTex.read(p3).r;
+    float maxDepth = max(max(d0, d1), max(d2, d3));
+    dstTex.write(maxDepth, gid);
+}
+
+kernel void instance_cull(const device InstanceData* inInstances [[buffer(0)]],
+                          device InstanceData* outInstances [[buffer(1)]],
+                          device atomic_uint* counters [[buffer(2)]],
+                          constant InstanceCullParams& params [[buffer(3)]],
+                          uint tid [[thread_position_in_grid]]) {
+    if (tid >= params.instanceCount) {
+        return;
+    }
+
+    InstanceData inst = inInstances[params.inputOffset + tid];
+    float3 worldCenter = (inst.modelMatrix * float4(params.boundsCenterRadius.xyz, 1.0)).xyz;
+
+    float3 axisX = inst.modelMatrix[0].xyz;
+    float3 axisY = inst.modelMatrix[1].xyz;
+    float3 axisZ = inst.modelMatrix[2].xyz;
+    float maxScale = max(length(axisX), max(length(axisY), length(axisZ)));
+    float radius = params.boundsCenterRadius.w * maxScale;
+
+    for (uint i = 0; i < 6; ++i) {
+        float4 p = params.frustumPlanes[i];
+        float d = dot(p, float4(worldCenter, 1.0));
+        if (d < -radius) {
+            return;
+        }
+    }
+
+    uint idx = atomic_fetch_add_explicit(&counters[0], 1, memory_order_relaxed);
+    outInstances[params.outputOffset + idx] = inst;
+}
+
+kernel void instance_cull_hzb(const device InstanceData* inInstances [[buffer(0)]],
+                              device InstanceData* outInstances [[buffer(1)]],
+                              device atomic_uint* counters [[buffer(2)]],
+                              constant InstanceCullParams& params [[buffer(3)]],
+                              constant CameraUniforms& camera [[buffer(4)]],
+                              texture2d<float, access::read> hzbTex [[texture(0)]],
+                              uint tid [[thread_position_in_grid]]) {
+    if (tid >= params.instanceCount) {
+        return;
+    }
+
+    InstanceData inst = inInstances[params.inputOffset + tid];
+    float3 worldCenter = (inst.modelMatrix * float4(params.boundsCenterRadius.xyz, 1.0)).xyz;
+
+    float3 axisX = inst.modelMatrix[0].xyz;
+    float3 axisY = inst.modelMatrix[1].xyz;
+    float3 axisZ = inst.modelMatrix[2].xyz;
+    float maxScale = max(length(axisX), max(length(axisY), length(axisZ)));
+    float radius = params.boundsCenterRadius.w * maxScale;
+
+    for (uint i = 0; i < 6; ++i) {
+        float4 p = params.frustumPlanes[i];
+        float d = dot(p, float4(worldCenter, 1.0));
+        if (d < -radius) {
+            return;
+        }
+    }
+
+    float4 clipCenter = camera.viewProjectionMatrix * float4(worldCenter, 1.0);
+    if (clipCenter.w <= 0.0001) {
+        return;
+    }
+
+    float3 ndc = clipCenter.xyz / clipCenter.w;
+    float2 uv = float2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        uint idx = atomic_fetch_add_explicit(&counters[0], 1, memory_order_relaxed);
+        outInstances[params.outputOffset + idx] = inst;
+        return;
+    }
+
+    float3 viewPos = (camera.viewMatrix * float4(worldCenter, 1.0)).xyz;
+    float viewZ = max(-viewPos.z, 0.0001);
+    float3 nearPos = float3(viewPos.x, viewPos.y, viewPos.z + radius);
+    float4 clipNear = camera.projectionMatrix * float4(nearPos, 1.0);
+    float depthNear = clipNear.z / max(clipNear.w, 0.0001);
+
+    float2 projScale = float2(camera.projectionMatrix[0][0], camera.projectionMatrix[1][1]);
+    float2 ndcRadius = (radius / viewZ) * projScale;
+    float radiusPixels = max(abs(ndcRadius.x) * params.screenSize.x * 0.5,
+                             abs(ndcRadius.y) * params.screenSize.y * 0.5);
+    float lod = clamp(floor(log2(max(radiusPixels, 1.0))), 0.0, float(max(params.hzbMipCount, 1u) - 1));
+    uint mipLevel = uint(lod);
+
+    uint mipWidth = max(1u, hzbTex.get_width(mipLevel));
+    uint mipHeight = max(1u, hzbTex.get_height(mipLevel));
+    float2 texelF = clamp(uv * float2(mipWidth, mipHeight), float2(0.0), float2(mipWidth - 1, mipHeight - 1));
+    uint2 texel = uint2(texelF);
+    float hzbDepth = hzbTex.read(texel, mipLevel).r;
+
+    constexpr float kDepthBias = 0.001;
+    if (depthNear > hzbDepth + kDepthBias) {
+        return;
+    }
+
+    uint idx = atomic_fetch_add_explicit(&counters[0], 1, memory_order_relaxed);
+    outInstances[params.outputOffset + idx] = inst;
+}
+
+kernel void instance_build_indirect(const device atomic_uint* counters [[buffer(0)]],
+                                    device DrawIndexedIndirectArgs* args [[buffer(1)]],
+                                    uint gid [[thread_position_in_grid]]) {
+    uint count = atomic_load_explicit(&counters[gid], memory_order_relaxed);
+    args[gid].instanceCount = count;
 }
 
 fragment float4 ssao_fragment(
@@ -1432,7 +1861,7 @@ kernel void fog_volume_build(
 
     float sunIntensity = clamp(params.sunDirIntensity.w, 0.0, 10.0);
     if (sunIntensity > 0.001) {
-        float3 viewDirWorld = normalize(worldPos - camera.cameraPosition);
+        float3 viewDirWorld = normalize(worldPos - camera.cameraPositionTime.xyz);
         float3 sunDir = normalize(-params.sunDirIntensity.xyz);
         float cosTheta = clamp(dot(viewDirWorld, sunDir), -1.0, 1.0);
         float g = clamp(params.misc.y, 0.0, 0.9);
@@ -1590,7 +2019,7 @@ fragment float4 fragment_main(
     sampler environmentSampler [[sampler(1)]],
     sampler shadowSampler [[sampler(2)]]
 ) {
-    float3 Vworld = normalize(camera.cameraPosition - in.worldPosition);
+    float3 Vworld = normalize(camera.cameraPositionTime.xyz - in.worldPosition);
     float3 viewPos = (camera.viewMatrix * float4(in.worldPosition, 1.0)).xyz;
     float3 Vview = normalize(-viewPos);
     float3 T = normalize(in.tangent);
@@ -1634,6 +2063,25 @@ fragment float4 fragment_main(
         albedo *= albedoSample.rgb;
     }
     float alpha = material.albedo.a * (material.textureFlags.x > 0.5 ? albedoSample.a : 1.0);
+    if (material.textureFlags3.y > 0.5 && alpha < material.textureFlags3.z) {
+        discard_fragment();
+    }
+    if (material.foliageParams2.w > 0.5) {
+        float fade = 1.0;
+        if (material.foliageParams2.z > 0.5) {
+            fade *= (in.billboardFlag > 0.5) ? in.billboardFade : (1.0 - in.billboardFade);
+        }
+        if (material.foliageParams2.y > 0.5) {
+            fade *= (1.0 - in.lodFade);
+        }
+        if (fade < 0.999) {
+            float2 p = floor(in.position.xy);
+            float noise = fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+            if (noise > fade) {
+                discard_fragment();
+            }
+        }
+    }
     
     // Metallic/Roughness/AO
     float metallic = material.properties.x;
@@ -1702,7 +2150,7 @@ fragment float4 fragment_main(
     }
 
     float3 Nview = normalize((camera.viewMatrix * float4(N, 0.0)).xyz);
-    float3 V = normalize(camera.cameraPosition - in.worldPosition);
+    float3 V = normalize(camera.cameraPositionTime.xyz - in.worldPosition);
     
     // Calculate reflectance at normal incidence (dielectric vs metal)
     float3 F0 = float3(0.04);

@@ -17,6 +17,7 @@
 #include "../Input/InputManager.hpp"
 #include "../Animation/AnimationClip.hpp"
 #include "../Components/ModelMeshReference.hpp"
+#include "../Components/HLODProxy.hpp"
 #include "../Components/PrimitiveMesh.hpp"
 #include "../Components/Light.hpp"
 #include "../Components/Decal.hpp"
@@ -296,6 +297,23 @@ json SerializeMaterial(const Material& material) {
     j["alphaCutoff"] = material.getAlphaCutoff();
     j["cullMode"] = static_cast<int>(material.getCullMode());
     j["twoSided"] = material.isTwoSided();
+    j["alphaToCoverage"] = material.getAlphaToCoverage();
+    j["windEnabled"] = material.getWindEnabled();
+    j["windStrength"] = material.getWindStrength();
+    j["windSpeed"] = material.getWindSpeed();
+    j["windScale"] = material.getWindScale();
+    j["windGust"] = material.getWindGust();
+    j["windDirection"] = Vec3ToJson(material.getWindDirection());
+    j["lodFadeEnabled"] = material.getLodFadeEnabled();
+    j["lodFadeStart"] = material.getLodFadeStart();
+    j["lodFadeEnd"] = material.getLodFadeEnd();
+    j["ditherEnabled"] = material.getDitherEnabled();
+    j["billboardEnabled"] = material.getBillboardEnabled();
+    j["billboardStart"] = material.getBillboardStart();
+    j["billboardEnd"] = material.getBillboardEnd();
+    j["impostorEnabled"] = material.getImpostorEnabled();
+    j["impostorRows"] = material.getImpostorRows();
+    j["impostorCols"] = material.getImpostorCols();
 
     json textures = json::object();
     auto pushPath = [&textures](const char* key, const std::shared_ptr<Texture2D>& tex, const char* typeKey) {
@@ -318,6 +336,99 @@ json SerializeMaterial(const Material& material) {
     }
 
     return j;
+}
+
+json SerializeMeshData(const Mesh& mesh) {
+    json j;
+    const auto& vertices = mesh.getVertices();
+    const auto& indices = mesh.getIndices();
+    const auto& submeshes = mesh.getSubmeshes();
+
+    json verts = json::array();
+    for (const auto& v : vertices) {
+        verts.push_back({
+            v.position.x, v.position.y, v.position.z,
+            v.normal.x, v.normal.y, v.normal.z,
+            v.texCoord.x, v.texCoord.y,
+            v.tangent.x, v.tangent.y, v.tangent.z,
+            v.bitangent.x, v.bitangent.y, v.bitangent.z,
+            v.color.x, v.color.y, v.color.z, v.color.w
+        });
+    }
+
+    json idx = json::array();
+    for (auto i : indices) {
+        idx.push_back(i);
+    }
+
+    json subs = json::array();
+    for (const auto& sm : submeshes) {
+        subs.push_back({
+            {"start", sm.indexStart},
+            {"count", sm.indexCount},
+            {"material", sm.materialIndex}
+        });
+    }
+
+    j["vertices"] = verts;
+    j["indices"] = idx;
+    j["submeshes"] = subs;
+    j["boundsMin"] = Vec3ToJson(mesh.getBoundsMin());
+    j["boundsMax"] = Vec3ToJson(mesh.getBoundsMax());
+    return j;
+}
+
+std::shared_ptr<Mesh> DeserializeMeshData(const json& j) {
+    if (!j.is_object() || !j.contains("vertices") || !j.contains("indices")) {
+        return nullptr;
+    }
+
+    const json& verts = j["vertices"];
+    const json& idx = j["indices"];
+    if (!verts.is_array() || !idx.is_array()) {
+        return nullptr;
+    }
+
+    std::vector<Vertex> vertices;
+    vertices.reserve(verts.size());
+    for (const auto& entry : verts) {
+        if (!entry.is_array() || entry.size() < 18) {
+            continue;
+        }
+        Vertex v;
+        v.position = Math::Vector3(entry[0], entry[1], entry[2]);
+        v.normal = Math::Vector3(entry[3], entry[4], entry[5]);
+        v.texCoord = Math::Vector2(entry[6], entry[7]);
+        v.tangent = Math::Vector3(entry[8], entry[9], entry[10]);
+        v.bitangent = Math::Vector3(entry[11], entry[12], entry[13]);
+        v.color = Math::Vector4(entry[14], entry[15], entry[16], entry[17]);
+        vertices.push_back(v);
+    }
+
+    std::vector<uint32_t> indices;
+    indices.reserve(idx.size());
+    for (const auto& entry : idx) {
+        indices.push_back(entry.get<uint32_t>());
+    }
+
+    std::vector<Submesh> submeshes;
+    if (j.contains("submeshes") && j["submeshes"].is_array()) {
+        for (const auto& sm : j["submeshes"]) {
+            Submesh sub;
+            sub.indexStart = sm.value("start", 0u);
+            sub.indexCount = sm.value("count", 0u);
+            sub.materialIndex = sm.value("material", 0u);
+            submeshes.push_back(sub);
+        }
+    }
+
+    auto mesh = std::make_shared<Mesh>();
+    mesh->setVertices(vertices);
+    mesh->setIndices(indices);
+    if (!submeshes.empty()) {
+        mesh->setSubmeshes(submeshes);
+    }
+    return mesh;
 }
 
 SceneEnvironmentSettings EnvironmentFromRenderer(Renderer* renderer) {
@@ -729,6 +840,25 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
     material->setAlphaCutoff(j.value("alphaCutoff", material->getAlphaCutoff()));
     material->setCullMode(static_cast<Material::CullMode>(j.value("cullMode", static_cast<int>(material->getCullMode()))));
     material->setTwoSided(j.value("twoSided", material->isTwoSided()));
+    material->setAlphaToCoverage(j.value("alphaToCoverage", material->getAlphaToCoverage()));
+    material->setWindEnabled(j.value("windEnabled", material->getWindEnabled()));
+    material->setWindStrength(j.value("windStrength", material->getWindStrength()));
+    material->setWindSpeed(j.value("windSpeed", material->getWindSpeed()));
+    material->setWindScale(j.value("windScale", material->getWindScale()));
+    material->setWindGust(j.value("windGust", material->getWindGust()));
+    if (j.contains("windDirection")) {
+        material->setWindDirection(JsonToVec3(j["windDirection"], material->getWindDirection()));
+    }
+    material->setLodFadeEnabled(j.value("lodFadeEnabled", material->getLodFadeEnabled()));
+    material->setLodFadeStart(j.value("lodFadeStart", material->getLodFadeStart()));
+    material->setLodFadeEnd(j.value("lodFadeEnd", material->getLodFadeEnd()));
+    material->setDitherEnabled(j.value("ditherEnabled", material->getDitherEnabled()));
+    material->setBillboardEnabled(j.value("billboardEnabled", material->getBillboardEnabled()));
+    material->setBillboardStart(j.value("billboardStart", material->getBillboardStart()));
+    material->setBillboardEnd(j.value("billboardEnd", material->getBillboardEnd()));
+    material->setImpostorEnabled(j.value("impostorEnabled", material->getImpostorEnabled()));
+    material->setImpostorRows(j.value("impostorRows", material->getImpostorRows()));
+    material->setImpostorCols(j.value("impostorCols", material->getImpostorCols()));
 
     if (j.contains("textures") && j["textures"].is_object()) {
         const json& t = j["textures"];
@@ -1070,6 +1200,33 @@ void ApplyEntityComponents(Entity* entity,
                 if (skinnedRenderer) {
                     skinnedRenderer->setMaterial(static_cast<uint32_t>(i), material);
                 }
+            }
+        }
+    }
+
+    if (components.contains("HLODProxy")) {
+        const json& h = components["HLODProxy"];
+        HLODProxy* proxy = entity->getComponent<HLODProxy>();
+        if (!proxy) {
+            proxy = entity->addComponent<HLODProxy>();
+        }
+        proxy->setEnabled(h.value("enabled", proxy->isEnabled()));
+        proxy->setLodStart(h.value("lodStart", proxy->getLodStart()));
+        proxy->setLodEnd(h.value("lodEnd", proxy->getLodEnd()));
+        if (h.contains("sources") && h["sources"].is_array()) {
+            std::vector<std::string> sources;
+            for (const auto& entry : h["sources"]) {
+                sources.push_back(entry.get<std::string>());
+            }
+            proxy->setSourceUuids(sources);
+        }
+        if (h.contains("mesh")) {
+            auto mesh = DeserializeMeshData(h["mesh"]);
+            if (mesh) {
+                if (!meshRenderer) {
+                    meshRenderer = entity->addComponent<MeshRenderer>();
+                }
+                meshRenderer->setMesh(mesh);
             }
         }
     }
@@ -1602,6 +1759,23 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 skinnedData["clipEvents"] = clipEvents;
             }
             components["SkinnedMeshRenderer"] = skinnedData;
+        }
+
+        if (auto* hlod = entity->getComponent<HLODProxy>()) {
+            json hlodData = {
+                {"enabled", hlod->isEnabled()},
+                {"lodStart", hlod->getLodStart()},
+                {"lodEnd", hlod->getLodEnd()},
+                {"sources", hlod->getSourceUuids()}
+            };
+
+            if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+                if (auto mesh = renderer->getMesh()) {
+                    hlodData["mesh"] = SerializeMeshData(*mesh);
+                }
+            }
+
+            components["HLODProxy"] = hlodData;
         }
 
         if (auto* animator = entity->getComponent<Animator>()) {

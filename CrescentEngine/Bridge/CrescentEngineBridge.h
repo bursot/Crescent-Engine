@@ -53,6 +53,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)clearSelection;
 - (BOOL)setEntityParent:(NSString *)childUUID parent:(NSString *)parentUUID NS_SWIFT_NAME(setEntityParent(child:parent:));
 - (BOOL)setEntityName:(NSString *)uuid name:(NSString *)name NS_SWIFT_NAME(setEntityName(uuid:name:));
+- (NSString *)buildHLODFromSelection:(NSArray<NSString *> *)uuids NS_SWIFT_NAME(buildHLOD(from:));
 
 // Entity transform query (by UUID)
 - (NSArray<NSNumber *> *)getEntityPositionByUUID:(NSString *)uuid NS_SWIFT_NAME(getPosition(uuid:));
@@ -79,10 +80,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 // Material editing (by UUID)
 - (NSDictionary *)getMaterialInfoForEntity:(NSString *)uuid;
+- (NSDictionary *)getFoliageAutoLodForEntity:(NSString *)uuid NS_SWIFT_NAME(getFoliageAutoLod(forEntity:));
 - (void)setMaterialScalarForEntity:(NSString *)uuid property:(NSString *)property value:(float)value;
 - (void)setMaterialColorForEntity:(NSString *)uuid property:(NSString *)property r:(float)r g:(float)g b:(float)b a:(float)a;
 - (BOOL)loadTextureForEntity:(NSString *)uuid slot:(NSString *)slot path:(NSString *)path;
 - (void)clearTextureForEntity:(NSString *)uuid slot:(NSString *)slot;
+- (void)setMaterialScalarForEntityAllMaterials:(NSString *)uuid property:(NSString *)property value:(float)value NS_SWIFT_NAME(setMaterialScalarForEntityAllMaterials(_:property:value:));
+- (void)setMaterialColorForEntityAllMaterials:(NSString *)uuid property:(NSString *)property r:(float)r g:(float)g b:(float)b a:(float)a NS_SWIFT_NAME(setMaterialColorForEntityAllMaterials(_:property:r:g:b:a:));
+- (BOOL)loadTextureForEntityAllMaterials:(NSString *)uuid slot:(NSString *)slot path:(NSString *)path NS_SWIFT_NAME(loadTextureForEntityAllMaterials(_:slot:path:));
+- (void)clearTextureForEntityAllMaterials:(NSString *)uuid slot:(NSString *)slot NS_SWIFT_NAME(clearTextureForEntityAllMaterials(_:slot:));
+- (BOOL)bakeImpostorAtlasForEntity:(NSString *)uuid rows:(NSInteger)rows cols:(NSInteger)cols tileSize:(NSInteger)tileSize NS_SWIFT_NAME(bakeImpostorAtlas(forEntity:rows:cols:tileSize:));
+
+// Render stats
+- (NSDictionary *)getRenderStats NS_SWIFT_NAME(getRenderStats());
 
 // Environment / IBL controls
 - (NSDictionary *)getEnvironmentSettings;

@@ -5,9 +5,11 @@
 #include "../Animation/Skeleton.hpp"
 #include "../Animation/AnimationClip.hpp"
 #include "../Components/SkinnedMeshRenderer.hpp"
+#include "../Components/InstancedMeshRenderer.hpp"
 #include "../Components/Animator.hpp"
 #include "../Components/PrimitiveMesh.hpp"
 #include "../Components/ModelMeshReference.hpp"
+#include "../Components/HLODProxy.hpp"
 #include "../Assets/AssetDatabase.hpp"
 #include <assimp/config.h>
 #include <assimp/Importer.hpp>
@@ -1741,6 +1743,168 @@ bool SceneCommands::setParent(Scene* scene, const std::string& childUuid, const 
 
     childTransform->setParent(newParent, true);
     return true;
+}
+
+Entity* SceneCommands::buildHLOD(Scene* scene, const std::vector<std::string>& uuids, float lodStart, float lodEnd) {
+    if (!scene || uuids.empty()) {
+        return nullptr;
+    }
+
+    std::vector<Entity*> sources;
+    sources.reserve(uuids.size());
+    for (const auto& uuid : uuids) {
+        if (auto* entity = getEntityByUUID(scene, uuid)) {
+            sources.push_back(entity);
+        }
+    }
+    if (sources.empty()) {
+        return nullptr;
+    }
+
+    std::vector<Vertex> mergedVertices;
+    std::vector<uint32_t> mergedIndices;
+    std::vector<Submesh> mergedSubmeshes;
+    std::vector<std::shared_ptr<Material>> materials;
+    std::unordered_map<const Material*, uint32_t> materialMap;
+
+    struct Bucket {
+        uint32_t materialIndex = 0;
+        std::vector<uint32_t> indices;
+    };
+    std::vector<Bucket> buckets;
+
+    auto getMaterialIndex = [&](const std::shared_ptr<Material>& mat) -> uint32_t {
+        const Material* key = mat.get();
+        auto it = materialMap.find(key);
+        if (it != materialMap.end()) {
+            return it->second;
+        }
+        uint32_t idx = static_cast<uint32_t>(materials.size());
+        materials.push_back(mat ? mat : Material::CreateDefault());
+        materialMap[key] = idx;
+        buckets.push_back(Bucket{idx, {}});
+        return idx;
+    };
+
+    for (Entity* entity : sources) {
+        if (!entity || !entity->isActiveInHierarchy()) {
+            continue;
+        }
+        if (entity->getComponent<SkinnedMeshRenderer>() || entity->getComponent<InstancedMeshRenderer>()) {
+            continue;
+        }
+        MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || !renderer->isEnabled()) {
+            continue;
+        }
+        std::shared_ptr<Mesh> mesh = renderer->getMesh();
+        if (!mesh) {
+            continue;
+        }
+
+        const auto& vertices = mesh->getVertices();
+        const auto& indices = mesh->getIndices();
+        if (vertices.empty() || indices.empty()) {
+            continue;
+        }
+
+        Math::Matrix4x4 world = entity->getTransform()->getWorldMatrix();
+        Math::Matrix4x4 normalMatrix = world.inversed().transposed();
+
+        uint32_t baseVertex = static_cast<uint32_t>(mergedVertices.size());
+        mergedVertices.reserve(mergedVertices.size() + vertices.size());
+        for (const auto& v : vertices) {
+            Vertex out = v;
+            out.position = world.transformPoint(v.position);
+            out.normal = normalMatrix.transformDirection(v.normal);
+            out.normal.normalize();
+            out.tangent = normalMatrix.transformDirection(v.tangent);
+            out.tangent.normalize();
+            out.bitangent = normalMatrix.transformDirection(v.bitangent);
+            out.bitangent.normalize();
+            mergedVertices.push_back(out);
+        }
+
+        const auto& submeshes = mesh->getSubmeshes();
+        if (submeshes.empty()) {
+            auto mat = renderer->getMaterial(0);
+            uint32_t matIndex = getMaterialIndex(mat);
+            Bucket& bucket = buckets[matIndex];
+            bucket.indices.reserve(bucket.indices.size() + indices.size());
+            for (uint32_t idx : indices) {
+                bucket.indices.push_back(baseVertex + idx);
+            }
+        } else {
+            for (const auto& sub : submeshes) {
+                auto mat = renderer->getMaterial(sub.materialIndex);
+                uint32_t matIndex = getMaterialIndex(mat);
+                Bucket& bucket = buckets[matIndex];
+                uint32_t end = sub.indexStart + sub.indexCount;
+                bucket.indices.reserve(bucket.indices.size() + sub.indexCount);
+                for (uint32_t i = sub.indexStart; i < end; ++i) {
+                    if (i >= indices.size()) break;
+                    bucket.indices.push_back(baseVertex + indices[i]);
+                }
+            }
+        }
+    }
+
+    if (mergedVertices.empty() || buckets.empty()) {
+        return nullptr;
+    }
+
+    uint32_t indexStart = 0;
+    for (const auto& bucket : buckets) {
+        if (bucket.indices.empty()) {
+            continue;
+        }
+        mergedSubmeshes.emplace_back(indexStart, static_cast<uint32_t>(bucket.indices.size()), bucket.materialIndex);
+        mergedIndices.insert(mergedIndices.end(), bucket.indices.begin(), bucket.indices.end());
+        indexStart += static_cast<uint32_t>(bucket.indices.size());
+    }
+
+    if (mergedIndices.empty()) {
+        return nullptr;
+    }
+
+    auto mergedMesh = std::make_shared<Mesh>();
+    mergedMesh->setName("HLOD_Mesh");
+    mergedMesh->setVertices(mergedVertices);
+    mergedMesh->setIndices(mergedIndices);
+    if (!mergedSubmeshes.empty()) {
+        mergedMesh->setSubmeshes(mergedSubmeshes);
+    }
+
+    Math::Vector3 boundsSize = mergedMesh->getBoundsSize();
+    float size = std::max(0.1f, std::max(boundsSize.x, std::max(boundsSize.y, boundsSize.z)));
+    float autoStart = std::max(size * 4.0f, 30.0f);
+    float autoEnd = std::max(autoStart * 1.2f, autoStart + size * 2.0f);
+    if (lodStart < 0.0f) lodStart = autoStart;
+    if (lodEnd < 0.0f) lodEnd = autoEnd;
+
+    Entity* hlodEntity = scene->createEntity("HLOD_Proxy");
+    if (!hlodEntity) {
+        return nullptr;
+    }
+    hlodEntity->getTransform()->setLocalPosition(Math::Vector3::Zero);
+    hlodEntity->getTransform()->setLocalRotation(Math::Quaternion::Identity);
+    hlodEntity->getTransform()->setLocalScale(Math::Vector3(1.0f, 1.0f, 1.0f));
+
+    auto* mr = hlodEntity->addComponent<MeshRenderer>();
+    mr->setMesh(mergedMesh);
+    for (uint32_t i = 0; i < materials.size(); ++i) {
+        mr->setMaterial(i, materials[i] ? materials[i] : Material::CreateDefault());
+    }
+    mr->setCastShadows(true);
+    mr->setReceiveShadows(true);
+
+    auto* proxy = hlodEntity->addComponent<HLODProxy>();
+    proxy->setSourceUuids(uuids);
+    proxy->setLodStart(lodStart);
+    proxy->setLodEnd(lodEnd);
+    proxy->setEnabled(true);
+
+    return hlodEntity;
 }
 
 } // namespace Crescent

@@ -56,6 +56,9 @@ public:
 
     // Parenting (for hierarchy view)
     static bool setParent(Scene* scene, const std::string& childUuid, const std::string& parentUuid);
+
+    // HLOD (automatic bake)
+    static Entity* buildHLOD(Scene* scene, const std::vector<std::string>& uuids, float lodStart = -1.0f, float lodEnd = -1.0f);
 };
 
 } // namespace Crescent

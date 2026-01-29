@@ -59,6 +59,8 @@ struct PipelineStateKey {
     bool hasTangents;
     bool isTransparent;
     bool isSkinned;
+    bool isInstanced;
+    bool alphaToCoverage;
     bool hdrTarget;
     uint8_t sampleCount;
     
@@ -68,6 +70,8 @@ struct PipelineStateKey {
                hasTangents == other.hasTangents &&
                isTransparent == other.isTransparent &&
                isSkinned == other.isSkinned &&
+               isInstanced == other.isInstanced &&
+               alphaToCoverage == other.alphaToCoverage &&
                hdrTarget == other.hdrTarget &&
                sampleCount == other.sampleCount;
     }
@@ -81,8 +85,10 @@ struct PipelineStateKeyHash {
                (key.hasTangents ? 4 : 0) |
                (key.isTransparent ? 8 : 0) |
                (key.isSkinned ? 16 : 0) |
-               (key.hdrTarget ? 32 : 0) |
-               (static_cast<size_t>(key.sampleCount) << 7);
+               (key.isInstanced ? 32 : 0) |
+               (key.alphaToCoverage ? 64 : 0) |
+               (key.hdrTarget ? 128 : 0) |
+               (static_cast<size_t>(key.sampleCount) << 9);
     }
 };
 
@@ -138,6 +144,13 @@ public:
     float getViewportHeight() const { return m_viewportHeight; }
     
     TextureLoader* getTextureLoader() const { return m_textureLoader.get(); }
+
+    std::shared_ptr<Texture2D> bakeImpostorAtlas(Mesh* mesh,
+                                                 Material* material,
+                                                 uint32_t rows,
+                                                 uint32_t cols,
+                                                 uint32_t tileSize,
+                                                 std::string* outPath = nullptr);
     
     // Quality controls (shadow atlas, anisotropy, etc.)
     
@@ -205,10 +218,13 @@ private:
     void buildEnvironmentPipeline();
     void buildBlitPipeline();
     void buildPrepassPipeline();
+    void buildInstanceCullingPipeline();
+    void buildHZBPipelines();
     void buildVelocityPipelines();
     void buildSSAOPipelines();
     void buildSSAONoiseTexture();
     void buildBloomPipelines();
+    void buildImpostorPipeline();
     void buildSSRPipeline();
     void buildDecalPipeline();
     void buildDOFPipeline();
@@ -235,6 +251,9 @@ private:
     struct RenderTargetState {
         MTL::Texture* depthTexture = nullptr;
         MTL::Texture* msaaDepthTexture = nullptr;
+        MTL::Texture* hzbTexture = nullptr;
+        std::vector<MTL::Texture*> hzbMipViews;
+        uint32_t hzbMipCount = 0;
         MTL::Texture* normalTexture = nullptr;
         MTL::Texture* ssaoTexture = nullptr;
         MTL::Texture* ssaoBlurTexture = nullptr;
@@ -304,6 +323,13 @@ private:
     // Prepass pipeline states
     MTL::RenderPipelineState* m_prepassPipelineState;
     MTL::RenderPipelineState* m_prepassPipelineSkinned;
+    MTL::RenderPipelineState* m_prepassPipelineInstanced;
+    MTL::ComputePipelineState* m_instanceCullPipeline;
+    MTL::ComputePipelineState* m_instanceCullHzbPipeline;
+    MTL::RenderPipelineState* m_impostorBakePipeline;
+    MTL::ComputePipelineState* m_instanceIndirectPipeline;
+    MTL::ComputePipelineState* m_hzbInitPipeline;
+    MTL::ComputePipelineState* m_hzbDownsamplePipeline;
     MTL::RenderPipelineState* m_velocityPipelineState;
     MTL::RenderPipelineState* m_velocityPipelineSkinned;
     MTL::RenderPipelineState* m_ssaoPipelineState;
@@ -323,6 +349,9 @@ private:
     // Depth texture
     MTL::Texture* m_depthTexture;
     MTL::Texture* m_msaaDepthTexture;
+    MTL::Texture* m_hzbTexture;
+    std::vector<MTL::Texture*> m_hzbMipViews;
+    uint32_t m_hzbMipCount;
     MTL::Texture* m_normalTexture;
     MTL::Texture* m_ssaoTexture;
     MTL::Texture* m_ssaoBlurTexture;
@@ -372,11 +401,21 @@ private:
     MTL::Buffer* m_prevSkinningBuffer;
     size_t m_skinningBufferCapacity;
     size_t m_prevSkinningBufferCapacity;
+    MTL::Buffer* m_instanceBuffer;
+    size_t m_instanceBufferCapacity;
+    size_t m_instanceBufferOffset;
+    MTL::Buffer* m_instanceCullBuffer;
+    MTL::Buffer* m_instanceCountBuffer;
+    MTL::Buffer* m_instanceIndirectBuffer;
+    size_t m_instanceCullCapacity;
+    size_t m_instanceCountCapacity;
+    size_t m_instanceIndirectCapacity;
     
     // Sampling and textures
     MTL::SamplerState* m_samplerState;
     MTL::SamplerState* m_shadowSampler;
     MTL::SamplerState* m_linearClampSampler;
+    MTL::SamplerState* m_pointClampSampler;
     std::unique_ptr<TextureLoader> m_textureLoader;
     std::shared_ptr<Texture2D> m_defaultWhiteTexture;
     std::shared_ptr<Texture2D> m_defaultNormalTexture;
@@ -384,6 +423,7 @@ private:
     std::shared_ptr<Texture2D> m_defaultHeightTexture;
     std::shared_ptr<Texture2D> m_defaultEnvironmentTexture;
     std::shared_ptr<Texture2D> m_environmentTexture;
+    std::shared_ptr<Mesh> m_billboardMesh;
     std::shared_ptr<Texture2D> m_colorGradingLUT;
     std::shared_ptr<Texture2D> m_colorGradingNeutralLUT;
     std::string m_colorGradingLUTPath;

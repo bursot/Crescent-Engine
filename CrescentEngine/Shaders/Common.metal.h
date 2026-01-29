@@ -32,6 +32,31 @@ struct ModelUniforms {
     float4x4 normalMatrix;
 };
 
+struct InstanceData {
+    float4x4 modelMatrix;
+    float4x4 normalMatrix;
+};
+
+struct InstanceCullParams {
+    float4 frustumPlanes[6];
+    float4 boundsCenterRadius; // xyz center, w radius
+    uint inputOffset;
+    uint outputOffset;
+    uint instanceCount;
+    uint _pad;
+    float2 screenSize;
+    uint hzbMipCount;
+    uint _pad2;
+};
+
+struct DrawIndexedIndirectArgs {
+    uint indexCount;
+    uint instanceCount;
+    uint indexStart;
+    int baseVertex;
+    uint baseInstance;
+};
+
 struct CameraUniforms {
     float4x4 viewMatrix;
     float4x4 projectionMatrix;
@@ -40,7 +65,7 @@ struct CameraUniforms {
     float4x4 viewProjectionMatrix;
     float4x4 viewMatrixInverse;
     float4x4 projectionMatrixInverse;
-    float3 cameraPosition;
+    float4 cameraPositionTime; // xyz position, w time
 };
 
 struct MaterialUniforms {
@@ -52,6 +77,17 @@ struct MaterialUniforms {
     float4 textureFlags2;
     float4 textureFlags3;
     float4 heightParams;
+    float4 foliageParams0; // windStrength, windSpeed, windScale, windGust
+    float4 foliageParams1; // lodStart, lodEnd, billboardStart, billboardEnd
+    float4 foliageParams2; // windEnabled, lodEnabled, billboardEnabled, ditherEnabled
+    float4 foliageParams3; // windDir.xyz, padding
+    float4 impostorParams0; // enabled, rows, cols, padding
+};
+
+struct MeshUniforms {
+    float4 boundsCenter; // xyz center, w unused
+    float4 boundsSize;   // xyz size, w unused
+    float4 flags;        // x billboard enabled, yzw unused
 };
 
 struct LightData {

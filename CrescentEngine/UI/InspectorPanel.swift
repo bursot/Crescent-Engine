@@ -49,7 +49,14 @@ struct InspectorPanel: View {
                         // Only show Material if this entity isn't a light
                         if lightSection == nil && decalSection == nil {
                             ComponentSection(title: "Material", icon: "paintpalette.fill") {
-                                MaterialInspector(entityUUID: selectedEntity.uuid)
+                                MaterialInspector(entityUUID: selectedEntity.uuid,
+                                                  selectedUUIDs: editorState.selectedEntityUUIDs)
+                            }
+                        }
+
+                        if editorState.selectedEntityUUIDs.count > 1 {
+                            ComponentSection(title: "HLOD", icon: "square.stack.3d.up") {
+                                HLODInspectorSection(uuids: Array(editorState.selectedEntityUUIDs))
                             }
                         }
 
@@ -2234,6 +2241,7 @@ private enum TextureSlot: String, CaseIterable {
 
 struct MaterialInspector: View {
     let entityUUID: String
+    let selectedUUIDs: Set<String>
     
     @State private var albedo: [Float] = [1, 1, 1, 1]
     @State private var emission: [Float] = [0, 0, 0]
@@ -2244,6 +2252,26 @@ struct MaterialInspector: View {
     @State private var normalScale: Float = 1.0
     @State private var heightScale: Float = 0.02
     @State private var heightInvert: Bool = false
+    @State private var renderMode: Int = 0
+    @State private var alphaCutoff: Float = 0.5
+    @State private var twoSided: Bool = false
+    @State private var alphaToCoverage: Bool = false
+    @State private var windEnabled: Bool = false
+    @State private var windStrength: Float = 0.0
+    @State private var windSpeed: Float = 1.0
+    @State private var windScale: Float = 0.1
+    @State private var windGust: Float = 0.0
+    @State private var windDirection: [Float] = [1.0, 0.0, 0.0]
+    @State private var lodFadeEnabled: Bool = false
+    @State private var lodFadeStart: Float = 0.0
+    @State private var lodFadeEnd: Float = 0.0
+    @State private var ditherEnabled: Bool = true
+    @State private var billboardEnabled: Bool = false
+    @State private var billboardStart: Float = 0.0
+    @State private var billboardEnd: Float = 0.0
+    @State private var impostorEnabled: Bool = false
+    @State private var impostorRows: Float = 8.0
+    @State private var impostorCols: Float = 8.0
     @State private var tiling: [Float] = [1, 1]
     @State private var offset: [Float] = [0, 0]
     @State private var texturePaths: [String: String] = [:]
@@ -2253,11 +2281,30 @@ struct MaterialInspector: View {
     
     @State private var activeTextureSlot: TextureSlot?
     @State private var showFileImporter: Bool = false
+    @State private var applyToAllSelected: Bool = false
+    @State private var applyToAllMaterials: Bool = false
     
     private let timer = Timer.publish(every: 0.75, on: .main, in: .common).autoconnect()
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if selectedUUIDs.count > 1 {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(isOn: $applyToAllSelected) {
+                        Text("Apply To Selection (\(selectedUUIDs.count))")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+                    Text("Edits are previewed from the primary selection.")
+                        .font(EditorTheme.font(size: 10, weight: .regular))
+                        .foregroundColor(EditorTheme.textMuted)
+                }
+            }
+
+            Toggle(isOn: $applyToAllMaterials) {
+                Text("Apply To All Materials")
+                    .font(EditorTheme.font(size: 11, weight: .medium))
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 ColorPicker("Albedo", selection: Binding(
                     get: { colorFrom(albedo) },
@@ -2312,6 +2359,188 @@ struct MaterialInspector: View {
                     if albedo.count > 3 { albedo[3] = newVal }
                     sendScalar(property: "alpha", value: newVal)
                 }), range: 0...1, step: 0.01, tint: .teal, onChange: { _ in })
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Render Mode")
+                    .font(EditorTheme.font(size: 11, weight: .medium))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Picker("", selection: Binding(
+                    get: { renderMode },
+                    set: { newVal in
+                        renderMode = newVal
+                        sendScalar(property: "renderMode", value: Float(newVal))
+                    })) {
+                    Text("Opaque").tag(0)
+                    Text("Transparent").tag(1)
+                    Text("Cutout").tag(2)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            if renderMode == 2 {
+                SliderRow(title: "Alpha Cutoff", value: Binding(
+                    get: { alphaCutoff },
+                    set: { newVal in
+                        alphaCutoff = newVal
+                        sendScalar(property: "alphaCutoff", value: newVal)
+                    }), range: 0...1, step: 0.01, tint: .pink, onChange: { _ in })
+
+                Toggle(isOn: Binding(
+                    get: { alphaToCoverage },
+                    set: { newVal in
+                        alphaToCoverage = newVal
+                        sendScalar(property: "alphaToCoverage", value: newVal ? 1.0 : 0.0)
+                    })) {
+                    Text("Alpha To Coverage (MSAA)")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                }
+            }
+
+            Toggle(isOn: Binding(
+                get: { twoSided },
+                set: { newVal in
+                    twoSided = newVal
+                    sendScalar(property: "twoSided", value: newVal ? 1.0 : 0.0)
+                })) {
+                Text("Two-Sided")
+                    .font(EditorTheme.font(size: 11, weight: .medium))
+            }
+
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Foliage")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+
+                Toggle(isOn: Binding(
+                    get: { windEnabled },
+                    set: { newVal in
+                        windEnabled = newVal
+                        sendScalar(property: "windEnabled", value: newVal ? 1.0 : 0.0)
+                    })) {
+                    Text("Wind")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                }
+
+                SliderRow(title: "Wind Strength", value: $windStrength, range: 0...2, step: 0.01, tint: .green) { newVal in
+                    sendScalar(property: "windStrength", value: newVal)
+                }
+                SliderRow(title: "Wind Speed", value: $windSpeed, range: 0...5, step: 0.01, tint: .green) { newVal in
+                    sendScalar(property: "windSpeed", value: newVal)
+                }
+                SliderRow(title: "Wind Scale", value: $windScale, range: 0...2, step: 0.01, tint: .green) { newVal in
+                    sendScalar(property: "windScale", value: newVal)
+                }
+                SliderRow(title: "Wind Gust", value: $windGust, range: 0...2, step: 0.01, tint: .green) { newVal in
+                    sendScalar(property: "windGust", value: newVal)
+                }
+
+                Vector3InputRow(title: "Wind Direction", values: $windDirection) {
+                    sendScalar(property: "windDirX", value: windDirection[safe: 0] ?? 0)
+                    sendScalar(property: "windDirY", value: windDirection[safe: 1] ?? 0)
+                    sendScalar(property: "windDirZ", value: windDirection[safe: 2] ?? 0)
+                }
+
+                Toggle(isOn: Binding(
+                    get: { lodFadeEnabled },
+                    set: { newVal in
+                        lodFadeEnabled = newVal
+                        sendScalar(property: "lodFadeEnabled", value: newVal ? 1.0 : 0.0)
+                    })) {
+                    Text("Distance Fade (LOD)")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                }
+
+                Button("Auto LOD (Bounds)") {
+                    if let info = CrescentEngineBridge.shared().getFoliageAutoLod(forEntity: entityUUID) as? [String: NSNumber] {
+                        lodFadeStart = info["lodFadeStart"]?.floatValue ?? lodFadeStart
+                        lodFadeEnd = info["lodFadeEnd"]?.floatValue ?? lodFadeEnd
+                        billboardStart = info["billboardStart"]?.floatValue ?? billboardStart
+                        billboardEnd = info["billboardEnd"]?.floatValue ?? billboardEnd
+                        sendScalar(property: "lodFadeStart", value: lodFadeStart)
+                        sendScalar(property: "lodFadeEnd", value: lodFadeEnd)
+                        sendScalar(property: "billboardStart", value: billboardStart)
+                        sendScalar(property: "billboardEnd", value: billboardEnd)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+
+                if lodFadeEnabled {
+                    SliderRow(title: "Fade Start", value: $lodFadeStart, range: 0...200, step: 0.5, tint: .yellow) { newVal in
+                        sendScalar(property: "lodFadeStart", value: newVal)
+                    }
+                    SliderRow(title: "Fade End", value: $lodFadeEnd, range: 0...400, step: 0.5, tint: .yellow) { newVal in
+                        sendScalar(property: "lodFadeEnd", value: newVal)
+                    }
+                }
+
+                Toggle(isOn: Binding(
+                    get: { ditherEnabled },
+                    set: { newVal in
+                        ditherEnabled = newVal
+                        sendScalar(property: "ditherEnabled", value: newVal ? 1.0 : 0.0)
+                    })) {
+                    Text("Dither Crossfade")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                }
+
+                Toggle(isOn: Binding(
+                    get: { billboardEnabled },
+                    set: { newVal in
+                        billboardEnabled = newVal
+                        sendScalar(property: "billboardEnabled", value: newVal ? 1.0 : 0.0)
+                    })) {
+                    Text("Billboard LOD")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                }
+
+                if billboardEnabled {
+                    SliderRow(title: "Billboard Start", value: $billboardStart, range: 0...500, step: 1.0, tint: .orange) { newVal in
+                        sendScalar(property: "billboardStart", value: newVal)
+                    }
+                    SliderRow(title: "Billboard End", value: $billboardEnd, range: 0...600, step: 1.0, tint: .orange) { newVal in
+                        sendScalar(property: "billboardEnd", value: newVal)
+                    }
+                }
+
+                Toggle(isOn: Binding(
+                    get: { impostorEnabled },
+                    set: { newVal in
+                        impostorEnabled = newVal
+                        sendScalar(property: "impostorEnabled", value: newVal ? 1.0 : 0.0)
+                    })) {
+                    Text("Impostor Atlas")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                }
+
+                if impostorEnabled {
+                    SliderRow(title: "Atlas Rows", value: Binding(
+                        get: { impostorRows },
+                        set: { newVal in
+                            impostorRows = newVal
+                            sendScalar(property: "impostorRows", value: newVal)
+                        }), range: 1...16, step: 1, tint: .orange, onChange: { _ in })
+
+                    SliderRow(title: "Atlas Cols", value: Binding(
+                        get: { impostorCols },
+                        set: { newVal in
+                            impostorCols = newVal
+                            sendScalar(property: "impostorCols", value: newVal)
+                        }), range: 1...16, step: 1, tint: .orange, onChange: { _ in })
+
+                    Button("Bake Impostor Atlas") {
+                        _ = CrescentEngineBridge.shared().bakeImpostorAtlas(forEntity: entityUUID,
+                                                                            rows: Int(impostorRows),
+                                                                            cols: Int(impostorCols),
+                                                                            tileSize: 256)
+                    }
+                    .buttonStyle(.bordered)
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                }
+            }
             
             Divider()
                 .overlay(EditorTheme.panelStroke)
@@ -2368,7 +2597,14 @@ struct MaterialInspector: View {
                     } onDrop: { url in
                         handleTextureDrop(url, slot: slot)
                     } onClear: {
-                        CrescentEngineBridge.shared().clearTexture(forEntity: entityUUID, slot: slot.rawValue)
+                        let bridge = CrescentEngineBridge.shared()
+                        for uuid in targetUUIDs() {
+                            if applyToAllMaterials {
+                                bridge.clearTextureForEntityAllMaterials(uuid, slot: slot.rawValue)
+                            } else {
+                                bridge.clearTexture(forEntity: uuid, slot: slot.rawValue)
+                            }
+                        }
                         refreshMaterial()
                     }
                 }
@@ -2376,6 +2612,14 @@ struct MaterialInspector: View {
         }
         .onAppear {
             refreshMaterial()
+            applyToAllSelected = selectedUUIDs.count > 1
+        }
+        .onChange(of: selectedUUIDs) { newSelection in
+            if newSelection.count > 1 {
+                applyToAllSelected = true
+            } else {
+                applyToAllSelected = false
+            }
         }
         .onReceive(timer) { _ in
             refreshMaterial()
@@ -2405,6 +2649,46 @@ struct MaterialInspector: View {
         if let invertVal = info["heightInvert"] as? NSNumber {
             heightInvert = invertVal.intValue != 0
         }
+        if let modeVal = info["renderMode"] as? NSNumber {
+            renderMode = modeVal.intValue
+        }
+        if let cutoffVal = info["alphaCutoff"] as? NSNumber {
+            alphaCutoff = cutoffVal.floatValue
+        }
+        if let twoSidedVal = info["twoSided"] as? NSNumber {
+            twoSided = twoSidedVal.intValue != 0
+        }
+        if let a2cVal = info["alphaToCoverage"] as? NSNumber {
+            alphaToCoverage = a2cVal.intValue != 0
+        }
+        if let windVal = info["windEnabled"] as? NSNumber {
+            windEnabled = windVal.intValue != 0
+        }
+        windStrength = (info["windStrength"] as? NSNumber)?.floatValue ?? windStrength
+        windSpeed = (info["windSpeed"] as? NSNumber)?.floatValue ?? windSpeed
+        windScale = (info["windScale"] as? NSNumber)?.floatValue ?? windScale
+        windGust = (info["windGust"] as? NSNumber)?.floatValue ?? windGust
+        if let windDirVals = info["windDirection"] as? [NSNumber], windDirVals.count >= 3 {
+            windDirection = windDirVals.map { $0.floatValue }
+        }
+        if let lodEnabled = info["lodFadeEnabled"] as? NSNumber {
+            lodFadeEnabled = lodEnabled.intValue != 0
+        }
+        lodFadeStart = (info["lodFadeStart"] as? NSNumber)?.floatValue ?? lodFadeStart
+        lodFadeEnd = (info["lodFadeEnd"] as? NSNumber)?.floatValue ?? lodFadeEnd
+        if let ditherVal = info["ditherEnabled"] as? NSNumber {
+            ditherEnabled = ditherVal.intValue != 0
+        }
+        if let billboardVal = info["billboardEnabled"] as? NSNumber {
+            billboardEnabled = billboardVal.intValue != 0
+        }
+        billboardStart = (info["billboardStart"] as? NSNumber)?.floatValue ?? billboardStart
+        billboardEnd = (info["billboardEnd"] as? NSNumber)?.floatValue ?? billboardEnd
+        if let impostorVal = info["impostorEnabled"] as? NSNumber {
+            impostorEnabled = impostorVal.intValue != 0
+        }
+        impostorRows = (info["impostorRows"] as? NSNumber)?.floatValue ?? impostorRows
+        impostorCols = (info["impostorCols"] as? NSNumber)?.floatValue ?? impostorCols
         
         if let tilingVals = info["tiling"] as? [NSNumber], tilingVals.count >= 2 {
             tiling = tilingVals.map { $0.floatValue }
@@ -2425,6 +2709,13 @@ struct MaterialInspector: View {
             texturePaths = mapped
         }
     }
+
+    private func targetUUIDs() -> [String] {
+        if applyToAllSelected && selectedUUIDs.count > 1 {
+            return Array(selectedUUIDs)
+        }
+        return [entityUUID]
+    }
     
     private func colorFrom(_ values: [Float]) -> Color {
         let r = Double(values[safe: 0] ?? 1)
@@ -2437,17 +2728,38 @@ struct MaterialInspector: View {
     private func updateAlbedoColor(_ color: Color) {
         guard let components = color.nsColorComponents else { return }
         albedo = [Float(components.r), Float(components.g), Float(components.b), Float(components.a)]
-        CrescentEngineBridge.shared().setMaterialColorForEntity(entityUUID, property: "albedo", r: Float(components.r), g: Float(components.g), b: Float(components.b), a: Float(components.a))
+        let bridge = CrescentEngineBridge.shared()
+        for uuid in targetUUIDs() {
+            if applyToAllMaterials {
+                bridge.setMaterialColorForEntityAllMaterials(uuid, property: "albedo", r: Float(components.r), g: Float(components.g), b: Float(components.b), a: Float(components.a))
+            } else {
+                bridge.setMaterialColorForEntity(uuid, property: "albedo", r: Float(components.r), g: Float(components.g), b: Float(components.b), a: Float(components.a))
+            }
+        }
     }
     
     private func updateEmissionColor(_ color: Color) {
         guard let components = color.nsColorComponents else { return }
         emission = [Float(components.r), Float(components.g), Float(components.b)]
-        CrescentEngineBridge.shared().setMaterialColorForEntity(entityUUID, property: "emission", r: Float(components.r), g: Float(components.g), b: Float(components.b), a: 1.0)
+        let bridge = CrescentEngineBridge.shared()
+        for uuid in targetUUIDs() {
+            if applyToAllMaterials {
+                bridge.setMaterialColorForEntityAllMaterials(uuid, property: "emission", r: Float(components.r), g: Float(components.g), b: Float(components.b), a: 1.0)
+            } else {
+                bridge.setMaterialColorForEntity(uuid, property: "emission", r: Float(components.r), g: Float(components.g), b: Float(components.b), a: 1.0)
+            }
+        }
     }
     
     private func sendScalar(property: String, value: Float) {
-        CrescentEngineBridge.shared().setMaterialScalarForEntity(entityUUID, property: property, value: value)
+        let bridge = CrescentEngineBridge.shared()
+        for uuid in targetUUIDs() {
+            if applyToAllMaterials {
+                bridge.setMaterialScalarForEntityAllMaterials(uuid, property: property, value: value)
+            } else {
+                bridge.setMaterialScalarForEntity(uuid, property: property, value: value)
+            }
+        }
     }
     
     private func handleTextureImport(_ result: Result<URL, Error>) {
@@ -2497,12 +2809,49 @@ struct MaterialInspector: View {
             path = imported
         }
 
-        let ok = CrescentEngineBridge.shared().loadTexture(forEntity: entityUUID, slot: slot.rawValue, path: path)
-        if ok {
+        let bridge = CrescentEngineBridge.shared()
+        var primaryOk = false
+        for uuid in targetUUIDs() {
+            let ok: Bool
+            if applyToAllMaterials {
+                ok = bridge.loadTextureForEntityAllMaterials(uuid, slot: slot.rawValue, path: path)
+            } else {
+                ok = bridge.loadTexture(forEntity: uuid, slot: slot.rawValue, path: path)
+            }
+            if uuid == entityUUID {
+                primaryOk = ok
+            }
+        }
+
+        if primaryOk {
             texturePaths[slot.rawValue] = URL(fileURLWithPath: path).lastPathComponent
             refreshMaterial()
         } else {
             print("Engine failed to load texture at path: \(path)")
+        }
+    }
+}
+
+struct HLODInspectorSection: View {
+    let uuids: [String]
+    @State private var lastProxyUUID: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button("Build HLOD From Selection") {
+                let proxy = CrescentEngineBridge.shared().buildHLOD(from: uuids)
+                if !proxy.isEmpty {
+                    lastProxyUUID = proxy
+                }
+            }
+            .buttonStyle(.bordered)
+            .font(EditorTheme.font(size: 11, weight: .semibold))
+
+            if !lastProxyUUID.isEmpty {
+                Text("Created HLOD Proxy: \(lastProxyUUID)")
+                    .font(EditorTheme.font(size: 10, weight: .regular))
+                    .foregroundColor(EditorTheme.textMuted)
+            }
         }
     }
 }

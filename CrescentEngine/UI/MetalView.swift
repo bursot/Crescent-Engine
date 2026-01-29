@@ -73,6 +73,7 @@ struct MetalView: NSViewRepresentable {
         private var lastDrawableWidth: Float = 0
         private var lastDrawableHeight: Float = 0
         private var lastTime: CFTimeInterval = 0
+        private var statsAccumulator: Float = 0
         private var isEngineInitialized = false
         private let viewKind: RenderViewKind
         private let drivesLoop: Bool
@@ -219,6 +220,22 @@ struct MetalView: NSViewRepresentable {
             // Update and render
             if bridge.tick(deltaTime: deltaTime) {
                 lastTime = currentTime
+            }
+
+            if drivesLoop {
+                statsAccumulator += deltaTime
+                if statsAccumulator >= 1.0 {
+                    statsAccumulator = 0
+                    if let stats = bridge.getRenderStats() as? [String: Any] {
+                        let drawCalls = (stats["drawCalls"] as? NSNumber)?.intValue ?? 0
+                        let triangles = (stats["triangles"] as? NSNumber)?.intValue ?? 0
+                        let vertices = (stats["vertices"] as? NSNumber)?.intValue ?? 0
+                        let frameMs = (stats["frameTimeMs"] as? NSNumber)?.floatValue ?? 0
+                        let fps = frameMs > 0 ? (1000.0 / frameMs) : 0
+                        print(String(format: "[STATS] draws=%d tris=%d verts=%d frame=%.2fms (~%.1f fps)",
+                                     drawCalls, triangles, vertices, frameMs, fps))
+                    }
+                }
             }
         }
         

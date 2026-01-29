@@ -11,6 +11,7 @@
 #include "../Engine/Scene/Scene.hpp"
 #include "../Engine/Components/MeshRenderer.hpp"
 #include "../Engine/Components/SkinnedMeshRenderer.hpp"
+#include "../Engine/Components/InstancedMeshRenderer.hpp"
 #include "../Engine/Components/Animator.hpp"
 #include "../Engine/Components/IKConstraint.hpp"
 #include "../Engine/Components/Rigidbody.hpp"
@@ -27,6 +28,8 @@
 #include "../Engine/Components/Camera.hpp"
 #include "../Engine/Components/Light.hpp"
 #include "../Engine/Components/Decal.hpp"
+#include <algorithm>
+#include <cmath>
 #include "../Engine/Physics/PhysicsWorld.hpp"
 #include "../Engine/Rendering/Material.hpp"
 #include "../Engine/Rendering/Texture.hpp"
@@ -36,6 +39,7 @@
 #include <mutex>
 #include <string>
 #include <algorithm>
+#include <unordered_map>
 
 using namespace Crescent;
 static const void* kEngineQueueKey = &kEngineQueueKey;
@@ -44,6 +48,7 @@ struct MaterialBinding {
     Entity* entity = nullptr;
     MeshRenderer* renderer = nullptr;
     SkinnedMeshRenderer* skinned = nullptr;
+    InstancedMeshRenderer* instanced = nullptr;
     std::shared_ptr<Material> material;
 };
 
@@ -58,12 +63,16 @@ static MaterialBinding GetMaterialBindingForEntityUUID(const std::string& entity
     binding.entity = entity;
     binding.renderer = entity->getComponent<MeshRenderer>();
     binding.skinned = entity->getComponent<SkinnedMeshRenderer>();
+    binding.instanced = entity->getComponent<InstancedMeshRenderer>();
 
     if (binding.renderer) {
         binding.material = binding.renderer->getMaterial(0);
     }
     if (!binding.material && binding.skinned) {
         binding.material = binding.skinned->getMaterial(0);
+    }
+    if (!binding.material && binding.instanced) {
+        binding.material = binding.instanced->getMaterial(0);
     }
     return binding;
 }
@@ -89,6 +98,14 @@ static bool IsMaterialShared(Scene* scene,
         }
         if (const auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
             const auto& materials = skinned->getMaterials();
+            for (const auto& current : materials) {
+                if (current == material) {
+                    return true;
+                }
+            }
+        }
+        if (const auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            const auto& materials = instanced->getMaterials();
             for (const auto& current : materials) {
                 if (current == material) {
                     return true;
@@ -138,6 +155,14 @@ static std::shared_ptr<Material> EnsureUniqueMaterialForEntity(MaterialBinding& 
             }
         }
     }
+    if (binding.instanced) {
+        const auto& materials = binding.instanced->getMaterials();
+        for (size_t i = 0; i < materials.size(); ++i) {
+            if (materials[i] == binding.material) {
+                binding.instanced->setMaterial(static_cast<uint32_t>(i), clone);
+            }
+        }
+    }
     binding.material = clone;
     return binding.material;
 }
@@ -156,7 +181,168 @@ static std::shared_ptr<Material> GetPrimaryMaterialForEntityUUID(const std::stri
     if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
         return skinned->getMaterial(0);
     }
+    if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+        return instanced->getMaterial(0);
+    }
     return nullptr;
+}
+
+static void EnsureUniqueMaterialsForEntity(Entity* entity) {
+    if (!entity) {
+        return;
+    }
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!scene) {
+        return;
+    }
+
+    auto ensureForRenderer = [&](auto* renderer) {
+        if (!renderer) {
+            return;
+        }
+        const auto& materials = renderer->getMaterials();
+        std::unordered_map<const Material*, std::shared_ptr<Material>> clones;
+        for (size_t i = 0; i < materials.size(); ++i) {
+            const auto& material = materials[i];
+            if (!material) {
+                continue;
+            }
+            if (!IsMaterialShared(scene, material, entity)) {
+                continue;
+            }
+            auto it = clones.find(material.get());
+            if (it == clones.end()) {
+                auto clone = CloneMaterial(material);
+                if (!clone) {
+                    continue;
+                }
+                it = clones.emplace(material.get(), clone).first;
+            }
+            renderer->setMaterial(static_cast<uint32_t>(i), it->second);
+        }
+    };
+
+    ensureForRenderer(entity->getComponent<MeshRenderer>());
+    ensureForRenderer(entity->getComponent<SkinnedMeshRenderer>());
+    ensureForRenderer(entity->getComponent<InstancedMeshRenderer>());
+}
+
+static void ApplyMaterialScalar(const std::shared_ptr<Material>& material,
+                                const std::string& prop,
+                                float value) {
+    if (!material) {
+        return;
+    }
+    if (prop == "metallic") material->setMetallic(value);
+    else if (prop == "roughness") material->setRoughness(value);
+    else if (prop == "ao") material->setAO(value);
+    else if (prop == "emissionStrength") material->setEmissionStrength(value);
+    else if (prop == "normalScale") material->setNormalScale(value);
+    else if (prop == "heightScale") material->setHeightScale(value);
+    else if (prop == "heightInvert") material->setHeightInvert(value >= 0.5f);
+    else if (prop == "alpha") material->setAlpha(value);
+    else if (prop == "alphaCutoff") material->setAlphaCutoff(value);
+    else if (prop == "renderMode") {
+        int mode = std::max(0, std::min(2, static_cast<int>(std::round(value))));
+        material->setRenderMode(static_cast<Material::RenderMode>(mode));
+    }
+    else if (prop == "twoSided") {
+        material->setTwoSided(value >= 0.5f);
+    } else if (prop == "alphaToCoverage") {
+        material->setAlphaToCoverage(value >= 0.5f);
+    }
+    else if (prop == "windEnabled") {
+        material->setWindEnabled(value >= 0.5f);
+    } else if (prop == "windStrength") {
+        material->setWindStrength(value);
+    } else if (prop == "windSpeed") {
+        material->setWindSpeed(value);
+    } else if (prop == "windScale") {
+        material->setWindScale(value);
+    } else if (prop == "windGust") {
+        material->setWindGust(value);
+    } else if (prop == "windDirX") {
+        Math::Vector3 dir = material->getWindDirection();
+        dir.x = value;
+        material->setWindDirection(dir);
+    } else if (prop == "windDirY") {
+        Math::Vector3 dir = material->getWindDirection();
+        dir.y = value;
+        material->setWindDirection(dir);
+    } else if (prop == "windDirZ") {
+        Math::Vector3 dir = material->getWindDirection();
+        dir.z = value;
+        material->setWindDirection(dir);
+    } else if (prop == "lodFadeEnabled") {
+        material->setLodFadeEnabled(value >= 0.5f);
+    } else if (prop == "lodFadeStart") {
+        material->setLodFadeStart(value);
+    } else if (prop == "lodFadeEnd") {
+        material->setLodFadeEnd(value);
+    } else if (prop == "ditherEnabled") {
+        material->setDitherEnabled(value >= 0.5f);
+    } else if (prop == "billboardEnabled") {
+        material->setBillboardEnabled(value >= 0.5f);
+    } else if (prop == "billboardStart") {
+        material->setBillboardStart(value);
+    } else if (prop == "billboardEnd") {
+        material->setBillboardEnd(value);
+    } else if (prop == "impostorEnabled") {
+        material->setImpostorEnabled(value >= 0.5f);
+    } else if (prop == "impostorRows") {
+        material->setImpostorRows(static_cast<int>(std::round(value)));
+    } else if (prop == "impostorCols") {
+        material->setImpostorCols(static_cast<int>(std::round(value)));
+    }
+    else if (prop == "tilingX") {
+        Math::Vector2 tiling = material->getUVTiling();
+        tiling.x = value;
+        material->setUVTiling(tiling);
+    } else if (prop == "tilingY") {
+        Math::Vector2 tiling = material->getUVTiling();
+        tiling.y = value;
+        material->setUVTiling(tiling);
+    } else if (prop == "offsetX") {
+        Math::Vector2 uvOffset = material->getUVOffset();
+        uvOffset.x = value;
+        material->setUVOffset(uvOffset);
+    } else if (prop == "offsetY") {
+        Math::Vector2 uvOffset = material->getUVOffset();
+        uvOffset.y = value;
+        material->setUVOffset(uvOffset);
+    }
+}
+
+static void ApplyMaterialColor(const std::shared_ptr<Material>& material,
+                               const std::string& prop,
+                               float r,
+                               float g,
+                               float b,
+                               float a) {
+    if (!material) {
+        return;
+    }
+    if (prop == "albedo") {
+        material->setAlbedo(Math::Vector4(r, g, b, a));
+    } else if (prop == "emission") {
+        material->setEmission(Math::Vector3(r, g, b));
+    }
+}
+
+static void ApplyMaterialTexture(const std::shared_ptr<Material>& material,
+                                 const std::string& slotStr,
+                                 const std::shared_ptr<Texture2D>& texture) {
+    if (!material) {
+        return;
+    }
+    if (slotStr == "albedo") material->setAlbedoTexture(texture);
+    else if (slotStr == "normal") material->setNormalTexture(texture);
+    else if (slotStr == "metallic") material->setMetallicTexture(texture);
+    else if (slotStr == "roughness") material->setRoughnessTexture(texture);
+    else if (slotStr == "ao") material->setAOTexture(texture);
+    else if (slotStr == "emission") material->setEmissionTexture(texture);
+    else if (slotStr == "orm") material->setORMTexture(texture);
+    else if (slotStr == "height") material->setHeightTexture(texture);
 }
 
 static SkinnedMeshRenderer* GetSkinnedByUUID(const std::string& entityUUID) {
@@ -1002,6 +1188,27 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (NSString *)buildHLODFromSelection:(NSArray<NSString *> *)uuids {
+    return (NSString *)[self performSyncObject:^id{
+        Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
+        if (!scene || !uuids || uuids.count == 0) {
+            return @"";
+        }
+        std::vector<std::string> ids;
+        ids.reserve(uuids.count);
+        for (NSString* uuid in uuids) {
+            if (!uuid) continue;
+            ids.push_back([uuid UTF8String]);
+        }
+        Crescent::Entity* proxy = Crescent::SceneCommands::buildHLOD(scene, ids);
+        if (!proxy) {
+            return @"";
+        }
+        std::string proxyUuid = proxy->getUUID().toString();
+        return [NSString stringWithUTF8String:proxyUuid.c_str()];
+    }];
+}
+
 // MARK: - Entity Transform Query (by UUID)
 
 - (NSArray<NSNumber *> *)getEntityPositionByUUID:(NSString *)uuid {
@@ -1218,6 +1425,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         Math::Vector3 emission = material->getEmission();
         Math::Vector2 tiling = material->getUVTiling();
         Math::Vector2 offset = material->getUVOffset();
+        Math::Vector3 windDir = material->getWindDirection();
         
         auto texturePath = [](const std::shared_ptr<Texture2D>& tex) -> NSString* {
             if (!tex) return @"";
@@ -1249,9 +1457,73 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"normalScale": @(material->getNormalScale()),
             @"heightScale": @(material->getHeightScale()),
             @"heightInvert": @(material->getHeightInvert() ? 1 : 0),
+            @"renderMode": @(static_cast<int>(material->getRenderMode())),
+            @"alphaCutoff": @(material->getAlphaCutoff()),
+            @"twoSided": @(material->isTwoSided() ? 1 : 0),
+            @"alphaToCoverage": @(material->getAlphaToCoverage() ? 1 : 0),
+            @"windEnabled": @(material->getWindEnabled() ? 1 : 0),
+            @"windStrength": @(material->getWindStrength()),
+            @"windSpeed": @(material->getWindSpeed()),
+            @"windScale": @(material->getWindScale()),
+            @"windGust": @(material->getWindGust()),
+            @"windDirection": @[@(windDir.x), @(windDir.y), @(windDir.z)],
+            @"lodFadeEnabled": @(material->getLodFadeEnabled() ? 1 : 0),
+            @"lodFadeStart": @(material->getLodFadeStart()),
+            @"lodFadeEnd": @(material->getLodFadeEnd()),
+            @"ditherEnabled": @(material->getDitherEnabled() ? 1 : 0),
+            @"billboardEnabled": @(material->getBillboardEnabled() ? 1 : 0),
+            @"billboardStart": @(material->getBillboardStart()),
+            @"billboardEnd": @(material->getBillboardEnd()),
+            @"impostorEnabled": @(material->getImpostorEnabled() ? 1 : 0),
+            @"impostorRows": @(material->getImpostorRows()),
+            @"impostorCols": @(material->getImpostorCols()),
             @"tiling": @[@(tiling.x), @(tiling.y)],
             @"offset": @[@(offset.x), @(offset.y)],
             @"textures": textures
+        };
+    }];
+}
+
+- (NSDictionary *)getFoliageAutoLodForEntity:(NSString *)uuid {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return @{};
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) return @{};
+
+        std::shared_ptr<Mesh> mesh;
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            mesh = renderer->getMesh();
+        } else if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            mesh = skinned->getMesh();
+        } else if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            mesh = instanced->getMesh();
+        }
+        if (!mesh) return @{};
+
+        Camera* camera = SceneManager::getInstance().getSceneCamera();
+        if (!camera || !camera->getEntity()) return @{};
+
+        Transform* transform = entity->getTransform();
+        if (!transform) return @{};
+
+        Math::Vector3 boundsCenter = mesh->getBoundsCenter();
+        Math::Vector3 boundsSize = mesh->getBoundsSize();
+        Math::Vector3 centerWorld = transform->getWorldMatrix().transformPoint(boundsCenter);
+        Math::Vector3 cameraPos = camera->getEntity()->getTransform()->getPosition();
+        float dist = (centerWorld - cameraPos).length();
+
+        float size = std::max(0.1f, std::max(boundsSize.x, std::max(boundsSize.y, boundsSize.z)));
+        float lodStart = std::max(size * 15.0f, dist * 0.6f);
+        float lodEnd = std::max(lodStart + size * 10.0f, dist * 0.8f);
+        float billboardStart = std::max(lodEnd + size * 10.0f, dist * 1.0f);
+        float billboardEnd = std::max(billboardStart + size * 10.0f, dist * 1.2f);
+
+        return @{
+            @"lodFadeStart": @(lodStart),
+            @"lodFadeEnd": @(lodEnd),
+            @"billboardStart": @(billboardStart),
+            @"billboardEnd": @(billboardEnd)
         };
     }];
 }
@@ -1263,31 +1535,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (!material) return;
         
         std::string prop = [property UTF8String];
-        if (prop == "metallic") material->setMetallic(value);
-        else if (prop == "roughness") material->setRoughness(value);
-        else if (prop == "ao") material->setAO(value);
-        else if (prop == "emissionStrength") material->setEmissionStrength(value);
-        else if (prop == "normalScale") material->setNormalScale(value);
-        else if (prop == "heightScale") material->setHeightScale(value);
-        else if (prop == "heightInvert") material->setHeightInvert(value >= 0.5f);
-        else if (prop == "alpha") material->setAlpha(value);
-        else if (prop == "tilingX") {
-            Math::Vector2 tiling = material->getUVTiling();
-            tiling.x = value;
-            material->setUVTiling(tiling);
-        } else if (prop == "tilingY") {
-            Math::Vector2 tiling = material->getUVTiling();
-            tiling.y = value;
-            material->setUVTiling(tiling);
-        } else if (prop == "offsetX") {
-            Math::Vector2 uvOffset = material->getUVOffset();
-            uvOffset.x = value;
-            material->setUVOffset(uvOffset);
-        } else if (prop == "offsetY") {
-            Math::Vector2 uvOffset = material->getUVOffset();
-            uvOffset.y = value;
-            material->setUVOffset(uvOffset);
-        }
+        ApplyMaterialScalar(material, prop, value);
     }];
 }
 
@@ -1298,11 +1546,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (!material) return;
         
         std::string prop = [property UTF8String];
-        if (prop == "albedo") {
-            material->setAlbedo(Math::Vector4(r, g, b, a));
-        } else if (prop == "emission") {
-            material->setEmission(Math::Vector3(r, g, b));
-        }
+        ApplyMaterialColor(material, prop, r, g, b, a);
     }];
 }
 
@@ -1323,14 +1567,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         auto texture = _engine->getRenderer()->getTextureLoader()->loadTexture([path UTF8String], srgb, true);
         if (!texture) return NO;
         
-        if (slotStr == "albedo") material->setAlbedoTexture(texture);
-        else if (slotStr == "normal") material->setNormalTexture(texture);
-        else if (slotStr == "metallic") material->setMetallicTexture(texture);
-        else if (slotStr == "roughness") material->setRoughnessTexture(texture);
-        else if (slotStr == "ao") material->setAOTexture(texture);
-        else if (slotStr == "emission") material->setEmissionTexture(texture);
-        else if (slotStr == "orm") material->setORMTexture(texture);
-        else if (slotStr == "height") material->setHeightTexture(texture);
+        ApplyMaterialTexture(material, slotStr, texture);
         
         return YES;
     }];
@@ -1343,14 +1580,212 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (!material) return;
         
         std::string slotStr = [slot UTF8String];
-        if (slotStr == "albedo") material->setAlbedoTexture(nullptr);
-        else if (slotStr == "normal") material->setNormalTexture(nullptr);
-        else if (slotStr == "metallic") material->setMetallicTexture(nullptr);
-        else if (slotStr == "roughness") material->setRoughnessTexture(nullptr);
-        else if (slotStr == "ao") material->setAOTexture(nullptr);
-        else if (slotStr == "emission") material->setEmissionTexture(nullptr);
-        else if (slotStr == "orm") material->setORMTexture(nullptr);
-        else if (slotStr == "height") material->setHeightTexture(nullptr);
+        ApplyMaterialTexture(material, slotStr, nullptr);
+    }];
+}
+
+- (void)setMaterialScalarForEntityAllMaterials:(NSString *)uuid property:(NSString *)property value:(float)value {
+    [self performAsync:^{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) return;
+
+        EnsureUniqueMaterialsForEntity(entity);
+        std::string prop = [property UTF8String];
+
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            const auto& materials = renderer->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialScalar(material, prop, value);
+            }
+        }
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            const auto& materials = skinned->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialScalar(material, prop, value);
+            }
+        }
+        if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            const auto& materials = instanced->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialScalar(material, prop, value);
+            }
+        }
+    }];
+}
+
+- (void)setMaterialColorForEntityAllMaterials:(NSString *)uuid property:(NSString *)property r:(float)r g:(float)g b:(float)b a:(float)a {
+    [self performAsync:^{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) return;
+
+        EnsureUniqueMaterialsForEntity(entity);
+        std::string prop = [property UTF8String];
+
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            const auto& materials = renderer->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialColor(material, prop, r, g, b, a);
+            }
+        }
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            const auto& materials = skinned->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialColor(material, prop, r, g, b, a);
+            }
+        }
+        if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            const auto& materials = instanced->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialColor(material, prop, r, g, b, a);
+            }
+        }
+    }];
+}
+
+- (BOOL)loadTextureForEntityAllMaterials:(NSString *)uuid slot:(NSString *)slot path:(NSString *)path {
+    return [self performSyncBool:^BOOL {
+        if (!_engine || !_engine->getRenderer() || !_engine->getRenderer()->getTextureLoader()) {
+            return NO;
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) return NO;
+
+        EnsureUniqueMaterialsForEntity(entity);
+
+        std::string slotStr = [slot UTF8String];
+        bool srgb = (slotStr == "albedo" || slotStr == "emission");
+        if (slotStr == "height") srgb = false;
+
+        auto texture = _engine->getRenderer()->getTextureLoader()->loadTexture([path UTF8String], srgb, true);
+        if (!texture) return NO;
+
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            const auto& materials = renderer->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialTexture(material, slotStr, texture);
+            }
+        }
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            const auto& materials = skinned->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialTexture(material, slotStr, texture);
+            }
+        }
+        if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            const auto& materials = instanced->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialTexture(material, slotStr, texture);
+            }
+        }
+        return YES;
+    }];
+}
+
+- (void)clearTextureForEntityAllMaterials:(NSString *)uuid slot:(NSString *)slot {
+    [self performAsync:^{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) return;
+
+        EnsureUniqueMaterialsForEntity(entity);
+
+        std::string slotStr = [slot UTF8String];
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            const auto& materials = renderer->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialTexture(material, slotStr, nullptr);
+            }
+        }
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            const auto& materials = skinned->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialTexture(material, slotStr, nullptr);
+            }
+        }
+        if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            const auto& materials = instanced->getMaterials();
+            for (const auto& material : materials) {
+                ApplyMaterialTexture(material, slotStr, nullptr);
+            }
+        }
+    }];
+}
+
+- (BOOL)bakeImpostorAtlasForEntity:(NSString *)uuid rows:(NSInteger)rows cols:(NSInteger)cols tileSize:(NSInteger)tileSize {
+    return [self performSyncBool:^BOOL {
+        if (!_engine || !_engine->getRenderer()) {
+            return NO;
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return NO;
+        }
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) {
+            return NO;
+        }
+        MaterialBinding binding = GetMaterialBindingForEntityUUID([uuid UTF8String]);
+        auto material = EnsureUniqueMaterialForEntity(binding);
+        if (!material) {
+            return NO;
+        }
+
+        std::shared_ptr<Mesh> mesh;
+        if (binding.renderer) {
+            mesh = binding.renderer->getMesh();
+        } else if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            mesh = instanced->getMesh();
+        }
+        if (!mesh) {
+            return NO;
+        }
+
+        std::string outputPath;
+        auto tex = _engine->getRenderer()->bakeImpostorAtlas(mesh.get(), material.get(),
+                                                            static_cast<uint32_t>(std::max<NSInteger>(1, rows)),
+                                                            static_cast<uint32_t>(std::max<NSInteger>(1, cols)),
+                                                            static_cast<uint32_t>(std::max<NSInteger>(32, tileSize)),
+                                                            &outputPath);
+        if (!tex) {
+            return NO;
+        }
+
+        material->setAlbedoTexture(tex);
+        material->setImpostorEnabled(true);
+        material->setImpostorRows(static_cast<int>(rows));
+        material->setImpostorCols(static_cast<int>(cols));
+        material->setBillboardEnabled(true);
+        if (material->getRenderMode() != Material::RenderMode::Cutout) {
+            material->setRenderMode(Material::RenderMode::Cutout);
+            material->setAlphaCutoff(0.3f);
+        }
+        material->setAlpha(1.0f);
+
+        return YES;
+    }];
+}
+
+// MARK: - Render Stats
+
+- (NSDictionary *)getRenderStats {
+    return (NSDictionary *)[self performSyncObject:^id{
+        if (!_engine || !_engine->getRenderer()) {
+            return @{};
+        }
+        const auto& stats = _engine->getRenderer()->getStats();
+        return @{
+            @"drawCalls": @(stats.drawCalls),
+            @"triangles": @(stats.triangles),
+            @"vertices": @(stats.vertices),
+            @"frameTimeMs": @(stats.frameTime)
+        };
     }];
 }
 
