@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <cctype>
 #include <unordered_set>
+#include <limits>
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
@@ -376,6 +377,20 @@ static std::array<Math::Vector4, 6> ExtractFrustumPlanes(const Math::Matrix4x4& 
         }
     }
     return planes;
+}
+
+static constexpr float kCullTightness = 0.85f;
+
+static bool IsSphereInFrustum(const std::array<Math::Vector4, 6>& planes,
+                              const Math::Vector3& center,
+                              float radius) {
+    for (const auto& p : planes) {
+        float dist = p.x * center.x + p.y * center.y + p.z * center.z + p.w;
+        if (dist < -radius) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool SphereInFrustum(const std::array<Math::Vector4, 6>& planes,
@@ -2958,6 +2973,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     Math::Matrix4x4 projectionMatrix = camera->getProjectionMatrix();
     Math::Matrix4x4 projectionMatrixNoJitter = projectionMatrix;
     Math::Matrix4x4 viewProjectionNoJitter = projectionMatrix * viewMatrix;
+    const auto frustumPlanes = ExtractFrustumPlanes(viewProjectionNoJitter);
     if (taaEnabled) {
         uint32_t jitterIndex = ++m_taaFrameIndex;
         float jitterX = HaltonSequence(jitterIndex, 2) - 0.5f;
@@ -3275,6 +3291,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     std::vector<InstancedDraw> instancedDraws;
     std::vector<InstancedShadowDraw> instancedShadowDraws;
     std::vector<InstanceBatchGPU> instancedBatches;
+    std::unordered_set<Entity*> gpuCulledStatics;
+    std::unordered_set<std::string> gpuCulledStaticIds;
     std::shared_ptr<Mesh> billboardMesh = m_billboardMesh;
     if (billboardMesh && !billboardMesh->isUploaded()) {
         uploadMesh(billboardMesh.get());
@@ -3394,6 +3412,139 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         }
     }
 
+    {
+        const auto& staticEntities = scene->getAllEntities();
+        for (const auto& entityPtr : staticEntities) {
+            Entity* entity = entityPtr.get();
+            if (!entity || !entity->isActiveInHierarchy()) {
+                continue;
+            }
+            if (shouldSkipEntity(entity)) {
+                continue;
+            }
+
+            if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+                if (instanced->isEnabled()) {
+                    continue;
+                }
+            }
+
+            MeshRenderer* mr = entity->getComponent<MeshRenderer>();
+            if (!mr || !mr->isEnabled()) {
+                continue;
+            }
+            std::shared_ptr<Mesh> mesh = mr->getMesh();
+            if (!mesh) {
+                continue;
+            }
+
+            SkinnedMeshRenderer* skinned = entity->getComponent<SkinnedMeshRenderer>();
+            bool wantsSkin = skinned && skinned->isEnabled() && mesh->hasSkinWeights() && !skinned->getBoneMatrices().empty();
+            if (wantsSkin) {
+                continue;
+            }
+
+            if (!mesh->isUploaded()) {
+                uploadMesh(mesh.get());
+            }
+
+            std::shared_ptr<Material> material = mr->getMaterial(0);
+            bool isTransparent = false;
+            if (material) {
+                isTransparent = material->getRenderMode() == Material::RenderMode::Transparent
+                    || material->getAlpha() < 0.999f;
+            }
+
+            Math::Vector3 meshCenter = mesh->getBoundsCenter();
+            Math::Vector3 meshSize = mesh->getBoundsSize();
+            bool billboardEnabled = material && material->getBillboardEnabled() && billboardMesh;
+            float billboardStart = material ? material->getBillboardStart() : 0.0f;
+            float billboardEnd = material ? material->getBillboardEnd() : 0.0f;
+            bool billboardRangeValid = billboardEnabled && billboardEnd > billboardStart + 0.01f;
+
+            Math::Matrix4x4 world = entity->getTransform()->getWorldMatrix();
+            Math::Vector3 worldCenter = world.transformPoint(meshCenter);
+            Math::Vector3 scale = entity->getTransform()->getScale();
+            float maxScale = std::max(std::abs(scale.x), std::max(std::abs(scale.y), std::abs(scale.z)));
+            float radius = 0.5f * std::sqrt(meshSize.x * meshSize.x
+                                            + meshSize.y * meshSize.y
+                                            + meshSize.z * meshSize.z) * maxScale;
+            if (radius <= 0.0f) {
+                radius = 0.001f;
+            }
+            radius *= kCullTightness;
+            if (!IsSphereInFrustum(frustumPlanes, worldCenter, radius)) {
+                continue;
+            }
+
+            InstanceDataGPU data{};
+            data.modelMatrix = world;
+            data.normalMatrix = world.inversed().transposed();
+
+            auto addVisibleInstance = [&](Mesh* drawMesh, Mesh* sourceMesh) {
+                InstancedBatchKey key{};
+                key.mesh = drawMesh;
+                key.sourceMesh = sourceMesh;
+                key.material = material.get();
+                key.isTransparent = isTransparent;
+                key.receiveShadows = mr->getReceiveShadows();
+                key.castShadows = mr->getCastShadows();
+                auto& batch = instancedVisible[key];
+                batch.key = key;
+                batch.material = material;
+                batch.boundsCenter = meshCenter;
+                batch.boundsSize = meshSize;
+                batch.instances.push_back(data);
+            };
+
+            auto addShadowInstance = [&](Mesh* drawMesh, Mesh* sourceMesh) {
+                InstancedBatchKey key{};
+                key.mesh = drawMesh;
+                key.sourceMesh = sourceMesh;
+                key.material = material.get();
+                key.isTransparent = isTransparent;
+                key.receiveShadows = mr->getReceiveShadows();
+                key.castShadows = mr->getCastShadows();
+                auto& batch = instancedShadow[key];
+                batch.key = key;
+                batch.material = material;
+                batch.boundsCenter = meshCenter;
+                batch.boundsSize = meshSize;
+                batch.instances.push_back(data);
+            };
+
+            if (billboardRangeValid) {
+                float dist = (worldCenter - cameraPos).length();
+                if (dist <= billboardStart) {
+                    addVisibleInstance(mesh.get(), mesh.get());
+                    if (mr->getCastShadows()) {
+                        addShadowInstance(mesh.get(), mesh.get());
+                    }
+                } else if (dist >= billboardEnd) {
+                    addVisibleInstance(billboardMesh.get(), mesh.get());
+                    if (mr->getCastShadows()) {
+                        addShadowInstance(billboardMesh.get(), mesh.get());
+                    }
+                } else {
+                    addVisibleInstance(mesh.get(), mesh.get());
+                    addVisibleInstance(billboardMesh.get(), mesh.get());
+                    if (mr->getCastShadows()) {
+                        addShadowInstance(mesh.get(), mesh.get());
+                        addShadowInstance(billboardMesh.get(), mesh.get());
+                    }
+                }
+            } else {
+                addVisibleInstance(mesh.get(), mesh.get());
+                if (mr->getCastShadows()) {
+                    addShadowInstance(mesh.get(), mesh.get());
+                }
+            }
+
+            gpuCulledStatics.insert(entity);
+            gpuCulledStaticIds.insert(entity->getUUID().toString());
+        }
+    }
+
     auto align256 = [](size_t value) {
         constexpr size_t kAlignment = 256;
         return (value + (kAlignment - 1)) & ~(kAlignment - 1);
@@ -3422,6 +3573,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         totalInputCount += gpu.inputCount;
         instancedBatches.push_back(gpu);
     }
+    m_stats.instanceInput = totalInputCount;
 
     size_t totalInputBytes = totalInputCount * sizeof(InstanceDataGPU);
     if (totalInputBytes > 0) {
@@ -3489,6 +3641,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
     // Render shadow maps first
     if (m_shadowPass && m_lightingSystem) {
+        m_shadowPass->setExtraHiddenEntities(gpuCulledStaticIds);
         m_shadowPass->execute(commandBuffer, scene, camera, *m_lightingSystem, instancedShadowDraws);
     }
 
@@ -3508,6 +3661,17 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
         }
     };
+    if (useGpuInstanceCulling && m_instanceCountBuffer && !instancedBatches.empty()) {
+        const uint32_t* counts = static_cast<const uint32_t*>(m_instanceCountBuffer->contents());
+        uint64_t visibleSum = 0;
+        for (size_t i = 0; i < instancedBatches.size(); ++i) {
+            visibleSum += counts[i];
+        }
+        m_stats.instanceVisible = static_cast<uint32_t>(
+            std::min<uint64_t>(visibleSum, std::numeric_limits<uint32_t>::max()));
+    } else {
+        m_stats.instanceVisible = m_stats.instanceInput;
+    }
 
     auto dispatchInstanceCulling = [&](MTL::ComputePipelineState* cullPipeline, bool useHzb) {
         if (!cullPipeline || !m_instanceCullBuffer || !m_instanceCountBuffer || !m_instanceIndirectBuffer) {
@@ -3536,7 +3700,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             const auto& batch = instancedBatches[i];
             Math::Vector3 meshCenter = batch.boundsCenter;
             Math::Vector3 meshSize = batch.boundsSize;
-            float baseRadius = 0.5f * meshSize.length();
+            float baseRadius = 0.5f * meshSize.length() * kCullTightness;
 
             InstanceCullParams params{};
             for (int p = 0; p < 6; ++p) {
@@ -3673,6 +3837,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             if (shouldSkipEntity(entity)) {
                 continue;
             }
+            if (gpuCulledStatics.find(entity) != gpuCulledStatics.end()) {
+                continue;
+            }
 
             MeshRenderer* meshRenderer = entity->getComponent<MeshRenderer>();
             if (!meshRenderer || !meshRenderer->isEnabled()) {
@@ -3681,6 +3848,19 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             
             std::shared_ptr<Mesh> mesh = meshRenderer->getMesh();
             if (!mesh) {
+                continue;
+            }
+
+            Math::Vector3 boundsCenter = meshRenderer->getBoundsCenter();
+            Math::Vector3 boundsSize = meshRenderer->getBoundsSize();
+            float radius = 0.5f * std::sqrt(boundsSize.x * boundsSize.x
+                                            + boundsSize.y * boundsSize.y
+                                            + boundsSize.z * boundsSize.z);
+            if (radius <= 0.0f) {
+                radius = 0.001f;
+            }
+            radius *= kCullTightness;
+            if (!IsSphereInFrustum(frustumPlanes, boundsCenter, radius)) {
                 continue;
             }
 
@@ -4573,6 +4753,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         if (shouldSkipEntity(entity)) {
             continue;
         }
+        if (gpuCulledStatics.find(entity) != gpuCulledStatics.end()) {
+            continue;
+        }
         
         MeshRenderer* meshRenderer = entity->getComponent<MeshRenderer>();
         if (!meshRenderer || !meshRenderer->isEnabled()) {
@@ -4582,6 +4765,19 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         // Get mesh
         std::shared_ptr<Mesh> mesh = meshRenderer->getMesh();
         if (!mesh) continue;
+
+        Math::Vector3 boundsCenter = meshRenderer->getBoundsCenter();
+        Math::Vector3 boundsSize = meshRenderer->getBoundsSize();
+        float radius = 0.5f * std::sqrt(boundsSize.x * boundsSize.x
+                                        + boundsSize.y * boundsSize.y
+                                        + boundsSize.z * boundsSize.z);
+        if (radius <= 0.0f) {
+            radius = 0.001f;
+        }
+        radius *= kCullTightness;
+        if (!IsSphereInFrustum(frustumPlanes, boundsCenter, radius)) {
+            continue;
+        }
 
         SkinnedMeshRenderer* skinned = entity->getComponent<SkinnedMeshRenderer>();
         bool wantsSkin = skinned && skinned->isEnabled() && mesh->hasSkinWeights() && !skinned->getBoneMatrices().empty();

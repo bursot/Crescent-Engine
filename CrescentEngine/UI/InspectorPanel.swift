@@ -50,7 +50,8 @@ struct InspectorPanel: View {
                         if lightSection == nil && decalSection == nil {
                             ComponentSection(title: "Material", icon: "paintpalette.fill") {
                                 MaterialInspector(entityUUID: selectedEntity.uuid,
-                                                  selectedUUIDs: editorState.selectedEntityUUIDs)
+                                                  selectedUUIDs: editorState.selectedEntityUUIDs,
+                                                  editorState: editorState)
                             }
                         }
 
@@ -2242,6 +2243,7 @@ private enum TextureSlot: String, CaseIterable {
 struct MaterialInspector: View {
     let entityUUID: String
     let selectedUUIDs: Set<String>
+    @ObservedObject var editorState: EditorState
     
     @State private var albedo: [Float] = [1, 1, 1, 1]
     @State private var emission: [Float] = [0, 0, 0]
@@ -2283,6 +2285,8 @@ struct MaterialInspector: View {
     @State private var showFileImporter: Bool = false
     @State private var applyToAllSelected: Bool = false
     @State private var applyToAllMaterials: Bool = false
+    @State private var materialAssetName: String = ""
+    @State private var showMaterialImporter: Bool = false
     
     private let timer = Timer.publish(every: 0.75, on: .main, in: .common).autoconnect()
     
@@ -2303,6 +2307,30 @@ struct MaterialInspector: View {
             Toggle(isOn: $applyToAllMaterials) {
                 Text("Apply To All Materials")
                     .font(EditorTheme.font(size: 11, weight: .medium))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Material Asset")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+
+                HStack(spacing: 8) {
+                    TextField("Material Name", text: $materialAssetName)
+                        .textFieldStyle(.roundedBorder)
+                        .font(EditorTheme.font(size: 11, weight: .regular))
+
+                    Button("Save") {
+                        saveMaterialAsset()
+                    }
+                    .buttonStyle(.bordered)
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+
+                    Button("Apply") {
+                        applyMaterialAsset()
+                    }
+                    .buttonStyle(.bordered)
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -2632,6 +2660,10 @@ struct MaterialInspector: View {
     private func refreshMaterial() {
         let bridge = CrescentEngineBridge.shared()
         guard let info = bridge.getMaterialInfo(forEntity: entityUUID) as? [String: Any] else { return }
+
+        if materialAssetName.isEmpty, let name = info["name"] as? String, !name.isEmpty {
+            materialAssetName = name
+        }
         
         if let albedoVals = info["albedo"] as? [NSNumber], albedoVals.count >= 4 {
             albedo = albedoVals.map { $0.floatValue }
@@ -2708,6 +2740,50 @@ struct MaterialInspector: View {
             }
             texturePaths = mapped
         }
+    }
+
+    private func saveMaterialAsset() {
+        let trimmed = materialAssetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            editorState.addLog(.error, "Material name is required.")
+            return
+        }
+        let path = CrescentEngineBridge.shared().createMaterialAssetFromEntity(entityUUID, name: trimmed)
+        if path.isEmpty {
+            editorState.addLog(.error, "Failed to save material asset: \(trimmed)")
+            return
+        }
+        editorState.addLog(.info, "Saved material asset: \(trimmed)")
+        editorState.rescanAssetRoot()
+    }
+
+    private func applyMaterialAsset() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Material Asset"
+        panel.allowedFileTypes = ["cmat"]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let path = url.path
+        let bridge = CrescentEngineBridge.shared()
+        var success = true
+        for uuid in targetUUIDs() {
+            let ok: Bool
+            if applyToAllMaterials {
+                ok = bridge.applyMaterialAssetToAllMaterials(path, toEntity: uuid)
+            } else {
+                ok = bridge.applyMaterialAsset(path, toEntity: uuid)
+            }
+            success = success && ok
+        }
+        if success {
+            editorState.addLog(.info, "Applied material asset: \(url.lastPathComponent)")
+        } else {
+            editorState.addLog(.error, "Failed to apply material asset: \(url.lastPathComponent)")
+        }
+        refreshMaterial()
     }
 
     private func targetUUIDs() -> [String] {

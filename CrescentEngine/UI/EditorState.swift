@@ -29,6 +29,8 @@ struct AssetInfo: Identifiable, Hashable {
     let path: String
     let relativePath: String
     let type: AssetType
+    let modified: Date?
+    let sizeBytes: Int64
 }
 
 struct ModelImportOptions: Hashable {
@@ -836,7 +838,15 @@ class EditorState: ObservableObject {
         if assets.contains(where: { $0.path == path }) {
             return
         }
-        assets.append(AssetInfo(name: name, path: path, relativePath: relativePath, type: type))
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let modified = attributes?[.modificationDate] as? Date
+        let sizeBytes = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+        assets.append(AssetInfo(name: name,
+                                path: path,
+                                relativePath: relativePath,
+                                type: type,
+                                modified: modified,
+                                sizeBytes: sizeBytes))
         if let asset = assets.last {
             updateAssetModificationCache(for: asset)
         }
@@ -845,7 +855,11 @@ class EditorState: ObservableObject {
     private func scanAssets(in root: URL) -> [AssetInfo] {
         var scanned: [AssetInfo] = []
         let fileManager = FileManager.default
-        let resourceKeys: Set<URLResourceKey> = [.isRegularFileKey]
+        let resourceKeys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .contentModificationDateKey,
+            .fileSizeKey
+        ]
         if let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: Array(resourceKeys), options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
             for case let fileURL as URL in enumerator {
                 guard let values = try? fileURL.resourceValues(forKeys: resourceKeys),
@@ -853,7 +867,13 @@ class EditorState: ObservableObject {
                 guard let type = assetType(for: fileURL) else { continue }
                 let name = fileURL.lastPathComponent
                 let relative = assetRelativePath(for: fileURL.path)
-                scanned.append(AssetInfo(name: name, path: fileURL.path, relativePath: relative, type: type))
+                let sizeBytes = Int64(values.fileSize ?? 0)
+                scanned.append(AssetInfo(name: name,
+                                         path: fileURL.path,
+                                         relativePath: relative,
+                                         type: type,
+                                         modified: values.contentModificationDate,
+                                         sizeBytes: sizeBytes))
             }
         }
         return scanned.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -872,6 +892,9 @@ class EditorState: ObservableObject {
         }
         if audioExtensions.contains(ext) {
             return .audio
+        }
+        if materialExtensions.contains(ext) {
+            return .material
         }
         if sceneExtensions.contains(ext) {
             return .scene
@@ -906,6 +929,10 @@ class EditorState: ObservableObject {
 
     private let audioExtensions: Set<String> = [
         "wav", "mp3", "ogg", "flac"
+    ]
+
+    private let materialExtensions: Set<String> = [
+        "cmat"
     ]
 
     private let sceneExtensions: Set<String> = [

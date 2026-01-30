@@ -33,12 +33,15 @@
 #include "../Engine/Physics/PhysicsWorld.hpp"
 #include "../Engine/Rendering/Material.hpp"
 #include "../Engine/Rendering/Texture.hpp"
+#include "../../../ThirdParty/nlohmann/json.hpp"
 #include <atomic>
 #include <dispatch/dispatch.h>
 #include <iostream>
 #include <mutex>
+#include <fstream>
 #include <string>
 #include <algorithm>
+#include <filesystem>
 #include <unordered_map>
 
 using namespace Crescent;
@@ -125,6 +128,158 @@ static std::shared_ptr<Material> CloneMaterial(const std::shared_ptr<Material>& 
         clone->setName(source->getName() + " (Instance)");
     }
     return clone;
+}
+
+static std::string SanitizeFilename(std::string name) {
+    if (name.empty()) {
+        return "Material";
+    }
+    for (char& c : name) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            continue;
+        }
+        if (c == '_' || c == '-' || c == ' ') {
+            continue;
+        }
+        c = '_';
+    }
+    for (char& c : name) {
+        if (c == ' ') {
+            c = '_';
+        }
+    }
+    if (name.empty()) {
+        return "Material";
+    }
+    return name;
+}
+
+static std::string SerializeTexturePath(const std::shared_ptr<Texture2D>& tex, AssetDatabase& db) {
+    if (!tex) {
+        return "";
+    }
+    const std::string& path = tex->getPath();
+    if (path.empty() || path.rfind("builtin://", 0) == 0) {
+        return "";
+    }
+    const std::string& root = db.getRootPath();
+    if (!root.empty() && path.rfind(root, 0) == 0) {
+        return db.getRelativePath(path);
+    }
+    return path;
+}
+
+static std::shared_ptr<Texture2D> LoadMaterialTexture(const std::string& storedPath,
+                                                      bool srgb,
+                                                      Renderer* renderer) {
+    if (storedPath.empty() || !renderer || !renderer->getTextureLoader()) {
+        return nullptr;
+    }
+    AssetDatabase& db = AssetDatabase::getInstance();
+    std::filesystem::path path(storedPath);
+    std::string resolved = path.is_absolute() ? storedPath : db.resolvePath(storedPath);
+    std::error_code ec;
+    if (!std::filesystem::exists(resolved, ec)) {
+        return nullptr;
+    }
+    return renderer->getTextureLoader()->loadTexture(resolved, srgb, true);
+}
+
+static bool ApplyMaterialJson(const nlohmann::json& j,
+                              const std::shared_ptr<Material>& material,
+                              Renderer* renderer) {
+    if (!material) {
+        return false;
+    }
+    if (j.contains("name") && j["name"].is_string()) {
+        material->setName(j["name"].get<std::string>());
+    }
+    if (j.contains("properties") && j["properties"].is_object()) {
+        const auto& p = j["properties"];
+        if (p.contains("albedo") && p["albedo"].is_array() && p["albedo"].size() >= 4) {
+            material->setAlbedo(Math::Vector4(
+                p["albedo"][0].get<float>(),
+                p["albedo"][1].get<float>(),
+                p["albedo"][2].get<float>(),
+                p["albedo"][3].get<float>()));
+        }
+        if (p.contains("metallic")) material->setMetallic(p["metallic"].get<float>());
+        if (p.contains("roughness")) material->setRoughness(p["roughness"].get<float>());
+        if (p.contains("ao")) material->setAO(p["ao"].get<float>());
+        if (p.contains("emission") && p["emission"].is_array() && p["emission"].size() >= 3) {
+            material->setEmission(Math::Vector3(
+                p["emission"][0].get<float>(),
+                p["emission"][1].get<float>(),
+                p["emission"][2].get<float>()));
+        }
+        if (p.contains("emissionStrength")) material->setEmissionStrength(p["emissionStrength"].get<float>());
+        if (p.contains("normalScale")) material->setNormalScale(p["normalScale"].get<float>());
+        if (p.contains("heightScale")) material->setHeightScale(p["heightScale"].get<float>());
+        if (p.contains("heightInvert")) material->setHeightInvert(p["heightInvert"].get<bool>());
+        if (p.contains("renderMode")) {
+            int mode = p["renderMode"].get<int>();
+            mode = std::max(0, std::min(2, mode));
+            material->setRenderMode(static_cast<Material::RenderMode>(mode));
+        }
+        if (p.contains("alphaCutoff")) material->setAlphaCutoff(p["alphaCutoff"].get<float>());
+        if (p.contains("cullMode")) {
+            int mode = p["cullMode"].get<int>();
+            mode = std::max(0, std::min(2, mode));
+            material->setCullMode(static_cast<Material::CullMode>(mode));
+        }
+        if (p.contains("twoSided")) material->setTwoSided(p["twoSided"].get<bool>());
+        if (p.contains("alphaToCoverage")) material->setAlphaToCoverage(p["alphaToCoverage"].get<bool>());
+        if (p.contains("windEnabled")) material->setWindEnabled(p["windEnabled"].get<bool>());
+        if (p.contains("windStrength")) material->setWindStrength(p["windStrength"].get<float>());
+        if (p.contains("windSpeed")) material->setWindSpeed(p["windSpeed"].get<float>());
+        if (p.contains("windScale")) material->setWindScale(p["windScale"].get<float>());
+        if (p.contains("windGust")) material->setWindGust(p["windGust"].get<float>());
+        if (p.contains("windDirection") && p["windDirection"].is_array() && p["windDirection"].size() >= 3) {
+            material->setWindDirection(Math::Vector3(
+                p["windDirection"][0].get<float>(),
+                p["windDirection"][1].get<float>(),
+                p["windDirection"][2].get<float>()));
+        }
+        if (p.contains("lodFadeEnabled")) material->setLodFadeEnabled(p["lodFadeEnabled"].get<bool>());
+        if (p.contains("lodFadeStart")) material->setLodFadeStart(p["lodFadeStart"].get<float>());
+        if (p.contains("lodFadeEnd")) material->setLodFadeEnd(p["lodFadeEnd"].get<float>());
+        if (p.contains("ditherEnabled")) material->setDitherEnabled(p["ditherEnabled"].get<bool>());
+        if (p.contains("billboardEnabled")) material->setBillboardEnabled(p["billboardEnabled"].get<bool>());
+        if (p.contains("billboardStart")) material->setBillboardStart(p["billboardStart"].get<float>());
+        if (p.contains("billboardEnd")) material->setBillboardEnd(p["billboardEnd"].get<float>());
+        if (p.contains("impostorEnabled")) material->setImpostorEnabled(p["impostorEnabled"].get<bool>());
+        if (p.contains("impostorRows")) material->setImpostorRows(p["impostorRows"].get<int>());
+        if (p.contains("impostorCols")) material->setImpostorCols(p["impostorCols"].get<int>());
+        if (p.contains("tiling") && p["tiling"].is_array() && p["tiling"].size() >= 2) {
+            material->setUVTiling(Math::Vector2(
+                p["tiling"][0].get<float>(),
+                p["tiling"][1].get<float>()));
+        }
+        if (p.contains("offset") && p["offset"].is_array() && p["offset"].size() >= 2) {
+            material->setUVOffset(Math::Vector2(
+                p["offset"][0].get<float>(),
+                p["offset"][1].get<float>()));
+        }
+    }
+
+    if (renderer && j.contains("textures") && j["textures"].is_object()) {
+        const auto& t = j["textures"];
+        auto load = [&](const char* key, bool srgb) -> std::shared_ptr<Texture2D> {
+            if (!t.contains(key) || !t[key].is_string()) {
+                return nullptr;
+            }
+            return LoadMaterialTexture(t[key].get<std::string>(), srgb, renderer);
+        };
+        material->setAlbedoTexture(load("albedo", true));
+        material->setNormalTexture(load("normal", false));
+        material->setMetallicTexture(load("metallic", false));
+        material->setRoughnessTexture(load("roughness", false));
+        material->setAOTexture(load("ao", false));
+        material->setEmissionTexture(load("emission", true));
+        material->setORMTexture(load("orm", false));
+        material->setHeightTexture(load("height", false));
+    }
+    return true;
 }
 
 static std::shared_ptr<Material> EnsureUniqueMaterialForEntity(MaterialBinding& binding) {
@@ -1448,6 +1603,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         };
         
         return @{
+            @"name": [NSString stringWithUTF8String:material->getName().c_str()],
             @"albedo": @[@(albedo.x), @(albedo.y), @(albedo.z), @(albedo.w)],
             @"metallic": @(material->getMetallic()),
             @"roughness": @(material->getRoughness()),
@@ -1772,6 +1928,224 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+// MARK: - Material Assets
+
+- (NSString *)createMaterialAssetFromEntity:(NSString *)uuid name:(NSString *)name {
+    return (NSString *)[self performSyncObject:^id{
+        if (!_engine || !_engine->getRenderer()) {
+            return @"";
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return @"";
+        }
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) {
+            return @"";
+        }
+
+        std::shared_ptr<Material> material;
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            material = renderer->getMaterial(0);
+        } else if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            material = skinned->getMaterial(0);
+        } else if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            material = instanced->getMaterial(0);
+        }
+        if (!material) {
+            return @"";
+        }
+
+        AssetDatabase& db = AssetDatabase::getInstance();
+        const std::string& root = db.getRootPath();
+        if (root.empty()) {
+            return @"";
+        }
+
+        std::string baseName;
+        if (name && name.length > 0) {
+            baseName = [name UTF8String];
+        }
+        if (baseName.empty() && !material->getName().empty()) {
+            baseName = material->getName();
+        }
+        if (baseName.empty()) {
+            baseName = entity->getName();
+        }
+        baseName = SanitizeFilename(baseName);
+
+        std::filesystem::path materialsDir = std::filesystem::path(root) / "Materials";
+        std::error_code ec;
+        std::filesystem::create_directories(materialsDir, ec);
+
+        std::filesystem::path target = materialsDir / (baseName + ".cmat");
+        int counter = 1;
+        while (std::filesystem::exists(target, ec)) {
+            target = materialsDir / (baseName + "_" + std::to_string(counter++) + ".cmat");
+        }
+
+        nlohmann::json j;
+        j["version"] = 1;
+        j["name"] = material->getName();
+
+        nlohmann::json props;
+        Math::Vector4 albedo = material->getAlbedo();
+        Math::Vector3 emission = material->getEmission();
+        Math::Vector2 tiling = material->getUVTiling();
+        Math::Vector2 offset = material->getUVOffset();
+        Math::Vector3 windDir = material->getWindDirection();
+
+        props["albedo"] = {albedo.x, albedo.y, albedo.z, albedo.w};
+        props["metallic"] = material->getMetallic();
+        props["roughness"] = material->getRoughness();
+        props["ao"] = material->getAO();
+        props["emission"] = {emission.x, emission.y, emission.z};
+        props["emissionStrength"] = material->getEmissionStrength();
+        props["normalScale"] = material->getNormalScale();
+        props["heightScale"] = material->getHeightScale();
+        props["heightInvert"] = material->getHeightInvert();
+        props["renderMode"] = static_cast<int>(material->getRenderMode());
+        props["alphaCutoff"] = material->getAlphaCutoff();
+        props["cullMode"] = static_cast<int>(material->getCullMode());
+        props["twoSided"] = material->isTwoSided();
+        props["alphaToCoverage"] = material->getAlphaToCoverage();
+        props["windEnabled"] = material->getWindEnabled();
+        props["windStrength"] = material->getWindStrength();
+        props["windSpeed"] = material->getWindSpeed();
+        props["windScale"] = material->getWindScale();
+        props["windGust"] = material->getWindGust();
+        props["windDirection"] = {windDir.x, windDir.y, windDir.z};
+        props["lodFadeEnabled"] = material->getLodFadeEnabled();
+        props["lodFadeStart"] = material->getLodFadeStart();
+        props["lodFadeEnd"] = material->getLodFadeEnd();
+        props["ditherEnabled"] = material->getDitherEnabled();
+        props["billboardEnabled"] = material->getBillboardEnabled();
+        props["billboardStart"] = material->getBillboardStart();
+        props["billboardEnd"] = material->getBillboardEnd();
+        props["impostorEnabled"] = material->getImpostorEnabled();
+        props["impostorRows"] = material->getImpostorRows();
+        props["impostorCols"] = material->getImpostorCols();
+        props["tiling"] = {tiling.x, tiling.y};
+        props["offset"] = {offset.x, offset.y};
+        j["properties"] = props;
+
+        nlohmann::json textures;
+        textures["albedo"] = SerializeTexturePath(material->getAlbedoTexture(), db);
+        textures["normal"] = SerializeTexturePath(material->getNormalTexture(), db);
+        textures["metallic"] = SerializeTexturePath(material->getMetallicTexture(), db);
+        textures["roughness"] = SerializeTexturePath(material->getRoughnessTexture(), db);
+        textures["ao"] = SerializeTexturePath(material->getAOTexture(), db);
+        textures["emission"] = SerializeTexturePath(material->getEmissionTexture(), db);
+        textures["orm"] = SerializeTexturePath(material->getORMTexture(), db);
+        textures["height"] = SerializeTexturePath(material->getHeightTexture(), db);
+        j["textures"] = textures;
+
+        std::ofstream out(target);
+        if (!out.is_open()) {
+            return @"";
+        }
+        out << j.dump(2);
+        out.close();
+
+        std::string savedPath = target.lexically_normal().string();
+        db.registerAsset(savedPath, "material");
+        return [NSString stringWithUTF8String:savedPath.c_str()];
+    }];
+}
+
+- (BOOL)applyMaterialAsset:(NSString *)path toEntity:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        if (!_engine || !_engine->getRenderer()) {
+            return NO;
+        }
+        if (!path || path.length == 0) {
+            return NO;
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return NO;
+        }
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) {
+            return NO;
+        }
+        std::ifstream in([path UTF8String]);
+        if (!in.good()) {
+            return NO;
+        }
+        nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+        if (!j.is_object()) {
+            return NO;
+        }
+        auto material = std::make_shared<Material>();
+        if (!ApplyMaterialJson(j, material, _engine->getRenderer())) {
+            return NO;
+        }
+
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            renderer->setMaterial(material);
+        }
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            skinned->setMaterial(material);
+        }
+        if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            instanced->setMaterial(material);
+        }
+        return YES;
+    }];
+}
+
+- (BOOL)applyMaterialAssetToAllMaterials:(NSString *)path toEntity:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        if (!_engine || !_engine->getRenderer()) {
+            return NO;
+        }
+        if (!path || path.length == 0) {
+            return NO;
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return NO;
+        }
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) {
+            return NO;
+        }
+        std::ifstream in([path UTF8String]);
+        if (!in.good()) {
+            return NO;
+        }
+        nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+        if (!j.is_object()) {
+            return NO;
+        }
+        auto baseMaterial = std::make_shared<Material>();
+        if (!ApplyMaterialJson(j, baseMaterial, _engine->getRenderer())) {
+            return NO;
+        }
+
+        auto applyAll = [&](auto* renderer) {
+            if (!renderer) {
+                return;
+            }
+            uint32_t count = renderer->getMaterialCount();
+            if (count == 0) {
+                renderer->setMaterial(baseMaterial);
+                return;
+            }
+            renderer->setMaterial(0, baseMaterial);
+            for (uint32_t i = 1; i < count; ++i) {
+                renderer->setMaterial(i, CloneMaterial(baseMaterial));
+            }
+        };
+
+        applyAll(entity->getComponent<MeshRenderer>());
+        applyAll(entity->getComponent<SkinnedMeshRenderer>());
+        applyAll(entity->getComponent<InstancedMeshRenderer>());
+        return YES;
+    }];
+}
+
 // MARK: - Render Stats
 
 - (NSDictionary *)getRenderStats {
@@ -1784,6 +2158,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"drawCalls": @(stats.drawCalls),
             @"triangles": @(stats.triangles),
             @"vertices": @(stats.vertices),
+            @"instanceInput": @(stats.instanceInput),
+            @"instanceVisible": @(stats.instanceVisible),
             @"frameTimeMs": @(stats.frameTime)
         };
     }];

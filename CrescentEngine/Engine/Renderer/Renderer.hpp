@@ -159,12 +159,16 @@ public:
         uint32_t drawCalls;
         uint32_t triangles;
         uint32_t vertices;
+        uint32_t instanceInput;
+        uint32_t instanceVisible;
         float frameTime;
         
         void reset() {
             drawCalls = 0;
             triangles = 0;
             vertices = 0;
+            instanceInput = 0;
+            instanceVisible = 0;
             frameTime = 0.0f;
         }
     };

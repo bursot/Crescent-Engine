@@ -146,8 +146,10 @@ struct MetalView: NSViewRepresentable {
 
             let drawableSize = metalView.metalLayer?.drawableSize ?? .zero
             let scale = metalView.layer?.contentsScale ?? 2.0
-            let width = Float(drawableSize.width > 0 ? drawableSize.width : size.width * scale)
-            let height = Float(drawableSize.height > 0 ? drawableSize.height : size.height * scale)
+            let expectedWidth = size.width * scale
+            let expectedHeight = size.height * scale
+            let width = Float(max(drawableSize.width, expectedWidth))
+            let height = Float(max(drawableSize.height, expectedHeight))
 
             guard width > 0 && height > 0 else { return }
             if abs(width - lastDrawableWidth) < 0.5, abs(height - lastDrawableHeight) < 0.5 {
@@ -230,10 +232,12 @@ struct MetalView: NSViewRepresentable {
                         let drawCalls = (stats["drawCalls"] as? NSNumber)?.intValue ?? 0
                         let triangles = (stats["triangles"] as? NSNumber)?.intValue ?? 0
                         let vertices = (stats["vertices"] as? NSNumber)?.intValue ?? 0
+                        let instanceInput = (stats["instanceInput"] as? NSNumber)?.intValue ?? 0
+                        let instanceVisible = (stats["instanceVisible"] as? NSNumber)?.intValue ?? 0
                         let frameMs = (stats["frameTimeMs"] as? NSNumber)?.floatValue ?? 0
                         let fps = frameMs > 0 ? (1000.0 / frameMs) : 0
-                        print(String(format: "[STATS] draws=%d tris=%d verts=%d frame=%.2fms (~%.1f fps)",
-                                     drawCalls, triangles, vertices, frameMs, fps))
+                        print(String(format: "[STATS] draws=%d tris=%d verts=%d inst=%d/%d frame=%.2fms (~%.1f fps)",
+                                     drawCalls, triangles, vertices, instanceVisible, instanceInput, frameMs, fps))
                     }
                 }
             }
@@ -430,7 +434,9 @@ class MetalDisplayView: NSView {
             metalLayer.device = MTLCreateSystemDefaultDevice()
             metalLayer.pixelFormat = .bgra8Unorm
             metalLayer.framebufferOnly = false
-            metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+            metalLayer.contentsScale = window?.backingScaleFactor
+                ?? NSScreen.main?.backingScaleFactor
+                ?? 2.0
             
             print("Metal layer created with scale: \(metalLayer.contentsScale)")
         }
@@ -470,6 +476,11 @@ class MetalDisplayView: NSView {
         super.viewDidMoveToWindow()
         
         if window != nil {
+            if let metalLayer = metalLayer {
+                metalLayer.contentsScale = window?.backingScaleFactor
+                    ?? NSScreen.main?.backingScaleFactor
+                    ?? metalLayer.contentsScale
+            }
             // Update drawable size when added to window
             setFrameSize(bounds.size)
             
@@ -480,6 +491,16 @@ class MetalDisplayView: NSView {
             updateTrackingAreas()
             
             print("MetalView added to window - Ready to receive input")
+        }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if let metalLayer = metalLayer {
+            metalLayer.contentsScale = window?.backingScaleFactor
+                ?? NSScreen.main?.backingScaleFactor
+                ?? metalLayer.contentsScale
+            updateDrawableSize(bounds.size)
         }
     }
     

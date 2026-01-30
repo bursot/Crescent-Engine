@@ -572,6 +572,10 @@ void ShadowRenderPass::execute(MTL::CommandBuffer* cmdBuffer,
     }
 }
 
+void ShadowRenderPass::setExtraHiddenEntities(const std::unordered_set<std::string>& hidden) {
+    m_extraHidden = hidden;
+}
+
 void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* scene, const LightingSystem& lighting) {
     const auto& cascades = lighting.getCascades();
     if (cascades.empty()) {
@@ -824,6 +828,9 @@ bool ShadowRenderPass::shouldSkipEntity(Entity* entity) const {
         return true;
     }
     std::string id = entity->getUUID().toString();
+    if (m_extraHidden.find(id) != m_extraHidden.end()) {
+        return true;
+    }
     if (m_hlodHidden.find(id) != m_hlodHidden.end()) {
         return true;
     }
@@ -998,7 +1005,7 @@ void ShadowRenderPass::renderInstancedRange(MTL::CommandBuffer* cmdBuffer,
 
         Math::Vector3 meshCenter = draw.boundsCenter;
         Math::Vector3 meshSize = draw.boundsSize;
-        float baseRadius = 0.5f * meshSize.length();
+        float baseRadius = 0.5f * meshSize.length() * 0.85f;
 
         InstanceCullParamsCPU params{};
         for (int p = 0; p < 6; ++p) {
@@ -1248,7 +1255,7 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
 
         Math::Vector3 meshCenter = draw.boundsCenter;
         Math::Vector3 meshSize = draw.boundsSize;
-        float baseRadius = 0.5f * meshSize.length();
+        float baseRadius = 0.5f * meshSize.length() * 0.85f;
 
         InstanceCullParamsCPU params{};
         for (int p = 0; p < 6; ++p) {

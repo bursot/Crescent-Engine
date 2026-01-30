@@ -31,6 +31,7 @@ public:
     void setMaterial(uint32_t index, std::shared_ptr<Material> material);
     std::shared_ptr<Material> getMaterial(uint32_t index = 0) const;
     const std::vector<std::shared_ptr<Material>>& getMaterials() const { return m_Materials; }
+    uint32_t getMaterialCount() const { return static_cast<uint32_t>(m_Materials.size()); }
 
     // Animation
     std::shared_ptr<AnimationClip> getAnimationClip() const { return m_Clip; }

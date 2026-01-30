@@ -220,6 +220,8 @@ std::string AssetDatabase::importAsset(const std::string& sourcePath, const std:
         subdir = "HDRI";
     } else if (assetType == "audio") {
         subdir = "Audio";
+    } else if (assetType == "material") {
+        subdir = "Materials";
     }
 
     std::filesystem::path root(m_RootPath);
@@ -520,6 +522,9 @@ bool AssetDatabase::isAssetFile(const std::string& extension, std::string& outTy
     static const std::unordered_set<std::string> kAudio = {
         ".wav", ".mp3", ".ogg", ".flac"
     };
+    static const std::unordered_set<std::string> kMaterials = {
+        ".cmat"
+    };
     if (kModels.count(extension) > 0) {
         outType = "model";
         return true;
@@ -534,6 +539,10 @@ bool AssetDatabase::isAssetFile(const std::string& extension, std::string& outTy
     }
     if (kAudio.count(extension) > 0) {
         outType = "audio";
+        return true;
+    }
+    if (kMaterials.count(extension) > 0) {
+        outType = "material";
         return true;
     }
     return false;

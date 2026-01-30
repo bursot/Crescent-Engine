@@ -53,6 +53,8 @@ public:
                  Camera* camera,
                  const LightingSystem& lighting,
                  const std::vector<InstancedShadowDraw>& instancedDraws);
+
+    void setExtraHiddenEntities(const std::unordered_set<std::string>& hidden);
     
     // Atlas texture exposed to main renderer for sampling.
     MTL::Texture* getShadowAtlas() const { return m_shadowAtlas; }
@@ -134,6 +136,7 @@ private:
 
     std::unordered_set<std::string> m_hlodHidden;
     std::unordered_set<std::string> m_hlodActiveProxies;
+    std::unordered_set<std::string> m_extraHidden;
     
     uint32_t m_atlasResolution;
     uint32_t m_atlasLayers;

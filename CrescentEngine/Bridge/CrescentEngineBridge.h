@@ -91,6 +91,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)clearTextureForEntityAllMaterials:(NSString *)uuid slot:(NSString *)slot NS_SWIFT_NAME(clearTextureForEntityAllMaterials(_:slot:));
 - (BOOL)bakeImpostorAtlasForEntity:(NSString *)uuid rows:(NSInteger)rows cols:(NSInteger)cols tileSize:(NSInteger)tileSize NS_SWIFT_NAME(bakeImpostorAtlas(forEntity:rows:cols:tileSize:));
 
+// Material assets
+- (NSString *)createMaterialAssetFromEntity:(NSString *)uuid name:(NSString *)name NS_SWIFT_NAME(createMaterialAssetFromEntity(_:name:));
+- (BOOL)applyMaterialAsset:(NSString *)path toEntity:(NSString *)uuid NS_SWIFT_NAME(applyMaterialAsset(_:toEntity:));
+- (BOOL)applyMaterialAssetToAllMaterials:(NSString *)path toEntity:(NSString *)uuid NS_SWIFT_NAME(applyMaterialAssetToAllMaterials(_:toEntity:));
+
 // Render stats
 - (NSDictionary *)getRenderStats NS_SWIFT_NAME(getRenderStats());
 
