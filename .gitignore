@@ -101,3 +101,5 @@ ThirdParty/JoltPhysics/
 ThirdParty/assimp/
 ThirdParty/assimp-build-*/
 ThirdParty/assimp-build-*
+ThirdParty/basisu/
+ThirdParty/astc-encoder/

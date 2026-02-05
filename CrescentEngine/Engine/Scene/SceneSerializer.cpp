@@ -798,7 +798,10 @@ std::string ResolveTextureEntryPath(const json& entry) {
     return "";
 }
 
-std::shared_ptr<Texture2D> LoadTexturePath(TextureLoader* loader, const std::string& path, bool srgb) {
+std::shared_ptr<Texture2D> LoadTexturePath(TextureLoader* loader,
+                                           const std::string& path,
+                                           bool srgb,
+                                           bool normalMap) {
     if (!loader || path.empty()) {
         return nullptr;
     }
@@ -806,7 +809,7 @@ std::shared_ptr<Texture2D> LoadTexturePath(TextureLoader* loader, const std::str
     if (ParseEmbeddedTextureKey(path, info)) {
         return LoadEmbeddedTextureFromModel(loader, path, info, srgb);
     }
-    return loader->loadTexture(path, srgb, true);
+    return loader->loadTexture(path, srgb, true, normalMap);
 }
 
 std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* loader) {
@@ -862,7 +865,7 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
 
     if (j.contains("textures") && j["textures"].is_object()) {
         const json& t = j["textures"];
-        auto load = [&](const char* key, bool srgb) -> std::shared_ptr<Texture2D> {
+        auto load = [&](const char* key, bool srgb, bool normalMap) -> std::shared_ptr<Texture2D> {
             if (!t.contains(key)) {
                 return nullptr;
             }
@@ -870,16 +873,16 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
             if (resolved.empty()) {
                 return nullptr;
             }
-            return LoadTexturePath(loader, resolved, srgb);
+            return LoadTexturePath(loader, resolved, srgb, normalMap);
         };
-        if (auto tex = load("albedo", true)) material->setAlbedoTexture(tex);
-        if (auto tex = load("normal", false)) material->setNormalTexture(tex);
-        if (auto tex = load("metallic", false)) material->setMetallicTexture(tex);
-        if (auto tex = load("roughness", false)) material->setRoughnessTexture(tex);
-        if (auto tex = load("ao", false)) material->setAOTexture(tex);
-        if (auto tex = load("emissive", true)) material->setEmissionTexture(tex);
-        if (auto tex = load("orm", false)) material->setORMTexture(tex);
-        if (auto tex = load("height", false)) material->setHeightTexture(tex);
+        if (auto tex = load("albedo", true, true)) material->setAlbedoTexture(tex);
+        if (auto tex = load("normal", false, true)) material->setNormalTexture(tex);
+        if (auto tex = load("metallic", false, false)) material->setMetallicTexture(tex);
+        if (auto tex = load("roughness", false, false)) material->setRoughnessTexture(tex);
+        if (auto tex = load("ao", false, false)) material->setAOTexture(tex);
+        if (auto tex = load("emissive", true, false)) material->setEmissionTexture(tex);
+        if (auto tex = load("orm", false, false)) material->setORMTexture(tex);
+        if (auto tex = load("height", false, false)) material->setHeightTexture(tex);
     }
 
     return material;
@@ -1580,7 +1583,7 @@ void ApplyEntityComponents(Entity* entity,
             decal->setOffset(JsonToVec2(d["offset"], decal->getOffset()));
         }
         decal->setEdgeSoftness(d.value("softness", decal->getEdgeSoftness()));
-        auto loadDecal = [&](const char* key, bool srgb,
+        auto loadDecal = [&](const char* key, bool srgb, bool normalMap,
                              auto setPath, auto setTexture) {
             if (!d.contains(key)) {
                 return;
@@ -1590,25 +1593,25 @@ void ApplyEntityComponents(Entity* entity,
                 return;
             }
             setPath(resolved);
-            if (auto tex = LoadTexturePath(textureLoader, resolved, srgb)) {
+            if (auto tex = LoadTexturePath(textureLoader, resolved, srgb, normalMap)) {
                 setTexture(tex);
             }
         };
-        loadDecal("albedo", true,
+        loadDecal("albedo", true, true,
                   [&](const std::string& path){ decal->setAlbedoPath(path); },
                   [&](const std::shared_ptr<Texture2D>& tex){ decal->setAlbedoTexture(tex); });
         if (d.contains("texture")) {
-            loadDecal("texture", true,
+            loadDecal("texture", true, true,
                       [&](const std::string& path){ decal->setAlbedoPath(path); },
                       [&](const std::shared_ptr<Texture2D>& tex){ decal->setAlbedoTexture(tex); });
         }
-        loadDecal("normal", false,
+        loadDecal("normal", false, true,
                   [&](const std::string& path){ decal->setNormalPath(path); },
                   [&](const std::shared_ptr<Texture2D>& tex){ decal->setNormalTexture(tex); });
-        loadDecal("orm", false,
+        loadDecal("orm", false, false,
                   [&](const std::string& path){ decal->setORMPath(path); },
                   [&](const std::shared_ptr<Texture2D>& tex){ decal->setORMTexture(tex); });
-        loadDecal("mask", false,
+        loadDecal("mask", false, false,
                   [&](const std::string& path){ decal->setMaskPath(path); },
                   [&](const std::shared_ptr<Texture2D>& tex){ decal->setMaskTexture(tex); });
     }

@@ -123,6 +123,7 @@
 				625BE1622EE9D193008AFE51 /* Sources */,
 				625BE1632EE9D193008AFE51 /* Frameworks */,
 				625BE1642EE9D193008AFE51 /* Resources */,
+				62F0B5D82F9A1A1200C0FFEE /* Copy BasisU */,
 			);
 			buildRules = (
 			);
@@ -258,6 +259,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		62F0B5D82F9A1A1200C0FFEE /* Copy BasisU */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(PROJECT_DIR)/ThirdParty/basisu/basisu",
+			);
+			name = "Copy BasisU";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/basisu",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nBASISU_SRC=\"${PROJECT_DIR}/ThirdParty/basisu/basisu\"\nBASISU_DST_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nBASISU_DST=\"${BASISU_DST_DIR}/basisu\"\nif [ -f \"$BASISU_SRC\" ]; then\n  mkdir -p \"$BASISU_DST_DIR\"\n  /bin/cp -f \"$BASISU_SRC\" \"$BASISU_DST\"\n  /bin/chmod +x \"$BASISU_DST\"\nelse\n  echo \"[Copy BasisU] source not found: $BASISU_SRC\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		625BE1622EE9D193008AFE51 /* Sources */ = {

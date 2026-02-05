@@ -347,7 +347,11 @@ static std::shared_ptr<Texture2D> LoadEmbeddedTexture(ImportContext& context, co
     return context.textureLoader->createTextureFromRGBA8(cacheKey, rgba.data(), static_cast<int>(texture->mWidth), static_cast<int>(texture->mHeight), srgb, true);
 }
 
-static std::shared_ptr<Texture2D> LoadMaterialTexture(ImportContext& context, const aiMaterial* material, aiTextureType type, bool srgb) {
+static std::shared_ptr<Texture2D> LoadMaterialTexture(ImportContext& context,
+                                                      const aiMaterial* material,
+                                                      aiTextureType type,
+                                                      bool srgb,
+                                                      bool normalMap) {
     if (!material || !context.textureLoader) {
         return nullptr;
     }
@@ -384,7 +388,7 @@ static std::shared_ptr<Texture2D> LoadMaterialTexture(ImportContext& context, co
         std::cerr << "[ModelImporter] Missing texture: " << resolved << std::endl;
         return nullptr;
     }
-    return context.textureLoader->loadTexture(resolved, srgb, true);
+    return context.textureLoader->loadTexture(resolved, srgb, true, normalMap);
 }
 
 static bool HasAnyToken(const TextureCandidate& candidate, const std::vector<std::string>& needles) {
@@ -402,7 +406,8 @@ static bool HasAnyToken(const TextureCandidate& candidate, const std::vector<std
 static std::shared_ptr<Texture2D> FindFallbackTexture(ImportContext& context,
                                                       const std::string& materialName,
                                                       const std::vector<std::string>& channelTokens,
-                                                      bool srgb) {
+                                                      bool srgb,
+                                                      bool normalMap) {
     if (!context.textureLoader || context.baseDir.empty()) {
         return nullptr;
     }
@@ -441,7 +446,7 @@ static std::shared_ptr<Texture2D> FindFallbackTexture(ImportContext& context,
     if (!chosen) {
         return nullptr;
     }
-    return context.textureLoader->loadTexture(chosen->fullPath, srgb, true);
+    return context.textureLoader->loadTexture(chosen->fullPath, srgb, true, normalMap);
 }
 
 static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiMaterial* material) {
@@ -540,71 +545,71 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
         result->setRenderMode(Material::RenderMode::Transparent);
     }
     
-    auto albedoTex = LoadMaterialTexture(context, material, aiTextureType_BASE_COLOR, true);
+    auto albedoTex = LoadMaterialTexture(context, material, aiTextureType_BASE_COLOR, true, true);
     if (!albedoTex) {
-        albedoTex = LoadMaterialTexture(context, material, aiTextureType_DIFFUSE, true);
+        albedoTex = LoadMaterialTexture(context, material, aiTextureType_DIFFUSE, true, true);
     }
     if (!albedoTex) {
-        albedoTex = FindFallbackTexture(context, materialName, kAlbedoTokens, true);
+        albedoTex = FindFallbackTexture(context, materialName, kAlbedoTokens, true, true);
     }
     if (albedoTex) {
         result->setAlbedoTexture(albedoTex);
     }
     
-    auto normalTex = LoadMaterialTexture(context, material, aiTextureType_NORMALS, false);
-    auto heightTex = LoadMaterialTexture(context, material, aiTextureType_HEIGHT, false);
+    auto normalTex = LoadMaterialTexture(context, material, aiTextureType_NORMALS, false, true);
+    auto heightTex = LoadMaterialTexture(context, material, aiTextureType_HEIGHT, false, false);
     if (!normalTex && heightTex) {
         normalTex = heightTex;
         heightTex.reset();
     }
     if (!normalTex) {
-        normalTex = FindFallbackTexture(context, materialName, kNormalTokens, false);
+        normalTex = FindFallbackTexture(context, materialName, kNormalTokens, false, true);
     }
     if (normalTex) {
         result->setNormalTexture(normalTex);
     }
     if (!heightTex) {
-        heightTex = FindFallbackTexture(context, materialName, kHeightTokens, false);
+        heightTex = FindFallbackTexture(context, materialName, kHeightTokens, false, false);
     }
     if (heightTex) {
         result->setHeightTexture(heightTex);
     }
     
-    auto metallicTex = LoadMaterialTexture(context, material, aiTextureType_METALNESS, false);
+    auto metallicTex = LoadMaterialTexture(context, material, aiTextureType_METALNESS, false, false);
     if (!metallicTex) {
-        metallicTex = FindFallbackTexture(context, materialName, kMetallicTokens, false);
+        metallicTex = FindFallbackTexture(context, materialName, kMetallicTokens, false, false);
     }
     if (metallicTex) {
         result->setMetallicTexture(metallicTex);
     }
     
-    auto roughnessTex = LoadMaterialTexture(context, material, aiTextureType_DIFFUSE_ROUGHNESS, false);
+    auto roughnessTex = LoadMaterialTexture(context, material, aiTextureType_DIFFUSE_ROUGHNESS, false, false);
     if (!roughnessTex) {
-        roughnessTex = FindFallbackTexture(context, materialName, kRoughnessTokens, false);
+        roughnessTex = FindFallbackTexture(context, materialName, kRoughnessTokens, false, false);
     }
     if (roughnessTex) {
         result->setRoughnessTexture(roughnessTex);
     }
     
-    auto aoTex = LoadMaterialTexture(context, material, aiTextureType_AMBIENT_OCCLUSION, false);
+    auto aoTex = LoadMaterialTexture(context, material, aiTextureType_AMBIENT_OCCLUSION, false, false);
     if (!aoTex) {
-        aoTex = FindFallbackTexture(context, materialName, kAOTokens, false);
+        aoTex = FindFallbackTexture(context, materialName, kAOTokens, false, false);
     }
     if (aoTex) {
         result->setAOTexture(aoTex);
     }
     
-    auto ormTex = LoadMaterialTexture(context, material, aiTextureType_GLTF_METALLIC_ROUGHNESS, false);
+    auto ormTex = LoadMaterialTexture(context, material, aiTextureType_GLTF_METALLIC_ROUGHNESS, false, false);
     if (!ormTex) {
-        ormTex = FindFallbackTexture(context, materialName, kORMTokens, false);
+        ormTex = FindFallbackTexture(context, materialName, kORMTokens, false, false);
     }
     if (ormTex) {
         result->setORMTexture(ormTex);
     }
     
-    auto emissionTex = LoadMaterialTexture(context, material, aiTextureType_EMISSIVE, true);
+    auto emissionTex = LoadMaterialTexture(context, material, aiTextureType_EMISSIVE, true, false);
     if (!emissionTex) {
-        emissionTex = FindFallbackTexture(context, materialName, kEmissionTokens, true);
+        emissionTex = FindFallbackTexture(context, materialName, kEmissionTokens, true, false);
     }
     if (emissionTex) {
         result->setEmissionTexture(emissionTex);
@@ -1606,7 +1611,7 @@ bool SceneCommands::reimportTextureAsset(Scene* scene, const std::string& guid) 
     if (record.textureSettings.normalMap) {
         srgb = false;
     }
-    auto texture = loader->loadTexture(path, srgb, record.textureSettings.flipY);
+    auto texture = loader->loadTexture(path, srgb, record.textureSettings.flipY, record.textureSettings.normalMap);
     if (!texture) {
         return false;
     }

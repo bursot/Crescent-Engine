@@ -6,6 +6,8 @@ DEPS_DIR="$ROOT_DIR/ThirdParty"
 
 JOLT_TAG="v5.5.0"
 ASSIMP_TAG="v5.4.3"
+BASISU_TAG="master"
+ASTC_TAG="main"
 
 clone_repo() {
   local url="$1"
@@ -34,6 +36,8 @@ mkdir -p "$DEPS_DIR"
 
 clone_repo "https://github.com/jrouwe/JoltPhysics.git" "$DEPS_DIR/JoltPhysics" "$JOLT_TAG"
 clone_repo "https://github.com/assimp/assimp.git" "$DEPS_DIR/assimp" "$ASSIMP_TAG"
+clone_repo "https://github.com/BinomialLLC/basis_universal.git" "$DEPS_DIR/basisu" "$BASISU_TAG"
+clone_repo "https://github.com/ARM-software/astc-encoder.git" "$DEPS_DIR/astc-encoder" "$ASTC_TAG"
 
 build_cmake "$DEPS_DIR/JoltPhysics/Build" "$DEPS_DIR/jolt-build-debug" Debug \
   -DJPH_BUILD_SHARED_LIBRARY=OFF \

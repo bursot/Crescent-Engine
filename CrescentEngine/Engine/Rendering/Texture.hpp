@@ -52,7 +52,7 @@ public:
     TextureLoader(MTL::Device* device, MTL::CommandQueue* commandQueue = nullptr);
     ~TextureLoader();
     
-    std::shared_ptr<Texture2D> loadTexture(const std::string& path, bool srgb = true, bool flipVertical = true);
+    std::shared_ptr<Texture2D> loadTexture(const std::string& path, bool srgb = true, bool flipVertical = true, bool normalMap = false);
     std::shared_ptr<Texture2D> loadTextureFromMemory(const unsigned char* data, size_t size, bool srgb, bool flipVertical, const std::string& cacheKey);
     std::shared_ptr<Texture2D> createTextureFromRGBA8(const std::string& cacheKey, const unsigned char* rgba, int width, int height, bool srgb, bool flipVertical);
     void invalidateTexture(const std::string& path);
@@ -64,6 +64,7 @@ public:
 private:
     std::shared_ptr<Texture2D> loadHDRTexture(const std::string& path, bool flipVertical);
     std::shared_ptr<Texture2D> loadEXRTexture(const std::string& path, bool flipVertical);
+    std::shared_ptr<Texture2D> loadKTX2Texture(const std::string& path, bool srgb, bool normalMap, const std::string& cacheKey);
     void generateMipmaps(MTL::Texture* texture);
     
     MTL::Device* m_Device;
