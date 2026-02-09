@@ -744,7 +744,8 @@ bool ParseEmbeddedTextureKey(const std::string& path, EmbeddedTextureInfo& outIn
 std::shared_ptr<Texture2D> LoadEmbeddedTextureFromModel(TextureLoader* loader,
                                                         const std::string& cacheKey,
                                                         const EmbeddedTextureInfo& info,
-                                                        bool srgb) {
+                                                        bool srgb,
+                                                        bool normalMap) {
     if (!loader) {
         return nullptr;
     }
@@ -760,7 +761,7 @@ std::shared_ptr<Texture2D> LoadEmbeddedTextureFromModel(TextureLoader* loader,
     if (texture->mHeight == 0) {
         const unsigned char* data = reinterpret_cast<const unsigned char*>(texture->pcData);
         size_t size = static_cast<size_t>(texture->mWidth);
-        return loader->loadTextureFromMemory(data, size, srgb, true, cacheKey);
+        return loader->loadTextureFromMemory(data, size, srgb, true, cacheKey, normalMap);
     }
     std::vector<unsigned char> rgba;
     if (!BuildEmbeddedRGBA(texture, rgba)) {
@@ -770,7 +771,8 @@ std::shared_ptr<Texture2D> LoadEmbeddedTextureFromModel(TextureLoader* loader,
                                           static_cast<int>(texture->mWidth),
                                           static_cast<int>(texture->mHeight),
                                           srgb,
-                                          true);
+                                          true,
+                                          normalMap);
 }
 
 std::string ResolveTextureEntryPath(const json& entry) {
@@ -807,7 +809,7 @@ std::shared_ptr<Texture2D> LoadTexturePath(TextureLoader* loader,
     }
     EmbeddedTextureInfo info;
     if (ParseEmbeddedTextureKey(path, info)) {
-        return LoadEmbeddedTextureFromModel(loader, path, info, srgb);
+        return LoadEmbeddedTextureFromModel(loader, path, info, srgb, normalMap);
     }
     return loader->loadTexture(path, srgb, true, normalMap);
 }

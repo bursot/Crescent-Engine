@@ -181,6 +181,38 @@ std::string HashPathStable(const std::string& input) {
     return oss.str();
 }
 
+constexpr const char* kEmbeddedTextureMarker = "#embedded:";
+
+bool IsEmbeddedTextureCacheKey(const std::string& cacheKey) {
+    return cacheKey.find(kEmbeddedTextureMarker) != std::string::npos;
+}
+
+std::string CanonicalizePathIfPossible(const std::string& path) {
+    if (path.empty()) {
+        return path;
+    }
+    std::error_code ec;
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
+    return ec ? path : canonical.string();
+}
+
+std::string ExtractEmbeddedSourcePath(const std::string& cacheKey) {
+    size_t markerPos = cacheKey.find(kEmbeddedTextureMarker);
+    if (markerPos == std::string::npos || markerPos == 0) {
+        return "";
+    }
+    return CanonicalizePathIfPossible(cacheKey.substr(0, markerPos));
+}
+
+std::string NormalizeEmbeddedCacheKey(const std::string& cacheKey) {
+    size_t markerPos = cacheKey.find(kEmbeddedTextureMarker);
+    if (markerPos == std::string::npos || markerPos == 0) {
+        return cacheKey;
+    }
+    std::string sourcePath = CanonicalizePathIfPossible(cacheKey.substr(0, markerPos));
+    return sourcePath + cacheKey.substr(markerPos);
+}
+
 uint32_t ComputeMipLevels(uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) {
         return 1;
@@ -242,6 +274,40 @@ std::string GetKtx2CachePath(const std::string& sourcePath) {
     }
     std::filesystem::path cacheDir = std::filesystem::path(libraryPath) / "ImportCache";
     return (cacheDir / (guid + ".ktx2")).string();
+}
+
+std::string GetEmbeddedKtx2CachePath(const std::string& cacheKey) {
+    AssetDatabase& db = AssetDatabase::getInstance();
+    std::string libraryPath = db.getLibraryPath();
+    if (libraryPath.empty()) {
+        if (isKtx2DebugEnabled()) {
+            std::cerr << "[TextureLoader] KTX2 debug: LibraryPath empty, cannot cache embedded texture " << cacheKey << std::endl;
+        }
+        return "";
+    }
+    std::filesystem::path cacheDir = std::filesystem::path(libraryPath) / "ImportCache";
+    std::string normalizedKey = NormalizeEmbeddedCacheKey(cacheKey);
+    return (cacheDir / ("embedded_" + HashPathStable(normalizedKey) + ".ktx2")).string();
+}
+
+std::string GetEmbeddedTempSourcePath(const std::string& cacheKey) {
+    AssetDatabase& db = AssetDatabase::getInstance();
+    std::string libraryPath = db.getLibraryPath();
+    if (libraryPath.empty()) {
+        return "";
+    }
+    std::filesystem::path sourceDir = std::filesystem::path(libraryPath) / "ImportCache" / "EmbeddedSources";
+    return (sourceDir / ("embedded_" + HashPathStable(NormalizeEmbeddedCacheKey(cacheKey)) + ".png")).string();
+}
+
+bool WriteRGBA8PNG(const std::string& path, const unsigned char* rgba, int width, int height) {
+    if (path.empty() || !rgba || width <= 0 || height <= 0) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    int result = stbi_write_png(path.c_str(), width, height, 4, rgba, width * 4);
+    return result != 0;
 }
 
 bool IsCacheValid(const std::string& sourcePath, const std::string& cachePath) {
@@ -466,7 +532,12 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
     return tex;
 }
 
-std::shared_ptr<Texture2D> TextureLoader::loadTextureFromMemory(const unsigned char* data, size_t size, bool srgb, bool flipVertical, const std::string& cacheKey) {
+std::shared_ptr<Texture2D> TextureLoader::loadTextureFromMemory(const unsigned char* data,
+                                                                size_t size,
+                                                                bool srgb,
+                                                                bool flipVertical,
+                                                                const std::string& cacheKey,
+                                                                bool normalMap) {
     if (!data || size == 0) {
         return nullptr;
     }
@@ -477,12 +548,18 @@ std::shared_ptr<Texture2D> TextureLoader::loadTextureFromMemory(const unsigned c
         std::cerr << "[TextureLoader] Failed to decode embedded texture: " << stbi_failure_reason() << std::endl;
         return nullptr;
     }
-    auto tex = createTextureFromRGBA8(cacheKey, decoded, width, height, srgb, false);
+    auto tex = createTextureFromRGBA8(cacheKey, decoded, width, height, srgb, false, normalMap);
     stbi_image_free(decoded);
     return tex;
 }
 
-std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::string& cacheKey, const unsigned char* rgba, int width, int height, bool srgb, bool flipVertical) {
+std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::string& cacheKey,
+                                                                 const unsigned char* rgba,
+                                                                 int width,
+                                                                 int height,
+                                                                 bool srgb,
+                                                                 bool flipVertical,
+                                                                 bool normalMap) {
     if (!m_Device || !rgba || width <= 0 || height <= 0) {
         return nullptr;
     }
@@ -508,6 +585,42 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
             );
         }
         uploadData = flipped.data();
+    }
+
+    if (!isKtx2Disabled() && !cacheKey.empty() && IsEmbeddedTextureCacheKey(cacheKey)) {
+        std::string cachePath = GetEmbeddedKtx2CachePath(cacheKey);
+        if (!cachePath.empty()) {
+            std::string sourcePath = ExtractEmbeddedSourcePath(cacheKey);
+            const std::string& cacheDependency = sourcePath.empty() ? cacheKey : sourcePath;
+            if (IsCacheValid(cacheDependency, cachePath)) {
+                if (isKtx2DebugEnabled()) {
+                    std::cerr << "[TextureLoader] KTX2 debug: Using cached embedded KTX2 " << cachePath << std::endl;
+                }
+                if (auto tex = loadKTX2Texture(cachePath, srgb, normalMap, cacheKey)) {
+                    m_Cache[cacheKey] = tex;
+                    return tex;
+                }
+            }
+
+            std::string tempSourcePath = GetEmbeddedTempSourcePath(cacheKey);
+            if (!tempSourcePath.empty() && WriteRGBA8PNG(tempSourcePath, uploadData, width, height)) {
+                bool generated = EncodeKtx2WithBasisuCLI(tempSourcePath, cachePath, srgb, normalMap, false, true);
+                std::error_code ec;
+                std::filesystem::remove(tempSourcePath, ec);
+                if (isKtx2DebugEnabled()) {
+                    std::cerr << "[TextureLoader] KTX2 debug: Embedded encode result for " << cacheKey
+                              << " = " << (generated ? "ok" : "fail") << std::endl;
+                }
+                if (generated) {
+                    if (auto tex = loadKTX2Texture(cachePath, srgb, normalMap, cacheKey)) {
+                        m_Cache[cacheKey] = tex;
+                        return tex;
+                    }
+                }
+            } else if (isKtx2DebugEnabled()) {
+                std::cerr << "[TextureLoader] KTX2 debug: Failed to write temporary embedded source for " << cacheKey << std::endl;
+            }
+        }
     }
     
     MTL::PixelFormat format = srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm;

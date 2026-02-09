@@ -8,6 +8,7 @@
 #include "../Components/MeshRenderer.hpp"
 #include "../Components/SkinnedMeshRenderer.hpp"
 #include "../Components/InstancedMeshRenderer.hpp"
+#include "../Components/PrimitiveMesh.hpp"
 #include "../Components/Decal.hpp"
 #include "../Components/HLODProxy.hpp"
 #include "../Scene/Scene.hpp"
@@ -3431,6 +3432,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
             MeshRenderer* mr = entity->getComponent<MeshRenderer>();
             if (!mr || !mr->isEnabled()) {
+                continue;
+            }
+
+            // Built-in editor primitives (Cube/Sphere/Cylinder...) are generated on-the-fly.
+            // Keep them on the regular MeshRenderer path instead of static instancing.
+            if (entity->getComponent<PrimitiveMesh>()) {
                 continue;
             }
             std::shared_ptr<Mesh> mesh = mr->getMesh();

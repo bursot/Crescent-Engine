@@ -330,21 +330,31 @@ static bool BuildEmbeddedRGBA(const aiTexture* texture, std::vector<unsigned cha
     return true;
 }
 
-static std::shared_ptr<Texture2D> LoadEmbeddedTexture(ImportContext& context, const aiTexture* texture, bool srgb, const std::string& cacheKey) {
+static std::shared_ptr<Texture2D> LoadEmbeddedTexture(ImportContext& context,
+                                                      const aiTexture* texture,
+                                                      bool srgb,
+                                                      bool normalMap,
+                                                      const std::string& cacheKey) {
     if (!texture || !context.textureLoader) {
         return nullptr;
     }
     if (texture->mHeight == 0) {
         const unsigned char* data = reinterpret_cast<const unsigned char*>(texture->pcData);
         size_t size = static_cast<size_t>(texture->mWidth);
-        return context.textureLoader->loadTextureFromMemory(data, size, srgb, true, cacheKey);
+        return context.textureLoader->loadTextureFromMemory(data, size, srgb, true, cacheKey, normalMap);
     }
     
     std::vector<unsigned char> rgba;
     if (!BuildEmbeddedRGBA(texture, rgba)) {
         return nullptr;
     }
-    return context.textureLoader->createTextureFromRGBA8(cacheKey, rgba.data(), static_cast<int>(texture->mWidth), static_cast<int>(texture->mHeight), srgb, true);
+    return context.textureLoader->createTextureFromRGBA8(cacheKey,
+                                                         rgba.data(),
+                                                         static_cast<int>(texture->mWidth),
+                                                         static_cast<int>(texture->mHeight),
+                                                         srgb,
+                                                         true,
+                                                         normalMap);
 }
 
 static std::shared_ptr<Texture2D> LoadMaterialTexture(ImportContext& context,
@@ -377,7 +387,7 @@ static std::shared_ptr<Texture2D> LoadMaterialTexture(ImportContext& context,
             key += ".";
             key += embedded->achFormatHint;
         }
-        return LoadEmbeddedTexture(context, embedded, srgb, key);
+        return LoadEmbeddedTexture(context, embedded, srgb, normalMap, key);
     }
     std::string resolved = ResolveTexturePath(context.baseDir, texturePath);
     if (resolved.empty()) {
