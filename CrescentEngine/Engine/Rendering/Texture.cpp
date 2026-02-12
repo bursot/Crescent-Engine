@@ -182,6 +182,7 @@ std::string HashPathStable(const std::string& input) {
 }
 
 constexpr const char* kEmbeddedTextureMarker = "#embedded:";
+constexpr const char* kKtx2CacheVersion = "v2a";
 
 bool IsEmbeddedTextureCacheKey(const std::string& cacheKey) {
     return cacheKey.find(kEmbeddedTextureMarker) != std::string::npos;
@@ -273,7 +274,7 @@ std::string GetKtx2CachePath(const std::string& sourcePath) {
         }
     }
     std::filesystem::path cacheDir = std::filesystem::path(libraryPath) / "ImportCache";
-    return (cacheDir / (guid + ".ktx2")).string();
+    return (cacheDir / (guid + "_" + std::string(kKtx2CacheVersion) + ".ktx2")).string();
 }
 
 std::string GetEmbeddedKtx2CachePath(const std::string& cacheKey) {
@@ -287,7 +288,7 @@ std::string GetEmbeddedKtx2CachePath(const std::string& cacheKey) {
     }
     std::filesystem::path cacheDir = std::filesystem::path(libraryPath) / "ImportCache";
     std::string normalizedKey = NormalizeEmbeddedCacheKey(cacheKey);
-    return (cacheDir / ("embedded_" + HashPathStable(normalizedKey) + ".ktx2")).string();
+    return (cacheDir / ("embedded_" + HashPathStable(normalizedKey) + "_" + std::string(kKtx2CacheVersion) + ".ktx2")).string();
 }
 
 std::string GetEmbeddedTempSourcePath(const std::string& cacheKey) {
@@ -326,10 +327,34 @@ bool IsCacheValid(const std::string& sourcePath, const std::string& cachePath) {
     return cacheTime >= sourceTime;
 }
 
+bool FileLikelyHasAlphaChannel(const std::string& path) {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    if (!stbi_info(path.c_str(), &width, &height, &channels)) {
+        return false;
+    }
+    return channels == 2 || channels == 4;
+}
+
+bool RGBAHasMeaningfulAlpha(const unsigned char* rgba, int width, int height) {
+    if (!rgba || width <= 0 || height <= 0) {
+        return false;
+    }
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    for (size_t i = 0; i < pixelCount; ++i) {
+        if (rgba[i * 4 + 3] < 250) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool EncodeKtx2WithBasisuCLI(const std::string& sourcePath,
                              const std::string& outputPath,
                              bool srgb,
                              bool normalMap,
+                             bool preferUastc,
                              bool flipVertical,
                              bool generateMips) {
     std::filesystem::path basisuPath = ResolveBasisuPath();
@@ -345,7 +370,8 @@ bool EncodeKtx2WithBasisuCLI(const std::string& sourcePath,
     cmd.reserve(512);
     cmd += QuoteShellArg(basisuPath.string());
     cmd += " -ktx2 -ktx2_no_zstandard";
-    cmd += normalMap ? " -uastc" : " -etc1s";
+    const bool useUastc = normalMap || preferUastc;
+    cmd += useUastc ? " -uastc" : " -etc1s";
     cmd += srgb ? " -srgb" : " -linear";
     if (flipVertical) {
         cmd += " -y_flip";
@@ -354,9 +380,9 @@ bool EncodeKtx2WithBasisuCLI(const std::string& sourcePath,
         cmd += " -mipmap";
     }
     cmd += " -quality ";
-    cmd += normalMap ? "50" : "80";
+    cmd += useUastc ? "128" : "80";
     cmd += " -effort ";
-    cmd += normalMap ? "4" : "4";
+    cmd += useUastc ? "5" : "4";
     cmd += " -file ";
     cmd += QuoteShellArg(sourcePath);
     cmd += " -output_file ";
@@ -458,7 +484,8 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
                 }
             }
 
-            bool generated = EncodeKtx2WithBasisuCLI(path, cachePath, srgb, normalMap, flipVertical, true);
+            bool preferUastc = srgb && FileLikelyHasAlphaChannel(path);
+            bool generated = EncodeKtx2WithBasisuCLI(path, cachePath, srgb, normalMap, preferUastc, flipVertical, true);
             if (isKtx2DebugEnabled()) {
                 std::cerr << "[TextureLoader] KTX2 debug: Encode result for " << path << " = " << (generated ? "ok" : "fail") << std::endl;
             }
@@ -604,7 +631,8 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
 
             std::string tempSourcePath = GetEmbeddedTempSourcePath(cacheKey);
             if (!tempSourcePath.empty() && WriteRGBA8PNG(tempSourcePath, uploadData, width, height)) {
-                bool generated = EncodeKtx2WithBasisuCLI(tempSourcePath, cachePath, srgb, normalMap, false, true);
+                bool preferUastc = srgb && RGBAHasMeaningfulAlpha(uploadData, width, height);
+                bool generated = EncodeKtx2WithBasisuCLI(tempSourcePath, cachePath, srgb, normalMap, preferUastc, false, true);
                 std::error_code ec;
                 std::filesystem::remove(tempSourcePath, ec);
                 if (isKtx2DebugEnabled()) {

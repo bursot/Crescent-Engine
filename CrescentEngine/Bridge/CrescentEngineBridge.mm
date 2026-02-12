@@ -3167,7 +3167,7 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         }
         if (NSNumber* res = info[@"shadowResolution"]) {
             int preset = res.intValue;
-            int clamped = (preset <= 256) ? 256 : (preset <= 512 ? 512 : (preset <= 1024 ? 1024 : 2048));
+            int clamped = std::max(256, std::min(8192, preset));
             light->setShadowMapResolution(clamped);
         }
         if (NSNumber* bias = info[@"shadowBias"]) {

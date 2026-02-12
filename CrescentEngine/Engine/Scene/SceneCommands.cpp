@@ -128,6 +128,7 @@ static bool ReplaceMaterialTexture(Material* material,
     swapIfMatch(material->getEmissionTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setEmissionTexture(tex); });
     swapIfMatch(material->getORMTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setORMTexture(tex); });
     swapIfMatch(material->getHeightTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setHeightTexture(tex); });
+    swapIfMatch(material->getOpacityTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setOpacityTexture(tex); });
     return updated;
 }
 
@@ -489,6 +490,9 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
     static const std::vector<std::string> kHeightTokens = {
         "height", "displace", "displacement", "bump", "parallax"
     };
+    static const std::vector<std::string> kOpacityTokens = {
+        "opacity", "alpha", "mask", "transparency", "cutout"
+    };
     
     aiString name;
     if (material->Get(AI_MATKEY_NAME, name) == AI_SUCCESS && name.length > 0) {
@@ -583,6 +587,20 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
     }
     if (heightTex) {
         result->setHeightTexture(heightTex);
+    }
+
+    auto opacityTex = LoadMaterialTexture(context, material, aiTextureType_OPACITY, false, false);
+    if (!opacityTex) {
+        opacityTex = FindFallbackTexture(context, materialName, kOpacityTokens, false, false);
+    }
+    if (opacityTex) {
+        result->setOpacityTexture(opacityTex);
+        if (result->getRenderMode() == Material::RenderMode::Opaque) {
+            result->setRenderMode(Material::RenderMode::Cutout);
+            if (result->getAlphaCutoff() <= 0.0f) {
+                result->setAlphaCutoff(0.4f);
+            }
+        }
     }
     
     auto metallicTex = LoadMaterialTexture(context, material, aiTextureType_METALNESS, false, false);

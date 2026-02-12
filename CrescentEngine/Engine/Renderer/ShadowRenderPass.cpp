@@ -78,7 +78,7 @@ namespace {
     struct ShadowAlphaParamsCPU {
         Math::Vector4 albedo;
         Math::Vector4 uvTilingOffset;
-        Math::Vector4 alphaParams; // x cutoff, y hasAlbedoTex, z alphaClip, w unused
+        Math::Vector4 alphaParams; // x cutoff, y hasAlbedoTex, z alphaClip, w hasOpacityTex
     };
 
     struct ShadowFoliageParamsCPU {
@@ -121,7 +121,19 @@ namespace {
     }
 
     inline bool IsCutoutMaterial(const std::shared_ptr<Material>& material) {
-        return material && material->getRenderMode() == Material::RenderMode::Cutout;
+        if (!material) {
+            return false;
+        }
+        if (material->getRenderMode() == Material::RenderMode::Cutout) {
+            return true;
+        }
+        // Many foliage assets import as BLEND with alpha texture. Treat them as
+        // alpha-cut shadow casters to avoid chunky billboard-like shadows.
+        if (material->getRenderMode() == Material::RenderMode::Transparent &&
+            (material->getAlbedoTexture() || material->getOpacityTexture())) {
+            return true;
+        }
+        return false;
     }
 
     inline MTL::CullMode ResolveCullMode(const std::shared_ptr<Material>& material) {
@@ -149,15 +161,25 @@ namespace {
         Math::Vector2 offset = material->getUVOffset();
         params.uvTilingOffset = Math::Vector4(tiling.x, tiling.y, offset.x, offset.y);
         bool hasAlbedo = material->getAlbedoTexture() != nullptr;
+        bool hasOpacity = material->getOpacityTexture() != nullptr;
+        bool alphaClip = material->getRenderMode() == Material::RenderMode::Cutout
+            || (material->getRenderMode() == Material::RenderMode::Transparent && (hasAlbedo || hasOpacity));
+        float cutoff = material->getAlphaCutoff();
+        if (material->getRenderMode() == Material::RenderMode::Transparent && (hasAlbedo || hasOpacity)) {
+            // Keep alpha-card shadows stable: avoid tiny noisy holes from very low cutoffs.
+            cutoff = std::max(0.06f, std::min(0.22f, cutoff));
+        }
         params.alphaParams = Math::Vector4(
-            material->getAlphaCutoff(),
+            cutoff,
             hasAlbedo ? 1.0f : 0.0f,
-            material->getRenderMode() == Material::RenderMode::Cutout ? 1.0f : 0.0f,
-            0.0f
+            alphaClip ? 1.0f : 0.0f,
+            hasOpacity ? 1.0f : 0.0f
         );
         enc->setFragmentBytes(&params, sizeof(ShadowAlphaParamsCPU), 0);
         auto albedoTex = material->getAlbedoTexture();
         enc->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 0);
+        auto opacityTex = material->getOpacityTexture();
+        enc->setFragmentTexture(opacityTex ? opacityTex->getHandle() : nullptr, 1);
         if (sampler) {
             enc->setFragmentSamplerState(sampler, 0);
         }
@@ -247,9 +269,12 @@ bool ShadowRenderPass::initialize(MTL::Device* device, uint32_t atlasResolution,
     MTL::SamplerDescriptor* alphaDesc = MTL::SamplerDescriptor::alloc()->init();
     alphaDesc->setMinFilter(MTL::SamplerMinMagFilterLinear);
     alphaDesc->setMagFilter(MTL::SamplerMinMagFilterLinear);
-    alphaDesc->setMipFilter(MTL::SamplerMipFilterNearest);
+    alphaDesc->setMipFilter(MTL::SamplerMipFilterLinear);
     alphaDesc->setSAddressMode(MTL::SamplerAddressModeClampToEdge);
     alphaDesc->setTAddressMode(MTL::SamplerAddressModeClampToEdge);
+    alphaDesc->setMaxAnisotropy(8);
+    alphaDesc->setLodMinClamp(0.0f);
+    alphaDesc->setLodMaxClamp(16.0f);
     m_alphaSampler = m_device->newSamplerState(alphaDesc);
     alphaDesc->release();
     buildPipelines();

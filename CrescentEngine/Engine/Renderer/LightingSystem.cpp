@@ -8,9 +8,73 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace Crescent {
+
+namespace {
+
+std::array<float, 4> BuildCascadeSplitDistances(const Light* light, uint8_t cascadeCount) {
+    std::array<float, 4> authoredSplits = light
+        ? light->getCascadeSplits()
+        : std::array<float, 4>{0.08f, 0.22f, 0.5f, 1.0f};
+    float prev = 0.0f;
+    for (size_t i = 0; i < authoredSplits.size(); ++i) {
+        float minStep = (i == authoredSplits.size() - 1) ? 0.001f : 0.01f;
+        authoredSplits[i] = Math::Clamp(authoredSplits[i], prev + minStep, 1.0f);
+        prev = authoredSplits[i];
+    }
+    authoredSplits[3] = 1.0f;
+
+    std::array<float, 4> distances = {1.0f, 1.0f, 1.0f, 1.0f};
+    float prevSplit = 0.0f;
+    for (uint8_t i = 0; i < cascadeCount && i < 4; ++i) {
+        float split = 1.0f;
+        if (i != cascadeCount - 1) {
+            if (cascadeCount >= 4) {
+                // For 4 cascades, preserve authored split positions exactly.
+                split = authoredSplits[i];
+            } else {
+                // For fewer cascades, pick representative authored indices.
+                float normalized = static_cast<float>(i + 1) / static_cast<float>(cascadeCount);
+                int authoredIdx = static_cast<int>(std::round(normalized * 4.0f)) - 1;
+                authoredIdx = std::max(0, std::min(2, authoredIdx));
+                split = authoredSplits[authoredIdx];
+            }
+        }
+        float minSplit = prevSplit + ((i == cascadeCount - 1) ? 0.001f : 0.01f);
+        split = Math::Clamp(split, minSplit, 1.0f);
+        distances[i] = split;
+        prevSplit = split;
+    }
+    return distances;
+}
+
+uint32_t ComputeCascadeResolution(uint32_t requestedRes,
+                                  uint32_t atlasResolution,
+                                  uint8_t cascadeCount,
+                                  uint8_t cascadeIndex) {
+    const float scaleLut[4][4] = {
+        {1.0f, 1.0f, 1.0f, 1.0f},
+        {1.0f, 0.76f, 1.0f, 1.0f},
+        {1.0f, 0.82f, 0.58f, 1.0f},
+        {1.0f, 0.88f, 0.68f, 0.50f}
+    };
+    const uint8_t lutRow = std::max<uint8_t>(1, std::min<uint8_t>(cascadeCount, 4)) - 1;
+    const uint8_t lutCol = std::min<uint8_t>(cascadeIndex, 3);
+    const float scale = scaleLut[lutRow][lutCol];
+
+    uint32_t maxCascadeRes = (cascadeCount > 1)
+        ? std::max(256u, atlasResolution / 2u)
+        : atlasResolution;
+    uint32_t baseRes = std::min(requestedRes, maxCascadeRes);
+    uint32_t scaledRes = static_cast<uint32_t>(std::round(static_cast<float>(baseRes) * scale));
+    uint32_t alignedRes = std::max(256u, (scaledRes + 63u) & ~63u);
+    return std::min(alignedRes, atlasResolution);
+}
+
+} // namespace
 
 ShadowAtlas::ShadowAtlas(uint32_t resolution, uint32_t layers)
     : m_resolution(resolution)
@@ -136,6 +200,7 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
     }
     
     const uint32_t lightResolution = light.light->getShadowMapResolution();
+    const uint32_t atlasResolution = std::max(256u, m_shadowAtlas.getResolution());
     const float camNear = camera->getNearClip();
     const float camFar = camera->getFarClip();
     const float shadowNear = std::max(camNear, light.light->getShadowNearPlane());
@@ -144,14 +209,24 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
         return;
     }
     
-    const auto splits = light.light->getCascadeSplits();
     const uint8_t cascadeCount = std::max<uint8_t>(1, std::min<uint8_t>(light.light->getCascadeCount(), 4));
+    std::array<float, 4> splitDistances = BuildCascadeSplitDistances(light.light, cascadeCount);
+    if (cascadeCount > 1) {        
+        float prev = 0.0f;
+        for (uint8_t i = 0; i < cascadeCount; ++i) {
+            float minStep = (i == cascadeCount - 1) ? 0.001f : 0.01f;
+            splitDistances[i] = Math::Clamp(splitDistances[i], prev + minStep, 1.0f);
+            prev = splitDistances[i];
+        }
+        splitDistances[cascadeCount - 1] = 1.0f;
+    }
     
     Math::Vector3 lightDir = light.directionWS.normalized();
     
     float prevSplit = 0.0f;
     for (uint8_t cascadeIdx = 0; cascadeIdx < cascadeCount; ++cascadeIdx) {
-        float split = splits[cascadeIdx];
+        float split = splitDistances[cascadeIdx];
+        split = Math::Clamp(split, prevSplit + 0.005f, 1.0f);
         float cascadeNear = Math::Lerp(shadowNear, shadowFar, prevSplit);
         float cascadeFar = Math::Lerp(shadowNear, shadowFar, split);
         
@@ -174,35 +249,53 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
             up = Math::Vector3::Right;
         }
 
-        uint32_t cascadeRes = lightResolution;
-        if (cascadeIdx == 0 && lightResolution <= 1024) {
-            cascadeRes = lightResolution * 2;
-        }
-        cascadeRes = std::min<uint32_t>(cascadeRes, m_shadowAtlas.getResolution());
+        uint32_t cascadeRes = ComputeCascadeResolution(lightResolution, atlasResolution, cascadeCount, cascadeIdx);
 
-        float lightDistance = radius + 10.0f;
+        float lightDistance = radius + 5.0f;
         Math::Vector3 lightPos = center - lightDir * lightDistance;
         Math::Matrix4x4 view = Math::Matrix4x4::LookAt(lightPos, center, up);
 
-        float texelSize = (radius * 2.0f) / static_cast<float>(cascadeRes);
+        float stableExtent = std::max(radius, 0.1f);
+        float texelSize = (stableExtent * 2.0f) / static_cast<float>(cascadeRes);
         Math::Vector3 centerLS = view.transformPoint(center);
-        centerLS.x = std::floor(centerLS.x / texelSize) * texelSize;
-        centerLS.y = std::floor(centerLS.y / texelSize) * texelSize;
-        centerLS.z = std::floor(centerLS.z / texelSize) * texelSize;
+        centerLS.x = std::round(centerLS.x / texelSize) * texelSize;
+        centerLS.y = std::round(centerLS.y / texelSize) * texelSize;
         Math::Vector3 snappedCenter = view.inversed().transformPoint(centerLS);
         lightPos = snappedCenter - lightDir * lightDistance;
         view = Math::Matrix4x4::LookAt(lightPos, snappedCenter, up);
 
-        float lightNear = 0.1f;
-        float lightFar = lightDistance + radius;
-        Math::Matrix4x4 proj = Math::Matrix4x4::Orthographic(-radius, radius, -radius, radius, lightNear, lightFar);
+        // Use a sphere-based stable ortho fit. This avoids XY bounds pumping
+        // when the camera rotates, which is a primary source of shimmering.
+        float orthoExtent = stableExtent * 1.03f;
+        float minX = -orthoExtent;
+        float maxX = orthoExtent;
+        float minY = -orthoExtent;
+        float maxY = orthoExtent;
+        float orthoTexel = (orthoExtent * 2.0f) / static_cast<float>(cascadeRes);
+
+        float minDepth = std::numeric_limits<float>::max();
+        float maxDepth = std::numeric_limits<float>::lowest();
+        for (const auto& corner : frustumCorners) {
+            Math::Vector3 cornerLS = view.transformPoint(corner);
+            float depth = -cornerLS.z;
+            minDepth = std::min(minDepth, depth);
+            maxDepth = std::max(maxDepth, depth);
+        }
+        float casterPadding = std::max(8.0f, stableExtent * 0.85f);
+        float receiverPadding = std::max(3.0f, stableExtent * 0.35f);
+        float lightNear = std::max(0.01f, minDepth - casterPadding);
+        float lightFar = std::max(lightNear + 1.0f, maxDepth + receiverPadding);
+        Math::Matrix4x4 proj = Math::Matrix4x4::Orthographic(minX, maxX, minY, maxY, lightNear, lightFar);
         
         CascadedSlice slice;
         slice.view = view;
         slice.proj = proj;
         slice.viewProj = proj * view;
+        slice.owner = light.light;
+        slice.cascadeIndex = cascadeIdx;
         slice.resolution = cascadeRes;
-        slice.texelWorldSize = (radius * 2.0f) / static_cast<float>(cascadeRes);
+        slice.texelWorldSize = orthoTexel;
+        slice.depthSpan = lightFar - lightNear;
         slice.splitNear = cascadeNear;
         slice.splitFar = cascadeFar;
         m_cascades.push_back(slice);
@@ -222,17 +315,13 @@ void LightingSystem::allocateShadows() {
     const float cascadeBias = primaryDirectional ? primaryDirectional->getShadowBias() : 0.0005f;
     const float cascadeNormalBias = primaryDirectional ? primaryDirectional->getShadowNormalBias() : 0.001f;
     const float cascadePenumbra = primaryDirectional ? primaryDirectional->getPenumbra() : 1.0f;
-    const float biasScale = 0.1f;
-    const float normalBiasScale = 0.5f;
+    const float biasScale = 2.0f;
+    const float normalBiasScale = 3.0f;
 
     // Directional cascades
-    uint32_t shadowIdx = 0;
     for (auto& slice : m_cascades) {
         uint32_t res = std::max(256u, std::min<uint32_t>(8192u, slice.resolution));
         slice.atlas = m_shadowAtlas.allocate(res);
-        if (slice.atlas.valid) {
-            ++shadowIdx;
-        }
     }
     
     // Per-light shadows
@@ -245,13 +334,6 @@ void LightingSystem::allocateShadows() {
         // Directional lights use cascades, handled separately below
         if (light->getType() == Light::Type::Directional) {
             continue;
-        }
-        
-        Math::Vector3 pos = prepared.positionWS;
-        Math::Vector3 dir = prepared.directionWS.normalized();
-        Math::Vector3 up = Math::Vector3::Up;
-        if (std::abs(prepared.directionWS.dot(up)) > 0.99f) {
-            up = Math::Vector3::Right;
         }
         
         if (light->getType() == Light::Type::Point) {
@@ -326,8 +408,15 @@ void LightingSystem::allocateShadows() {
                 static_cast<float>(tile.size) / static_cast<float>(m_shadowAtlas.getResolution())
             );
             
-            float bias = std::max(light->getShadowBias(), texelWorld * biasScale);
-            float normalBias = std::max(light->getShadowNormalBias(), texelWorld * normalBiasScale);
+            float depthSpan = 1.0f;
+            if (light->getType() == Light::Type::Spot) {
+                depthSpan = std::max(0.1f, light->getRange() - 0.01f);
+            } else {
+                depthSpan = std::max(0.1f, light->getRange() * 2.0f - 0.01f);
+            }
+            float normalizedTexel = texelWorld / depthSpan;
+            float bias = std::max(light->getShadowBias(), normalizedTexel * biasScale);
+            float normalBias = std::max(light->getShadowNormalBias(), normalizedTexel * normalBiasScale);
             gpuShadow.params.x = bias;
             gpuShadow.params.y = normalBias;
             gpuShadow.params.z = light->getPenumbra();
@@ -338,7 +427,7 @@ void LightingSystem::allocateShadows() {
     }
     
     // Append cascade shadow entries after atlas allocation, preserve indices
-    uint32_t cascadeBase = static_cast<uint32_t>(m_gpuShadows.size());
+    std::unordered_map<Light*, std::pair<uint32_t, uint32_t>> directionalShadowRanges;
     for (size_t i = 0; i < m_cascades.size(); ++i) {
         const auto& slice = m_cascades[i];
         if (!slice.atlas.valid) {
@@ -354,21 +443,36 @@ void LightingSystem::allocateShadows() {
             static_cast<float>(slice.atlas.size) / static_cast<float>(m_shadowAtlas.getResolution())
         );
         float texelWorld = slice.texelWorldSize;
-        float bias = std::max(cascadeBias, texelWorld * biasScale);
-        float normalBias = std::max(cascadeNormalBias, texelWorld * normalBiasScale);
+        float normalizedTexel = texelWorld / std::max(0.1f, slice.depthSpan);
+        float bias = std::max(cascadeBias, normalizedTexel * biasScale);
+        float normalBias = std::max(cascadeNormalBias, normalizedTexel * normalBiasScale);
         gpuShadow.params = Math::Vector4(bias, normalBias, cascadePenumbra, static_cast<float>(i)); // bias/normalBias/penumbra/cascadeId
         gpuShadow.depthRange = Math::Vector4(slice.splitNear, slice.splitFar, texelWorld, static_cast<float>(slice.atlas.layer));
-        
+
+        if (slice.owner) {
+            auto it = directionalShadowRanges.find(slice.owner);
+            if (it == directionalShadowRanges.end()) {
+                directionalShadowRanges.emplace(slice.owner, std::make_pair(static_cast<uint32_t>(m_gpuShadows.size()), 0u));
+                it = directionalShadowRanges.find(slice.owner);
+            }
+            ++(it->second.second);
+        }
         m_gpuShadows.push_back(gpuShadow);
     }
-    
-    // Map cascades to directional lights (assumes primary directional uses cascades 0..cascadeCount-1)
+
+    // Map cascade ranges to directional lights.
     for (auto& prepared : m_preparedLights) {
         if (!prepared.light || prepared.light->getType() != Light::Type::Directional || !prepared.light->getCastShadows()) {
             continue;
         }
-        prepared.shadowStart = cascadeBase;
-        prepared.shadowCount = static_cast<uint32_t>(m_cascades.size());
+        auto it = directionalShadowRanges.find(prepared.light);
+        if (it != directionalShadowRanges.end() && it->second.second > 0) {
+            prepared.shadowStart = it->second.first;
+            prepared.shadowCount = it->second.second;
+            continue;
+        }
+        prepared.shadowStart = UINT32_MAX;
+        prepared.shadowCount = 0;
     }
 }
 

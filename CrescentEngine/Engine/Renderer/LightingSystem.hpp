@@ -43,8 +43,11 @@ struct CascadedSlice {
     Math::Matrix4x4 proj;
     Math::Matrix4x4 viewProj;
     ShadowAtlasTile atlas;
+    Light* owner = nullptr;
+    uint8_t cascadeIndex = 0;
     uint32_t resolution = 1024;
     float texelWorldSize = 0.0f;
+    float depthSpan = 0.0f;
     float splitNear = 0.0f;
     float splitFar = 0.0f;
 };

@@ -382,6 +382,24 @@ static std::array<Math::Vector4, 6> ExtractFrustumPlanes(const Math::Matrix4x4& 
 
 static constexpr float kCullTightness = 0.85f;
 
+static uint8_t CascadesForShadowQuality(int quality) {
+    switch (quality) {
+    case 0: return 2;
+    case 1: return 3;
+    default: return 4;
+    }
+}
+
+static uint32_t ComputeShadowAtlasResolution(uint32_t requestedResolution, uint8_t cascadeCount) {
+    uint32_t base = std::max<uint32_t>(256u, std::min<uint32_t>(8192u, requestedResolution));
+    if (cascadeCount <= 1) {
+        return base;
+    }
+    // Doubling the atlas for cascades keeps near shadows crisp at large distances.
+    uint32_t doubled = base <= 4096u ? base * 2u : 8192u;
+    return std::min<uint32_t>(8192u, std::max(base, doubled));
+}
+
 static bool IsSphereInFrustum(const std::array<Math::Vector4, 6>& planes,
                               const Math::Vector3& center,
                               float radius) {
@@ -524,6 +542,7 @@ Renderer::Renderer()
     , m_taaFrameIndex(0)
     , m_frameIndex(0)
     , m_qualitySettings()
+    , m_shadowAtlasResolution(0)
     , m_renderTargetWidth(0)
     , m_renderTargetHeight(0)
     , m_msaaSamples(1)
@@ -591,8 +610,9 @@ bool Renderer::initialize() {
     
     // Shadow sampler (comparison, clamp)
     MTL::SamplerDescriptor* shadowDesc = MTL::SamplerDescriptor::alloc()->init();
-    shadowDesc->setMinFilter(MTL::SamplerMinMagFilterLinear);
-    shadowDesc->setMagFilter(MTL::SamplerMinMagFilterLinear);
+    // Use nearest comparison sampling; custom PCF in shader controls blur radius.
+    shadowDesc->setMinFilter(MTL::SamplerMinMagFilterNearest);
+    shadowDesc->setMagFilter(MTL::SamplerMinMagFilterNearest);
     shadowDesc->setSAddressMode(MTL::SamplerAddressModeClampToEdge);
     shadowDesc->setTAddressMode(MTL::SamplerAddressModeClampToEdge);
     shadowDesc->setCompareFunction(MTL::CompareFunctionLessEqual);
@@ -2735,6 +2755,8 @@ void Renderer::applyQualitySettings(const SceneQualitySettings& quality) {
     int shadowResolution = std::max(256, std::min(8192, quality.shadowResolution));
     uint32_t msaaSamples = resolveSampleCount(std::max(1, std::min(8, quality.msaaSamples)));
     float renderScale = std::max(0.5f, std::min(2.0f, quality.renderScale));
+    uint8_t cascadeCount = CascadesForShadowQuality(quality.shadowQuality);
+    uint32_t desiredAtlasResolution = ComputeShadowAtlasResolution(static_cast<uint32_t>(shadowResolution), cascadeCount);
     SceneQualitySettings clamped = quality;
     clamped.shadowResolution = shadowResolution;
     clamped.msaaSamples = static_cast<int>(msaaSamples);
@@ -2777,16 +2799,17 @@ void Renderer::applyQualitySettings(const SceneQualitySettings& quality) {
         loadRenderTargetState(getRenderTargetState(m_activePool));
     }
     
-    if (shadowResolutionChanged) {
+    if (shadowResolutionChanged || desiredAtlasResolution != m_shadowAtlasResolution) {
         if (m_shadowPass) {
             m_shadowPass->shutdown();
-            if (!m_shadowPass->initialize(m_device, clamped.shadowResolution, 1)) {
+            if (!m_shadowPass->initialize(m_device, desiredAtlasResolution, 1)) {
                 std::cerr << "Warning: ShadowRenderPass failed to reinitialize\n";
             }
         }
         if (m_lightingSystem) {
-            m_lightingSystem->configureShadowAtlas(clamped.shadowResolution, 1);
+            m_lightingSystem->configureShadowAtlas(desiredAtlasResolution, 1);
         }
+        m_shadowAtlasResolution = desiredAtlasResolution;
     }
 }
 
@@ -2801,6 +2824,19 @@ void Renderer::uploadMesh(Mesh* mesh) {
     if (vertices.empty() || indices.empty()) {
         std::cerr << "Cannot upload mesh: empty vertices or indices" << std::endl;
         return;
+    }
+
+    if (MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(mesh->getVertexBuffer())) {
+        vertexBuffer->release();
+        mesh->setVertexBuffer(nullptr);
+    }
+    if (MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(mesh->getIndexBuffer())) {
+        indexBuffer->release();
+        mesh->setIndexBuffer(nullptr);
+    }
+    if (MTL::Buffer* skinBuffer = static_cast<MTL::Buffer*>(mesh->getSkinWeightBuffer())) {
+        skinBuffer->release();
+        mesh->setSkinWeightBuffer(nullptr);
     }
     
     // Create vertex buffer
@@ -2926,6 +2962,37 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     if (m_viewportHeight > 0.0f) {
         float aspectRatio = m_viewportWidth / m_viewportHeight;
         camera->setAspectRatio(aspectRatio);
+    }
+
+    // Keep atlas resolution aligned with directional light requests so
+    // per-light shadow resolution changes visibly affect quality.
+    if (m_device && m_shadowPass && m_lightingSystem) {
+        uint32_t desiredShadowAtlasRes = static_cast<uint32_t>(std::max(256, m_qualitySettings.shadowResolution));
+        uint8_t maxCascadeCount = 1;
+        const auto& qualityProbeEntities = scene->getAllEntities();
+        for (const auto& entry : qualityProbeEntities) {
+            Entity* entity = entry.get();
+            if (!entity || !entity->isActiveInHierarchy()) {
+                continue;
+            }
+            Light* light = entity->getComponent<Light>();
+            if (!light || !light->getCastShadows() || light->getType() != Light::Type::Directional) {
+                continue;
+            }
+            uint32_t lightRes = std::max<uint32_t>(256u, std::min<uint32_t>(8192u, light->getShadowMapResolution()));
+            desiredShadowAtlasRes = std::max(desiredShadowAtlasRes, lightRes);
+            maxCascadeCount = std::max<uint8_t>(maxCascadeCount, light->getCascadeCount());
+        }
+        desiredShadowAtlasRes = ComputeShadowAtlasResolution(desiredShadowAtlasRes, maxCascadeCount);
+
+        if (desiredShadowAtlasRes != m_shadowAtlasResolution) {
+            m_shadowPass->shutdown();
+            if (!m_shadowPass->initialize(m_device, desiredShadowAtlasRes, 1)) {
+                std::cerr << "Warning: ShadowRenderPass failed to upsize atlas\n";
+            }
+            m_lightingSystem->configureShadowAtlas(desiredShadowAtlasRes, 1);
+            m_shadowAtlasResolution = desiredShadowAtlasRes;
+        }
     }
     
     float renderScale = std::max(0.5f, std::min(2.0f, m_qualitySettings.renderScale));
@@ -3413,7 +3480,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         }
     }
 
-    {
+    constexpr bool kEnableAutoStaticMeshInstancing = false;
+    if (kEnableAutoStaticMeshInstancing) {
         const auto& staticEntities = scene->getAllEntities();
         for (const auto& entityPtr : staticEntities) {
             Entity* entity = entityPtr.get();

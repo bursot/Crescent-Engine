@@ -330,6 +330,7 @@ json SerializeMaterial(const Material& material) {
     pushPath("emissive", material.getEmissionTexture(), "texture");
     pushPath("orm", material.getORMTexture(), "texture");
     pushPath("height", material.getHeightTexture(), "texture");
+    pushPath("opacity", material.getOpacityTexture(), "texture");
 
     if (!textures.empty()) {
         j["textures"] = textures;
@@ -885,6 +886,7 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
         if (auto tex = load("emissive", true, false)) material->setEmissionTexture(tex);
         if (auto tex = load("orm", false, false)) material->setORMTexture(tex);
         if (auto tex = load("height", false, false)) material->setHeightTexture(tex);
+        if (auto tex = load("opacity", false, false)) material->setOpacityTexture(tex);
     }
 
     return material;

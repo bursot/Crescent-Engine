@@ -362,18 +362,19 @@ inline float sampleShadowDepthPCF(depth2d<float> atlas,
     float2 minBounds = tileMin + margin;
     float2 maxBounds = tileMax - margin;
     float shadow = 0.0;
-    float count = 0.0;
-    for (int i = 0; i < 4; ++i) {
+    float weightSum = 0.0;
+    for (int i = 0; i < 8; ++i) {
         float2 offset = rotate2(kPoissonDisk16[i], rot) * radius;
         float2 uvOffset = uv + offset * texel;
         if (uvOffset.x >= minBounds.x && uvOffset.x <= maxBounds.x &&
             uvOffset.y >= minBounds.y && uvOffset.y <= maxBounds.y) {
             float sampleDepth = atlas.sample(shadowSampler, uvOffset);
-            shadow += (depth - bias <= sampleDepth) ? 1.0 : 0.0;
-            count += 1.0;
+            float w = 1.0 - saturate(length(kPoissonDisk16[i]) * 0.5);
+            shadow += ((depth - bias <= sampleDepth) ? 1.0 : 0.0) * w;
+            weightSum += w;
         }
     }
-    return (count > 0.0) ? (shadow / count) : 1.0;
+    return (weightSum > 0.0) ? (shadow / weightSum) : 1.0;
 }
 
 float pcfSample(depth2d<float> atlas,
@@ -387,9 +388,9 @@ float pcfSample(depth2d<float> atlas,
                 float radius) {
     float2 texel = 1.0 / float2(atlas.get_width(), atlas.get_height());
     float shadow = 0.0;
-    float validSamples = 0.0;
+    float weightSum = 0.0;
 
-    // Add small margin to prevent bleeding
+    // Add small margin to prevent atlas tile bleeding.
     float2 margin = texel * (radius + 1.0);
     tileMin += margin;
     tileMax -= margin;
@@ -397,17 +398,15 @@ float pcfSample(depth2d<float> atlas,
     for (int i = 0; i < 16; ++i) {
         float2 offset = rotate2(kPoissonDisk16[i], rot) * radius;
         float2 uvOffset = uv + offset * texel;
-
-        // Check if sample is within tile bounds
         if (uvOffset.x >= tileMin.x && uvOffset.x <= tileMax.x &&
             uvOffset.y >= tileMin.y && uvOffset.y <= tileMax.y) {
-            shadow += atlas.sample_compare(shadowSampler, uvOffset, depth - bias);
-            validSamples += 1.0;
+            float w = 1.0 - saturate(length(kPoissonDisk16[i]) * 0.35);
+            shadow += atlas.sample_compare(shadowSampler, uvOffset, depth - bias) * w;
+            weightSum += w;
         }
     }
 
-    // If we have valid samples, return average; otherwise assume lit (1.0)
-    return (validSamples > 0.0) ? (shadow / validSamples) : 1.0;
+    return (weightSum > 0.0) ? (shadow / weightSum) : 1.0;
 }
 
 float pcssSample(depth2d<float> atlas,
@@ -449,24 +448,7 @@ float pcssSample(depth2d<float> atlas,
     float avgBlocker = blockerDepth / blockers;
     float penumbraRatio = saturate((depth - avgBlocker) / max(avgBlocker, 0.0001));
     float radius = clamp(baseRadius + penumbraRatio * penumbra * 24.0, baseRadius, 32.0);
-    float2 filterMargin = texel * (radius + 1.0);
-    minBounds = tileMin + filterMargin;
-    maxBounds = tileMax - filterMargin;
-
-    // Filter pass
-    float shadow = 0.0;
-    float validSamples = 0.0;
-    for (int i = 0; i < 16; ++i) {
-        float2 offset = rotate2(kPoissonDisk16[i], rot) * radius;
-        float2 offsetUV = uv + offset * texel;
-        if (offsetUV.x >= minBounds.x && offsetUV.x <= maxBounds.x &&
-            offsetUV.y >= minBounds.y && offsetUV.y <= maxBounds.y) {
-            shadow += atlas.sample_compare(shadowSampler, offsetUV, depth - bias);
-            validSamples += 1.0;
-        }
-    }
-
-    return (validSamples > 0.0) ? (shadow / validSamples) : 1.0;
+    return pcfSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, rot, radius);
 }
 
 inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
@@ -478,7 +460,8 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
                                  sampler shadowSampler,
                                  bool usePCSS,
                                  bool useContact,
-                                 float baseTexelWorld) {
+                                 float baseTexelWorld,
+                                 bool isCascade) {
     ShadowGPUData s = shadowData[idx];
     float4 clip = s.viewProj * float4(pos, 1.0);
     float3 ndc = clip.xyz / clip.w;
@@ -499,19 +482,23 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
         return 1.0;
     }
     float bias = s.params.x;
-    float nDotL = saturate(dot(normalize(normalWS), normalize(-lightDirWS)));
+    float nDotL = saturate(dot(normalize(normalWS), normalize(lightDirWS)));
     bias += s.params.y * (1.0 - nDotL); // normal bias for grazing angles
 
     float2 rot = float2(1.0, 0.0);
-    if (usePCSS && s.params.w > 0.5) {
-        float2 atlasSize = float2(atlas.get_width(), atlas.get_height());
-        float2 noiseCoord = floor(uv * atlasSize);
-        float randAngle = hash21(noiseCoord) * TWO_PI;
+    if (usePCSS && (isCascade || s.params.w > 0.5)) {
+        // World-anchored rotation: stable when camera moves, breaks visible tiling.
+        float2 worldCell = floor(pos.xz / max(s.depthRange.z * 8.0, 0.05));
+        float seed = hash21(worldCell + s.atlasUV.xy * 4096.0 + (s.params.w + 1.0));
+        float randAngle = fract(sin(seed) * 43758.5453) * TWO_PI;
         rot = float2(cos(randAngle), sin(randAngle));
     }
 
-    // Use tighter kernel for near cascade to reduce shimmer
-    float kernelRadius = (s.params.w < 0.5) ? 1.5 : 2.5;
+    // Grow filter footprint mildly with texel size, but keep cascades sharp.
+    float cascadeTexelWorld = max(s.depthRange.z, 1e-5);
+    float texelRatio = clamp(cascadeTexelWorld / max(baseTexelWorld, 1e-5), 1.0, isCascade ? 1.25 : 3.0);
+    float kernelBase = isCascade ? 0.95 : ((s.params.w < 0.5) ? 1.2 : 1.8);
+    float kernelRadius = kernelBase * sqrt(texelRatio);
 
     // ndc.z is already 0..1 for our D3D/Metal-style projections
     float depth = ndc.z;
@@ -519,7 +506,15 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
     float penumbra = s.params.z;
     float shadow = 1.0;
     bool usePCSSLocal = usePCSS && (s.params.w > 0.5);
-    if (usePCSSLocal && penumbra > 0.0) {
+    if (isCascade) {
+        if (!usePCSS) {
+            // Keep hard shadows atlas-tile safe as well.
+            shadow = sampleShadowDepthPCF(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, float2(1.0, 0.0), 0.0);
+        } else {
+            float cascadeRadius = clamp(kernelRadius, 0.7, 2.2);
+            shadow = pcfSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, rot, cascadeRadius);
+        }
+    } else if (usePCSSLocal && penumbra > 0.0) {
         shadow = pcssSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, penumbra, rot, kernelRadius);
     } else {
         shadow = pcfSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, rot, kernelRadius);
@@ -529,7 +524,7 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
         float contactBias = bias * 0.5;
         float contactRadius = 1.0;
         float contact = pcfSample(atlas, shadowSampler, uv, depth, contactBias, tileMin, tileMax, rot, contactRadius);
-        float contactStrength = (s.params.w < 0.5) ? 0.4 : 0.6;
+        float contactStrength = isCascade ? 0.35 : ((s.params.w < 0.5) ? 0.4 : 0.6);
         shadow = min(shadow, mix(1.0, contact, contactStrength));
     }
 
@@ -549,23 +544,35 @@ float sampleShadow(const device ShadowGPUData* shadowData,
                    bool useContact) {
     if (shadowIdx < 0) return 1.0;
     float baseTexelWorld = max(shadowData[shadowIdx].depthRange.z, 1e-5);
+    bool usePCSSForThisLight = usePCSS;
 
     if (cascadeCount <= 1) {
-        return sampleShadowCascade(shadowData, shadowIdx, worldPos, normalWS, lightDirWS, atlas, shadowSampler, usePCSS, useContact, baseTexelWorld);
+        return sampleShadowCascade(shadowData, shadowIdx, worldPos, normalWS, lightDirWS, atlas, shadowSampler, usePCSSForThisLight, useContact, baseTexelWorld, false);
+    }
+
+    float farLimit = shadowData[shadowIdx + cascadeCount - 1].depthRange.y;
+    if (viewDepth > farLimit) {
+        return 1.0;
     }
 
     // Use view-space depth for cascade selection (matches split computation)
     viewDepth = max(viewDepth, 0.0);
 
-    // Find the appropriate cascade based on depth
-    int current = 0;
+    // Find the appropriate cascade using explicit [near, far] intervals.
+    int current = -1;
     for (int c = 0; c < cascadeCount; ++c) {
         ShadowGPUData s = shadowData[shadowIdx + c];
-        if (viewDepth < s.depthRange.y) {
+        if (viewDepth >= s.depthRange.x && viewDepth <= s.depthRange.y) {
             current = c;
             break;
         }
-        current = c;  // Use last cascade if beyond all ranges
+        if (viewDepth < s.depthRange.x) {
+            current = c;
+            break;
+        }
+    }
+    if (current < 0) {
+        return 1.0;
     }
 
     // Blend with next cascade for smooth transitions
@@ -577,9 +584,9 @@ float sampleShadow(const device ShadowGPUData* shadowData,
         ShadowGPUData curData = shadowData[shadowIdx + current];
         ShadowGPUData nextData = shadowData[shadowIdx + current + 1];
 
-        // Adaptive blend range: larger for fewer cascades
-        float cascadeRange = curData.depthRange.y - curData.depthRange.x;
-        float blendFactor = min(0.3, 6.0 / float(cascadeCount)); // Wider blend for stability
+        // Keep transition narrow to avoid broad blur bands at boundaries.
+        float cascadeRange = max(curData.depthRange.y - curData.depthRange.x, 0.001);
+        float blendFactor = 0.16;
         float blendRange = blendFactor * cascadeRange;
         float blendStart = curData.depthRange.y - blendRange;
 
@@ -590,17 +597,11 @@ float sampleShadow(const device ShadowGPUData* shadowData,
         }
     }
 
-    bool allowPCSS_A = usePCSS;
-    if (cascadeCount > 1 && cascadeA <= 1) {
-        allowPCSS_A = false;
-    }
-    float shadowA = sampleShadowCascade(shadowData, shadowIdx + cascadeA, worldPos, normalWS, lightDirWS, atlas, shadowSampler, allowPCSS_A, useContact, baseTexelWorld);
+    bool allowPCSS_A = usePCSSForThisLight;
+    float shadowA = sampleShadowCascade(shadowData, shadowIdx + cascadeA, worldPos, normalWS, lightDirWS, atlas, shadowSampler, allowPCSS_A, useContact, baseTexelWorld, true);
     if (blend < 0.001) return shadowA;  // Skip second sample if blend is negligible
-    bool allowPCSS_B = usePCSS;
-    if (cascadeCount > 1 && cascadeB <= 1) {
-        allowPCSS_B = false;
-    }
-    float shadowB = sampleShadowCascade(shadowData, shadowIdx + cascadeB, worldPos, normalWS, lightDirWS, atlas, shadowSampler, allowPCSS_B, useContact, baseTexelWorld);
+    bool allowPCSS_B = usePCSSForThisLight;
+    float shadowB = sampleShadowCascade(shadowData, shadowIdx + cascadeB, worldPos, normalWS, lightDirWS, atlas, shadowSampler, allowPCSS_B, useContact, baseTexelWorld, true);
     return mix(shadowA, shadowB, blend);
 }
 
@@ -636,7 +637,7 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
     ref = saturate(ref);
     
     float bias = s.params.x;
-    float nDotL = saturate(dot(normalize(normalWS), normalize(-lightDirWS)));
+    float nDotL = saturate(dot(normalize(normalWS), normalize(lightDirWS)));
     bias += s.params.y * (1.0 - nDotL);
     ref = max(ref - bias, 0.0);
     
@@ -1876,28 +1877,39 @@ kernel void fog_volume_build(
         if (shadowIndex >= 0) {
             float3 viewPosShadow = (camera.viewMatrix * float4(worldPos, 1.0)).xyz;
             float viewDepth = max(-viewPosShadow.z, 0.0);
-            int current = 0;
-            for (int c = 0; c < cascadeCount; ++c) {
-                ShadowGPUData s = shadowData[shadowIndex + c];
-                if (viewDepth < s.depthRange.y) {
-                    current = c;
-                    break;
+            float farLimit = shadowData[shadowIndex + cascadeCount - 1].depthRange.y;
+            int current = -1;
+            if (viewDepth <= farLimit) {
+                for (int c = 0; c < cascadeCount; ++c) {
+                    ShadowGPUData s = shadowData[shadowIndex + c];
+                    if (viewDepth >= s.depthRange.x && viewDepth <= s.depthRange.y) {
+                        current = c;
+                        break;
+                    }
+                    if (viewDepth < s.depthRange.x) {
+                        current = c;
+                        break;
+                    }
                 }
-                current = c;
             }
-            ShadowGPUData s = shadowData[shadowIndex + current];
-            float4 clip = s.viewProj * float4(worldPos, 1.0);
-            float3 ndc = clip.xyz / clip.w;
-            if (ndc.x >= -1.0 && ndc.x <= 1.0 && ndc.y >= -1.0 && ndc.y <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0) {
-                float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-                float2 tileMin = s.atlasUV.xy;
-                float2 tileMax = s.atlasUV.xy + s.atlasUV.zw;
-                if (uv.x >= tileMin.x && uv.x <= tileMax.x && uv.y >= tileMin.y && uv.y <= tileMax.y) {
-                    float bias = s.params.x * 0.5;
-                    float randAngle = hash21(uv * 4096.0) * TWO_PI;
-                    float2 rot = float2(cos(randAngle), sin(randAngle));
-                    shadowFactor = sampleShadowDepthPCF(shadowAtlas, shadowSampler, uv, ndc.z, bias, tileMin, tileMax, rot, 1.5);
-                    shadowFactor = mix(1.0, shadowFactor, clamp(params.shadowParams.w, 0.0, 1.0));
+            if (current >= 0) {
+                ShadowGPUData s = shadowData[shadowIndex + current];
+                float4 clip = s.viewProj * float4(worldPos, 1.0);
+                float3 ndc = clip.xyz / clip.w;
+                if (ndc.x >= -1.0 && ndc.x <= 1.0 && ndc.y >= -1.0 && ndc.y <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0) {
+                    float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+                    float2 tileMin = s.atlasUV.xy;
+                    float2 tileMax = s.atlasUV.xy + s.atlasUV.zw;
+                    uv = uv * s.atlasUV.zw + s.atlasUV.xy;
+                    if (uv.x >= tileMin.x && uv.x <= tileMax.x && uv.y >= tileMin.y && uv.y <= tileMax.y) {
+                        float bias = s.params.x * 0.5;
+                        float2 worldCell = floor(worldPos.xz / max(s.depthRange.z * 10.0, 0.05));
+                        float seed = hash21(worldCell + s.atlasUV.xy * 2048.0 + s.params.w);
+                        float randAngle = fract(sin(seed) * 43758.5453) * TWO_PI;
+                        float2 rot = float2(cos(randAngle), sin(randAngle));
+                        shadowFactor = sampleShadowDepthPCF(shadowAtlas, shadowSampler, uv, ndc.z, bias, tileMin, tileMax, rot, 1.5);
+                        shadowFactor = mix(1.0, shadowFactor, clamp(params.shadowParams.w, 0.0, 1.0));
+                    }
                 }
             }
         }

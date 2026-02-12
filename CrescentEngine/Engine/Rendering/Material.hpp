@@ -168,6 +168,9 @@ public:
     
     std::shared_ptr<Texture2D> getHeightTexture() const { return m_HeightTexture; }
     void setHeightTexture(std::shared_ptr<Texture2D> texture) { m_HeightTexture = texture; }
+
+    std::shared_ptr<Texture2D> getOpacityTexture() const { return m_OpacityTexture; }
+    void setOpacityTexture(std::shared_ptr<Texture2D> texture) { m_OpacityTexture = texture; }
     
     // Shader
     void* getShader() const { return m_Shader; }
@@ -228,6 +231,7 @@ private:
     std::shared_ptr<Texture2D> m_EmissionTexture;
     std::shared_ptr<Texture2D> m_ORMTexture;
     std::shared_ptr<Texture2D> m_HeightTexture;
+    std::shared_ptr<Texture2D> m_OpacityTexture;
     
     Math::Vector2 m_UVTiling;
     Math::Vector2 m_UVOffset;

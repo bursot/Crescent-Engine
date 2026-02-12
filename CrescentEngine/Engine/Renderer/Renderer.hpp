@@ -459,6 +459,7 @@ private:
 
     // Active quality settings
     SceneQualitySettings m_qualitySettings;
+    uint32_t m_shadowAtlasResolution;
     uint32_t m_renderTargetWidth;
     uint32_t m_renderTargetHeight;
     uint32_t m_msaaSamples;

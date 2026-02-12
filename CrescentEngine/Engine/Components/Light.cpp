@@ -39,7 +39,8 @@ Light::Light()
     , m_Volumetric(false)
     , m_VolumetricAnisotropy(0.0f) {
         
-    m_CascadeSplits = {0.05f, 0.15f, 0.35f, 1.0f};
+    // Practical split distribution: keeps near shadows sharper without starving far coverage.
+    m_CascadeSplits = {0.08f, 0.22f, 0.5f, 1.0f};
 }
 
 float Light::calculateAttenuation(float distance) const {

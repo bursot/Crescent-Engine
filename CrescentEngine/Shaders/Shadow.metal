@@ -32,7 +32,7 @@ struct ShadowOut {
 struct ShadowMaterial {
     float4 albedo;
     float4 uvTilingOffset;
-    float4 alphaParams; // x cutoff, y hasAlbedoTex, z alphaClip, w unused
+    float4 alphaParams; // x cutoff, y hasAlbedoTex, z alphaClip, w hasOpacityTex
 };
 
 struct ShadowFoliageParams {
@@ -45,6 +45,14 @@ struct ShadowFoliageParams {
     float4 boundsSize;   // xyz size
     float4 flags;        // x billboard
 };
+
+inline void shadowAlphaClip(float alpha, float cutoff) {
+    float aa = max(fwidth(alpha) * 0.85, 0.004);
+    float coverage = smoothstep(cutoff - aa, cutoff + aa, alpha);
+    if (coverage < 0.5) {
+        discard_fragment();
+    }
+}
 
 inline float3 applyWindOffsetShadow(float3 worldPos,
                                     constant ShadowFoliageParams& params) {
@@ -94,6 +102,7 @@ inline float4 applySkinning(ShadowVertexInSkinnedUV in, const device float4x4* b
 fragment void shadow_alpha_fragment(ShadowOut in [[stage_in]],
                                     constant ShadowMaterial& material [[buffer(0)]],
                                     texture2d<float> albedoMap [[texture(0)]],
+                                    texture2d<float> opacityMap [[texture(1)]],
                                     sampler alphaSampler [[sampler(0)]]) {
     if (material.alphaParams.z < 0.5) {
         return;
@@ -101,11 +110,30 @@ fragment void shadow_alpha_fragment(ShadowOut in [[stage_in]],
     float2 uv = in.uv * material.uvTilingOffset.xy + material.uvTilingOffset.zw;
     float alpha = material.albedo.a;
     if (material.alphaParams.y > 0.5) {
-        alpha *= albedoMap.sample(alphaSampler, uv).a;
+        float2 texSize = float2(albedoMap.get_width(), albedoMap.get_height());
+        float2 duvDx = dfdx(uv) * texSize;
+        float2 duvDy = dfdy(uv) * texSize;
+        float footprint = max(length(duvDx), length(duvDy));
+        float mipLevel = clamp(log2(max(footprint, 1.0)), 0.0, 4.0);
+        // Slight sharpen to keep near foliage readable without distant stipple noise.
+        float shadowMip = max(mipLevel - 0.35, 0.0);
+        alpha *= albedoMap.sample(alphaSampler, uv, level(shadowMip)).a;
+
+        // Slightly lower cutoff on distant mips to avoid porous/noisy silhouettes.
+        float cutoffScale = mix(1.0, 0.80, saturate(mipLevel / 4.0));
+        float cutoff = material.alphaParams.x * cutoffScale;
+        if (material.alphaParams.w > 0.5) {
+            float opacity = opacityMap.sample(alphaSampler, uv, level(shadowMip)).r;
+            alpha *= opacity;
+        }
+        shadowAlphaClip(alpha, cutoff);
+        return;
     }
-    if (alpha < material.alphaParams.x) {
-        discard_fragment();
+
+    if (material.alphaParams.w > 0.5) {
+        alpha *= opacityMap.sample(alphaSampler, uv).r;
     }
+    shadowAlphaClip(alpha, material.alphaParams.x);
 }
 
 // Depth-only vertex for directional cascades and projected shadows.

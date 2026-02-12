@@ -38,12 +38,28 @@ Mesh::~Mesh() {
 void Mesh::setVertices(const std::vector<Vertex>& vertices) {
     m_Vertices = vertices;
     calculateBounds();
+    if (m_VertexBuffer) {
+        static_cast<MTL::Buffer*>(m_VertexBuffer)->release();
+        m_VertexBuffer = nullptr;
+    }
+    if (m_IndexBuffer) {
+        static_cast<MTL::Buffer*>(m_IndexBuffer)->release();
+        m_IndexBuffer = nullptr;
+    }
+    if (m_SkinWeightBuffer) {
+        static_cast<MTL::Buffer*>(m_SkinWeightBuffer)->release();
+        m_SkinWeightBuffer = nullptr;
+    }
     m_IsUploaded = false;
     m_WireEdgesDirty = true;
 }
 
 void Mesh::setIndices(const std::vector<uint32_t>& indices) {
     m_Indices = indices;
+    if (m_IndexBuffer) {
+        static_cast<MTL::Buffer*>(m_IndexBuffer)->release();
+        m_IndexBuffer = nullptr;
+    }
     m_IsUploaded = false;
     m_WireEdgesDirty = true;
 }
@@ -55,6 +71,10 @@ void Mesh::setSubmeshes(const std::vector<Submesh>& submeshes) {
 void Mesh::setSkinWeights(const std::vector<SkinWeight>& weights) {
     m_SkinWeights = weights;
     m_HasSkinWeights = !m_SkinWeights.empty();
+    if (m_SkinWeightBuffer) {
+        static_cast<MTL::Buffer*>(m_SkinWeightBuffer)->release();
+        m_SkinWeightBuffer = nullptr;
+    }
     m_IsUploaded = false;
 }
 
@@ -126,7 +146,7 @@ void Mesh::calculateNormals() {
     }
     
     // Calculate face normals and accumulate
-    for (size_t i = 0; i < m_Indices.size(); i += 3) {
+    for (size_t i = 0; i + 2 < m_Indices.size(); i += 3) {
         uint32_t i0 = m_Indices[i];
         uint32_t i1 = m_Indices[i + 1];
         uint32_t i2 = m_Indices[i + 2];
@@ -154,6 +174,8 @@ void Mesh::calculateNormals() {
 
 void Mesh::calculateTangents() {
     if (m_Vertices.empty() || m_Indices.empty()) return;
+    constexpr float kMinDenominator = 1e-8f;
+    constexpr float kMinVectorLenSq = 1e-10f;
     
     // Reset tangents and bitangents
     for (auto& vertex : m_Vertices) {
@@ -162,7 +184,7 @@ void Mesh::calculateTangents() {
     }
     
     // Calculate tangents using texture coordinates
-    for (size_t i = 0; i < m_Indices.size(); i += 3) {
+    for (size_t i = 0; i + 2 < m_Indices.size(); i += 3) {
         uint32_t i0 = m_Indices[i];
         uint32_t i1 = m_Indices[i + 1];
         uint32_t i2 = m_Indices[i + 2];
@@ -177,7 +199,11 @@ void Mesh::calculateTangents() {
         Math::Vector2 deltaUV1 = v1.texCoord - v0.texCoord;
         Math::Vector2 deltaUV2 = v2.texCoord - v0.texCoord;
         
-        float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+        float denominator = deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y;
+        if (std::abs(denominator) <= kMinDenominator) {
+            continue;
+        }
+        float f = 1.0f / denominator;
         
         Math::Vector3 tangent;
         tangent.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
@@ -201,8 +227,19 @@ void Mesh::calculateTangents() {
     // Normalize and orthogonalize
     for (auto& vertex : m_Vertices) {
         // Gram-Schmidt orthogonalization
-        vertex.tangent = (vertex.tangent - vertex.normal * vertex.normal.dot(vertex.tangent)).normalized();
-        vertex.bitangent = vertex.bitangent.normalized();
+        vertex.tangent = vertex.tangent - vertex.normal * vertex.normal.dot(vertex.tangent);
+        if (vertex.tangent.lengthSquared() <= kMinVectorLenSq) {
+            Math::Vector3 reference = std::abs(vertex.normal.y) < 0.999f
+                ? Math::Vector3::Up
+                : Math::Vector3::Right;
+            vertex.tangent = reference.cross(vertex.normal);
+        }
+        vertex.tangent.normalize();
+
+        if (vertex.bitangent.lengthSquared() <= kMinVectorLenSq) {
+            vertex.bitangent = vertex.normal.cross(vertex.tangent);
+        }
+        vertex.bitangent.normalize();
     }
     
     m_IsUploaded = false;
@@ -618,92 +655,98 @@ std::shared_ptr<Mesh> Mesh::CreateCapsule(float radius, float height, uint32_t s
     auto mesh = std::make_shared<Mesh>();
     mesh->setName("Capsule");
     
+    radius = std::max(radius, 0.0001f);
+    segments = std::max<uint32_t>(segments, 8u);
+
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
     
-    float cylinderHeight = height - 2.0f * radius;
+    float cylinderHeight = std::max(0.0f, height - 2.0f * radius);
     float halfCylinderHeight = cylinderHeight * 0.5f;
-    
-    uint32_t rings = segments / 2;
-    
-    // Top hemisphere
-    for (uint32_t ring = 0; ring <= rings; ++ring) {
-        float phi = (Math::PI * 0.5f) * static_cast<float>(ring) / static_cast<float>(rings);
-        float sinPhi = std::sin(phi);
-        float cosPhi = std::cos(phi);
-        
-        for (uint32_t segment = 0; segment <= segments; ++segment) {
-            float theta = 2.0f * Math::PI * static_cast<float>(segment) / static_cast<float>(segments);
+    uint32_t radialSegments = segments;
+    uint32_t hemisphereRings = std::max<uint32_t>(segments / 2u, 4u);
+    uint32_t cylinderRings = cylinderHeight > 0.0f ? std::max<uint32_t>(segments / 4u, 1u) : 0u;
+    float totalHeight = 2.0f * radius + cylinderHeight;
+
+    auto pushRing = [&](float y, float ringRadius, float normalY, float normalRadial) {
+        float vCoord = (halfCylinderHeight + radius - y) / totalHeight;
+        for (uint32_t segment = 0; segment <= radialSegments; ++segment) {
+            float uCoord = static_cast<float>(segment) / static_cast<float>(radialSegments);
+            float theta = 2.0f * Math::PI * uCoord;
             float sinTheta = std::sin(theta);
             float cosTheta = std::cos(theta);
-            
+
             Vertex vertex;
-            vertex.position.x = radius * sinPhi * cosTheta;
-            vertex.position.y = halfCylinderHeight + radius * cosPhi;
-            vertex.position.z = radius * sinPhi * sinTheta;
-            
-            Math::Vector3 sphereCenter(0, halfCylinderHeight, 0);
-            vertex.normal = (vertex.position - sphereCenter).normalized();
-            
-            vertex.texCoord = Math::Vector2(
-                static_cast<float>(segment) / segments,
-                0.5f + 0.5f * static_cast<float>(ring) / rings
+            vertex.position = Math::Vector3(
+                ringRadius * cosTheta,
+                y,
+                ringRadius * sinTheta
             );
-            
+            vertex.normal = Math::Vector3(
+                normalRadial * cosTheta,
+                normalY,
+                normalRadial * sinTheta
+            ).normalized();
+            vertex.texCoord = Math::Vector2(uCoord, std::clamp(vCoord, 0.0f, 1.0f));
+            vertex.tangent = Math::Vector3(-sinTheta, 0.0f, cosTheta);
+            vertex.tangent.normalize();
+            vertex.bitangent = vertex.normal.cross(vertex.tangent);
+            vertex.bitangent.normalize();
             vertex.color = Math::Vector4(1, 1, 1, 1);
             vertices.push_back(vertex);
         }
-    }
-    
-    // Bottom hemisphere
-    for (uint32_t ring = 0; ring <= rings; ++ring) {
-        float phi = (Math::PI * 0.5f) * static_cast<float>(ring) / static_cast<float>(rings);
+    };
+
+    // Top hemisphere (pole -> equator)
+    for (uint32_t ring = 0; ring <= hemisphereRings; ++ring) {
+        float t = static_cast<float>(ring) / static_cast<float>(hemisphereRings);
+        float phi = t * Math::HALF_PI;
         float sinPhi = std::sin(phi);
         float cosPhi = std::cos(phi);
-        
-        for (uint32_t segment = 0; segment <= segments; ++segment) {
-            float theta = 2.0f * Math::PI * static_cast<float>(segment) / static_cast<float>(segments);
-            float sinTheta = std::sin(theta);
-            float cosTheta = std::cos(theta);
-            
-            Vertex vertex;
-            vertex.position.x = radius * sinPhi * cosTheta;
-            vertex.position.y = -halfCylinderHeight - radius * cosPhi;
-            vertex.position.z = radius * sinPhi * sinTheta;
-            
-            Math::Vector3 sphereCenter(0, -halfCylinderHeight, 0);
-            vertex.normal = (vertex.position - sphereCenter).normalized();
-            
-            vertex.texCoord = Math::Vector2(
-                static_cast<float>(segment) / segments,
-                0.5f - 0.5f * static_cast<float>(ring) / rings
-            );
-            
-            vertex.color = Math::Vector4(1, 1, 1, 1);
-            vertices.push_back(vertex);
-        }
+        pushRing(
+            halfCylinderHeight + radius * cosPhi,
+            radius * sinPhi,
+            cosPhi,
+            sinPhi
+        );
     }
-    
-    // Generate indices for both hemispheres
-    uint32_t topOffset = 0;
-    uint32_t bottomOffset = (rings + 1) * (segments + 1);
-    
-    for (uint32_t i = 0; i < rings * 2; ++i) {
-        uint32_t offset = (i < rings) ? topOffset : (bottomOffset - (rings + 1) * (segments + 1));
-        uint32_t row = (i < rings) ? i : (i - rings);
-        
-        for (uint32_t j = 0; j < segments; ++j) {
-            uint32_t current = offset + row * (segments + 1) + j;
-            uint32_t next = current + segments + 1;
-            
-            // CLOCKWISE winding
+
+    // Cylinder section (just below top equator -> bottom equator)
+    for (uint32_t ring = 1; ring <= cylinderRings; ++ring) {
+        float t = static_cast<float>(ring) / static_cast<float>(cylinderRings);
+        float y = halfCylinderHeight - t * cylinderHeight;
+        pushRing(y, radius, 0.0f, 1.0f);
+    }
+
+    // Bottom hemisphere (just below equator -> pole)
+    for (uint32_t ring = 1; ring <= hemisphereRings; ++ring) {
+        float t = static_cast<float>(ring) / static_cast<float>(hemisphereRings);
+        float phi = t * Math::HALF_PI;
+        float sinPhi = std::sin(phi);
+        float cosPhi = std::cos(phi);
+        pushRing(
+            -halfCylinderHeight - radius * sinPhi,
+            radius * cosPhi,
+            -sinPhi,
+            cosPhi
+        );
+    }
+
+    uint32_t ringsTotal = static_cast<uint32_t>(vertices.size() / (radialSegments + 1));
+    for (uint32_t ring = 0; ring + 1 < ringsTotal; ++ring) {
+        uint32_t rowStart = ring * (radialSegments + 1);
+        uint32_t nextRowStart = (ring + 1) * (radialSegments + 1);
+        for (uint32_t segment = 0; segment < radialSegments; ++segment) {
+            uint32_t current = rowStart + segment;
+            uint32_t next = nextRowStart + segment;
+
             indices.push_back(current);
-            indices.push_back(next);
-            indices.push_back(current + 1);
-            
             indices.push_back(current + 1);
             indices.push_back(next);
+
+            indices.push_back(current + 1);
             indices.push_back(next + 1);
+            indices.push_back(next);
         }
     }
     

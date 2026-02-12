@@ -27,10 +27,10 @@ struct LightInspector: View {
     @State private var shadowFar: Float = 200.0
     @State private var contactShadows: Bool = false
     @State private var cascadeCount: Int = 4
-    @State private var cascadeSplits: [Float] = [0.05, 0.15, 0.35, 1.0]
+    @State private var cascadeSplits: [Float] = [0.08, 0.22, 0.5, 1.0]
     @State private var volumetric: Bool = false
     
-    private let resOptions = [256, 512, 1024, 2048]
+    private let resOptions = [256, 512, 1024, 2048, 4096]
     private let unitOptions = ["Lumens", "Lux", "Nits"]
     private let falloffOptions = ["Linear", "Inverse Square"]
     private let typeOptions = ["Directional", "Point", "Spot", "Area Rect", "Area Disk", "Emissive Mesh"]
