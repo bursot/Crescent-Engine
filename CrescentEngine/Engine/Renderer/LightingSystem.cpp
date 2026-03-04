@@ -255,23 +255,26 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
         Math::Vector3 lightPos = center - lightDir * lightDistance;
         Math::Matrix4x4 view = Math::Matrix4x4::LookAt(lightPos, center, up);
 
+        // Use a sphere-based stable ortho fit. This avoids XY bounds pumping
+        // when the camera rotates, which is a primary source of shimmering.
         float stableExtent = std::max(radius, 0.1f);
-        float texelSize = (stableExtent * 2.0f) / static_cast<float>(cascadeRes);
+        float orthoExtent = stableExtent * 1.03f;
+        float orthoTexel = (orthoExtent * 2.0f) / static_cast<float>(cascadeRes);
+
+        // CRITICAL: snap using orthoTexel (the ACTUAL rendered pixel size),
+        // not stableExtent-based size. Mismatched snap grid was causing
+        // 1-pixel sub-texel shimmer every time the camera moved.
         Math::Vector3 centerLS = view.transformPoint(center);
-        centerLS.x = std::round(centerLS.x / texelSize) * texelSize;
-        centerLS.y = std::round(centerLS.y / texelSize) * texelSize;
+        centerLS.x = std::round(centerLS.x / orthoTexel) * orthoTexel;
+        centerLS.y = std::round(centerLS.y / orthoTexel) * orthoTexel;
         Math::Vector3 snappedCenter = view.inversed().transformPoint(centerLS);
         lightPos = snappedCenter - lightDir * lightDistance;
         view = Math::Matrix4x4::LookAt(lightPos, snappedCenter, up);
 
-        // Use a sphere-based stable ortho fit. This avoids XY bounds pumping
-        // when the camera rotates, which is a primary source of shimmering.
-        float orthoExtent = stableExtent * 1.03f;
         float minX = -orthoExtent;
         float maxX = orthoExtent;
         float minY = -orthoExtent;
         float maxY = orthoExtent;
-        float orthoTexel = (orthoExtent * 2.0f) / static_cast<float>(cascadeRes);
 
         float minDepth = std::numeric_limits<float>::max();
         float maxDepth = std::numeric_limits<float>::lowest();
@@ -283,14 +286,37 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
         }
         float casterPadding = std::max(8.0f, stableExtent * 0.85f);
         float receiverPadding = std::max(3.0f, stableExtent * 0.35f);
-        float lightNear = std::max(0.01f, minDepth - casterPadding);
-        float lightFar = std::max(lightNear + 1.0f, maxDepth + receiverPadding);
+        float lightNearRaw = std::max(0.01f, minDepth - casterPadding);
+        float lightFarRaw = std::max(lightNearRaw + 1.0f, maxDepth + receiverPadding);
+
+        // Quantize depth bounds to dampen per-frame depth-span pumping.
+        float depthSpanRaw = std::max(1.0f, lightFarRaw - lightNearRaw);
+        float depthQuant = std::max(0.25f, depthSpanRaw / 2048.0f);
+        float lightNear = std::floor(lightNearRaw / depthQuant) * depthQuant;
+        float lightFar = std::ceil(lightFarRaw / depthQuant) * depthQuant;
+        lightNear = std::max(0.01f, lightNear);
+        lightFar = std::max(lightNear + 1.0f, lightFar);
+
         Math::Matrix4x4 proj = Math::Matrix4x4::Orthographic(minX, maxX, minY, maxY, lightNear, lightFar);
+
+        // Final clip-space snap keeps the whole light matrix locked to shadow texels.
+        Math::Matrix4x4 viewProj = proj * view;
+        Math::Vector4 shadowOrigin = viewProj * Math::Vector4(0.0f, 0.0f, 0.0f, 1.0f);
+        float texelScale = static_cast<float>(cascadeRes) * 0.5f;
+        shadowOrigin.x *= texelScale;
+        shadowOrigin.y *= texelScale;
+        float roundedX = std::round(shadowOrigin.x);
+        float roundedY = std::round(shadowOrigin.y);
+        float offsetX = (roundedX - shadowOrigin.x) * (2.0f / static_cast<float>(cascadeRes));
+        float offsetY = (roundedY - shadowOrigin.y) * (2.0f / static_cast<float>(cascadeRes));
+        proj(0, 3) += offsetX;
+        proj(1, 3) += offsetY;
+        viewProj = proj * view;
         
         CascadedSlice slice;
         slice.view = view;
         slice.proj = proj;
-        slice.viewProj = proj * view;
+        slice.viewProj = viewProj;
         slice.owner = light.light;
         slice.cascadeIndex = cascadeIdx;
         slice.resolution = cascadeRes;

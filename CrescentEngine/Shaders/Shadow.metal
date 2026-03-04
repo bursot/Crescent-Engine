@@ -46,6 +46,11 @@ struct ShadowFoliageParams {
     float4 flags;        // x billboard
 };
 
+struct ShadowObjectUniforms {
+    float4x4 viewProj;
+    float4x4 modelMatrix;
+};
+
 inline void shadowAlphaClip(float alpha, float cutoff) {
     float aa = max(fwidth(alpha) * 0.85, 0.004);
     float coverage = smoothstep(cutoff - aa, cutoff + aa, alpha);
@@ -69,6 +74,14 @@ inline float3 applyWindOffsetShadow(float3 worldPos,
     float sway = sin(phase) * params.foliageParams0.x;
     float gust = sin(phase * 0.7 + time * params.foliageParams0.y * 0.5) * params.foliageParams0.w;
     return worldPos + dir * (sway + gust);
+}
+
+inline float4 shadowObjectVertex(float3 localPos,
+                                 constant ShadowObjectUniforms& object,
+                                 constant ShadowFoliageParams& foliage) {
+    float3 worldPos = (object.modelMatrix * float4(localPos, 1.0)).xyz;
+    worldPos = applyWindOffsetShadow(worldPos, foliage);
+    return object.viewProj * float4(worldPos, 1.0);
 }
 
 inline float4 applySkinning(ShadowVertexInSkinned in, const device float4x4* bones) {
@@ -138,14 +151,16 @@ fragment void shadow_alpha_fragment(ShadowOut in [[stage_in]],
 
 // Depth-only vertex for directional cascades and projected shadows.
 vertex float4 shadow_dir_vertex(ShadowVertexIn in [[stage_in]],
-                                constant float4x4& mvp [[buffer(1)]]) {
-    return mvp * float4(in.position, 1.0);
+                                constant ShadowObjectUniforms& object [[buffer(1)]],
+                                constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(in.position, object, foliage);
 }
 
 vertex ShadowOut shadow_dir_vertex_cutout(ShadowVertexInUV in [[stage_in]],
-                                          constant float4x4& mvp [[buffer(1)]]) {
+                                          constant ShadowObjectUniforms& object [[buffer(1)]],
+                                          constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * float4(in.position, 1.0);
+    out.position = shadowObjectVertex(in.position, object, foliage);
     out.uv = in.texCoord;
     return out;
 }
@@ -216,29 +231,33 @@ vertex ShadowOut shadow_dir_vertex_cutout_instanced(ShadowVertexInUV in [[stage_
 }
 
 vertex float4 shadow_dir_vertex_skinned(ShadowVertexInSkinned in [[stage_in]],
-                                        constant float4x4& mvp [[buffer(1)]],
-                                        const device float4x4* bones [[buffer(2)]]) {
-    return mvp * applySkinning(in, bones);
+                                        constant ShadowObjectUniforms& object [[buffer(1)]],
+                                        const device float4x4* bones [[buffer(2)]],
+                                        constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
 }
 
 vertex ShadowOut shadow_dir_vertex_cutout_skinned(ShadowVertexInSkinnedUV in [[stage_in]],
-                                                  constant float4x4& mvp [[buffer(1)]],
-                                                  const device float4x4* bones [[buffer(2)]]) {
+                                                  constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                  const device float4x4* bones [[buffer(2)]],
+                                                  constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * applySkinning(in, bones);
+    out.position = shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
     out.uv = in.texCoord;
     return out;
 }
 
 vertex float4 shadow_spot_vertex(ShadowVertexIn in [[stage_in]],
-                                 constant float4x4& mvp [[buffer(1)]]) {
-    return mvp * float4(in.position, 1.0);
+                                 constant ShadowObjectUniforms& object [[buffer(1)]],
+                                 constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(in.position, object, foliage);
 }
 
 vertex ShadowOut shadow_spot_vertex_cutout(ShadowVertexInUV in [[stage_in]],
-                                           constant float4x4& mvp [[buffer(1)]]) {
+                                           constant ShadowObjectUniforms& object [[buffer(1)]],
+                                           constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * float4(in.position, 1.0);
+    out.position = shadowObjectVertex(in.position, object, foliage);
     out.uv = in.texCoord;
     return out;
 }
@@ -309,30 +328,34 @@ vertex ShadowOut shadow_spot_vertex_cutout_instanced(ShadowVertexInUV in [[stage
 }
 
 vertex float4 shadow_spot_vertex_skinned(ShadowVertexInSkinned in [[stage_in]],
-                                         constant float4x4& mvp [[buffer(1)]],
-                                         const device float4x4* bones [[buffer(2)]]) {
-    return mvp * applySkinning(in, bones);
+                                         constant ShadowObjectUniforms& object [[buffer(1)]],
+                                         const device float4x4* bones [[buffer(2)]],
+                                         constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
 }
 
 vertex ShadowOut shadow_spot_vertex_cutout_skinned(ShadowVertexInSkinnedUV in [[stage_in]],
-                                                   constant float4x4& mvp [[buffer(1)]],
-                                                   const device float4x4* bones [[buffer(2)]]) {
+                                                   constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                   const device float4x4* bones [[buffer(2)]],
+                                                   constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * applySkinning(in, bones);
+    out.position = shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
     out.uv = in.texCoord;
     return out;
 }
 
 // For point lights - uses perspective depth, shader converts for comparison
 vertex float4 shadow_point_vertex(ShadowVertexIn in [[stage_in]],
-                                  constant float4x4& mvp [[buffer(1)]]) {
-    return mvp * float4(in.position, 1.0);
+                                  constant ShadowObjectUniforms& object [[buffer(1)]],
+                                  constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(in.position, object, foliage);
 }
 
 vertex ShadowOut shadow_point_vertex_cutout(ShadowVertexInUV in [[stage_in]],
-                                            constant float4x4& mvp [[buffer(1)]]) {
+                                            constant ShadowObjectUniforms& object [[buffer(1)]],
+                                            constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * float4(in.position, 1.0);
+    out.position = shadowObjectVertex(in.position, object, foliage);
     out.uv = in.texCoord;
     return out;
 }
@@ -403,30 +426,34 @@ vertex ShadowOut shadow_point_vertex_cutout_instanced(ShadowVertexInUV in [[stag
 }
 
 vertex float4 shadow_point_vertex_skinned(ShadowVertexInSkinned in [[stage_in]],
-                                          constant float4x4& mvp [[buffer(1)]],
-                                          const device float4x4* bones [[buffer(2)]]) {
-    return mvp * applySkinning(in, bones);
+                                          constant ShadowObjectUniforms& object [[buffer(1)]],
+                                          const device float4x4* bones [[buffer(2)]],
+                                          constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
 }
 
 vertex ShadowOut shadow_point_vertex_cutout_skinned(ShadowVertexInSkinnedUV in [[stage_in]],
-                                                    constant float4x4& mvp [[buffer(1)]],
-                                                    const device float4x4* bones [[buffer(2)]]) {
+                                                    constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                    const device float4x4* bones [[buffer(2)]],
+                                                    constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * applySkinning(in, bones);
+    out.position = shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
     out.uv = in.texCoord;
     return out;
 }
 
 // Area light approximated with projected shadow map.
 vertex float4 shadow_area_vertex(ShadowVertexIn in [[stage_in]],
-                                 constant float4x4& mvp [[buffer(1)]]) {
-    return mvp * float4(in.position, 1.0);
+                                 constant ShadowObjectUniforms& object [[buffer(1)]],
+                                 constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(in.position, object, foliage);
 }
 
 vertex ShadowOut shadow_area_vertex_cutout(ShadowVertexInUV in [[stage_in]],
-                                           constant float4x4& mvp [[buffer(1)]]) {
+                                           constant ShadowObjectUniforms& object [[buffer(1)]],
+                                           constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * float4(in.position, 1.0);
+    out.position = shadowObjectVertex(in.position, object, foliage);
     out.uv = in.texCoord;
     return out;
 }
@@ -497,16 +524,18 @@ vertex ShadowOut shadow_area_vertex_cutout_instanced(ShadowVertexInUV in [[stage
 }
 
 vertex float4 shadow_area_vertex_skinned(ShadowVertexInSkinned in [[stage_in]],
-                                         constant float4x4& mvp [[buffer(1)]],
-                                         const device float4x4* bones [[buffer(2)]]) {
-    return mvp * applySkinning(in, bones);
+                                         constant ShadowObjectUniforms& object [[buffer(1)]],
+                                         const device float4x4* bones [[buffer(2)]],
+                                         constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    return shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
 }
 
 vertex ShadowOut shadow_area_vertex_cutout_skinned(ShadowVertexInSkinnedUV in [[stage_in]],
-                                                   constant float4x4& mvp [[buffer(1)]],
-                                                   const device float4x4* bones [[buffer(2)]]) {
+                                                   constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                   const device float4x4* bones [[buffer(2)]],
+                                                   constant ShadowFoliageParams& foliage [[buffer(3)]]) {
     ShadowOut out;
-    out.position = mvp * applySkinning(in, bones);
+    out.position = shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
     out.uv = in.texCoord;
     return out;
 }

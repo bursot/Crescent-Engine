@@ -483,7 +483,10 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
     }
     float bias = s.params.x;
     float nDotL = saturate(dot(normalize(normalWS), normalize(lightDirWS)));
-    bias += s.params.y * (1.0 - nDotL); // normal bias for grazing angles
+    float slope = 1.0 - nDotL;
+    // Keep a small baseline normal-bias even away from grazing angles.
+    // This reduces acne/shimmer without requiring extreme inspector values.
+    bias += s.params.y * (0.2 + 0.8 * slope);
 
     float2 rot = float2(1.0, 0.0);
     if (usePCSS && (isCascade || s.params.w > 0.5)) {
@@ -586,7 +589,7 @@ float sampleShadow(const device ShadowGPUData* shadowData,
 
         // Keep transition narrow to avoid broad blur bands at boundaries.
         float cascadeRange = max(curData.depthRange.y - curData.depthRange.x, 0.001);
-        float blendFactor = 0.16;
+        float blendFactor = 0.24;
         float blendRange = blendFactor * cascadeRange;
         float blendStart = curData.depthRange.y - blendRange;
 

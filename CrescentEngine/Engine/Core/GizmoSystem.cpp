@@ -208,7 +208,7 @@ void GizmoSystem::drawArrow(const Math::Vector3& origin, const Math::Vector3& di
     perp2 = direction.cross(perp1).normalized();
     
     // Thickness: bigger when highlighted
-    float thickness = highlight ? 0.08f : 0.04f;  // ✅ Increased thickness!
+    float thickness = highlight ? 0.08f : 0.04f;  //  Increased thickness!
     perp1 = perp1 * thickness;
     perp2 = perp2 * thickness;
     

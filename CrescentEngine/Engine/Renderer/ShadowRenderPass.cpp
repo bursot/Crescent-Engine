@@ -92,6 +92,11 @@ namespace {
         Math::Vector4 flags;
     };
 
+    struct ShadowObjectUniformsCPU {
+        Math::Matrix4x4 viewProj;
+        Math::Matrix4x4 modelMatrix;
+    };
+
     static std::array<Math::Vector4, 6> extractFrustumPlanes(const Math::Matrix4x4& m) {
         auto row = [&](int r) {
             return Math::Vector4(m(r, 0), m(r, 1), m(r, 2), m(r, 3));
@@ -183,6 +188,44 @@ namespace {
         if (sampler) {
             enc->setFragmentSamplerState(sampler, 0);
         }
+    }
+
+    inline ShadowFoliageParamsCPU BuildShadowFoliageParams(const std::shared_ptr<Material>& material,
+                                                           const Math::Vector3& cameraPosition,
+                                                           float timeSeconds) {
+        ShadowFoliageParamsCPU params{};
+        if (material) {
+            Math::Vector3 windDir = material->getWindDirection();
+            params.foliageParams0 = Math::Vector4(
+                material->getWindStrength(),
+                material->getWindSpeed(),
+                material->getWindScale(),
+                material->getWindGust()
+            );
+            params.foliageParams1 = Math::Vector4(
+                material->getLodFadeStart(),
+                material->getLodFadeEnd(),
+                material->getBillboardStart(),
+                material->getBillboardEnd()
+            );
+            params.foliageParams2 = Math::Vector4(
+                material->getWindEnabled() ? 1.0f : 0.0f,
+                material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                material->getBillboardEnabled() ? 1.0f : 0.0f,
+                material->getDitherEnabled() ? 1.0f : 0.0f
+            );
+            params.foliageParams3 = Math::Vector4(windDir.x, windDir.y, windDir.z, 0.0f);
+        } else {
+            params.foliageParams0 = Math::Vector4(0.0f);
+            params.foliageParams1 = Math::Vector4(0.0f);
+            params.foliageParams2 = Math::Vector4(0.0f);
+            params.foliageParams3 = Math::Vector4(0.0f);
+        }
+        params.cameraTime = Math::Vector4(cameraPosition.x, cameraPosition.y, cameraPosition.z, timeSeconds);
+        params.boundsCenter = Math::Vector4(0.0f);
+        params.boundsSize = Math::Vector4(0.0f);
+        params.flags = Math::Vector4(0.0f);
+        return params;
     }
 }
 
@@ -680,7 +723,10 @@ void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* s
             }
             
             Math::Matrix4x4 model = e->getTransform()->getWorldMatrix();
-            Math::Matrix4x4 mvp = slice.viewProj * model;
+            ShadowObjectUniformsCPU objectUniforms{};
+            objectUniforms.viewProj = slice.viewProj;
+            objectUniforms.modelMatrix = model;
+            ShadowFoliageParamsCPU foliage = BuildShadowFoliageParams(material, m_cameraPosition, m_timeSeconds);
             enc->setVertexBuffer(static_cast<MTL::Buffer*>(mesh->getVertexBuffer()), 0, 0);
             if (useSkinned) {
                 enc->setVertexBuffer(skinBuffer, 0, 4);
@@ -697,7 +743,8 @@ void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* s
             if (isCutout && (desiredPipeline == m_dirPipelineCutout || desiredPipeline == m_dirPipelineSkinnedCutout)) {
                 BindShadowAlpha(enc, material, m_alphaSampler);
             }
-            enc->setVertexBytes(&mvp, sizeof(Math::Matrix4x4), 1);
+            enc->setVertexBytes(&objectUniforms, sizeof(ShadowObjectUniformsCPU), 1);
+            enc->setVertexBytes(&foliage, sizeof(ShadowFoliageParamsCPU), 3);
             enc->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
                                        mesh->getIndices().size(),
                                        MTL::IndexTypeUInt32,
@@ -819,7 +866,10 @@ void ShadowRenderPass::renderLightRange(MTL::CommandBuffer* cmdBuffer,
             }
         
         Math::Matrix4x4 model = e->getTransform()->getWorldMatrix();
-        Math::Matrix4x4 mvp = shadow.viewProj * model;
+        ShadowObjectUniformsCPU objectUniforms{};
+        objectUniforms.viewProj = shadow.viewProj;
+        objectUniforms.modelMatrix = model;
+        ShadowFoliageParamsCPU foliage = BuildShadowFoliageParams(material, m_cameraPosition, m_timeSeconds);
         enc->setVertexBuffer(static_cast<MTL::Buffer*>(mesh->getVertexBuffer()), 0, 0);
             if (useSkinned) {
                 enc->setVertexBuffer(skinBuffer, 0, 4);
@@ -836,7 +886,8 @@ void ShadowRenderPass::renderLightRange(MTL::CommandBuffer* cmdBuffer,
             if (isCutout && (desiredPipeline == pipelineCutout || desiredPipeline == pipelineSkinnedCutout)) {
                 BindShadowAlpha(enc, material, m_alphaSampler);
             }
-            enc->setVertexBytes(&mvp, sizeof(Math::Matrix4x4), 1);
+            enc->setVertexBytes(&objectUniforms, sizeof(ShadowObjectUniformsCPU), 1);
+            enc->setVertexBytes(&foliage, sizeof(ShadowFoliageParamsCPU), 3);
             enc->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
                                        mesh->getIndices().size(),
                                        MTL::IndexTypeUInt32,
@@ -1474,13 +1525,16 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
             if (!mesh || !mesh->isUploaded()) continue;
                 
                 Math::Matrix4x4 model = e->getTransform()->getWorldMatrix();
-                Math::Matrix4x4 mvp = vp * model;
+                ShadowObjectUniformsCPU objectUniforms{};
+                objectUniforms.viewProj = vp;
+                objectUniforms.modelMatrix = model;
                 enc->setVertexBuffer(static_cast<MTL::Buffer*>(mesh->getVertexBuffer()), 0, 0);
                 SkinnedMeshRenderer* skinned = e->getComponent<SkinnedMeshRenderer>();
                 bool wantsSkin = skinned && skinned->isEnabled() && mesh->hasSkinWeights() && !skinned->getBoneMatrices().empty();
                 MTL::Buffer* skinBuffer = static_cast<MTL::Buffer*>(mesh->getSkinWeightBuffer());
                 bool useSkinned = wantsSkin && skinBuffer && m_pointPipelineSkinned;
                 std::shared_ptr<Material> material = mr->getMaterial(0);
+                ShadowFoliageParamsCPU foliage = BuildShadowFoliageParams(material, m_cameraPosition, m_timeSeconds);
                 bool isCutout = IsCutoutMaterial(material);
                 enc->setCullMode(ResolveCullMode(material));
                 MTL::RenderPipelineState* desiredPipeline = useSkinned
@@ -1508,7 +1562,8 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
                 if (isCutout && (desiredPipeline == m_pointPipelineCutout || desiredPipeline == m_pointPipelineSkinnedCutout)) {
                     BindShadowAlpha(enc, material, m_alphaSampler);
                 }
-                enc->setVertexBytes(&mvp, sizeof(Math::Matrix4x4), 1);
+                enc->setVertexBytes(&objectUniforms, sizeof(ShadowObjectUniformsCPU), 1);
+                enc->setVertexBytes(&foliage, sizeof(ShadowFoliageParamsCPU), 3);
                 enc->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
                                            mesh->getIndices().size(),
                                            MTL::IndexTypeUInt32,
