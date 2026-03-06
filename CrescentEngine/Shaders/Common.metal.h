@@ -82,6 +82,12 @@ struct MaterialUniforms {
     float4 foliageParams2; // windEnabled, lodEnabled, billboardEnabled, ditherEnabled
     float4 foliageParams3; // windDir.xyz, padding
     float4 impostorParams0; // enabled, rows, cols, padding
+    float4 terrainParams0; // enabled, blendSharpness, heightStart, heightEnd
+    float4 terrainParams1; // slopeStart, slopeEnd, unused, unused
+    float4 terrainLayer0ST; // tiling.xy, unused
+    float4 terrainLayer1ST; // tiling.xy, unused
+    float4 terrainLayer2ST; // tiling.xy, unused
+    float4 terrainFlags; // hasControl, hasLayer0, hasLayer1, hasLayer2
 };
 
 struct MeshUniforms {
@@ -97,6 +103,7 @@ struct LightData {
 
 struct EnvironmentUniforms {
     float4 exposureIntensity;
+    float4 ambientColorIntensity;
     float4 colorControl;
     float4 toneControl;
     float4 skyParams;

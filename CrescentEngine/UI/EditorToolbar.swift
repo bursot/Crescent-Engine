@@ -126,6 +126,24 @@ struct EditorToolbar: View {
                 CameraSettingsPopover(cameraSpeed: $cameraSpeed)
                     .padding(12)
             }
+
+            Button {
+                editorState.terrainPaintEnabled.toggle()
+                if !editorState.terrainPaintEnabled {
+                    CrescentEngineBridge.shared().endTerrainPaint()
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "paintbrush.pointed.fill")
+                        .font(EditorTheme.fontBody)
+                    Text("Terrain Paint")
+                        .font(EditorTheme.fontBody)
+                }
+            }
+            .buttonStyle(.bordered)
+            .tint(editorState.terrainPaintEnabled ? .orange : .secondary)
+            .disabled(editorState.viewMode != .scene || editorState.primarySelectionUUID == nil)
+            .help("Enable terrain brush mode (Scene view only)")
             
             Spacer()
 

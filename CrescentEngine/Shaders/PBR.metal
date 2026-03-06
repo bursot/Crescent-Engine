@@ -119,7 +119,7 @@ struct BloomCombineParams {
 
 struct PostProcessParams {
     float4 params0; // vignetteIntensity, grainIntensity, grainScale, time
-    float4 params1; // gradingIntensity, toneMapping, padding, padding
+    float4 params1; // gradingIntensity, toneMapping, inputIsLinear, padding
 };
 
 struct TAAParams {
@@ -227,6 +227,50 @@ inline float3 applyWindOffset(float3 worldPos,
     float gust = sin(phase * 0.7 + time * material.foliageParams0.y * 0.5) * material.foliageParams0.w;
     float offset = (sway + gust) * weight;
     return worldPos + dir * offset;
+}
+
+inline float3 normalizedTerrainWeights(float3 weights, float sharpness) {
+    weights = max(weights, float3(0.0));
+    weights = pow(weights, float3(max(sharpness, 0.1)));
+    float sum = weights.x + weights.y + weights.z;
+    if (sum <= 0.0001) {
+        return float3(1.0, 0.0, 0.0);
+    }
+    return weights / sum;
+}
+
+inline float3 computeTerrainWeights(float2 uv,
+                                    float3 worldPos,
+                                    float3 normalWS,
+                                    constant MaterialUniforms& material,
+                                    texture2d<float> controlMap,
+                                    sampler textureSampler) {
+    float3 weights = float3(1.0, 0.0, 0.0);
+    if (material.terrainFlags.x > 0.5) {
+        weights = controlMap.sample(textureSampler, uv).rgb;
+        return normalizedTerrainWeights(weights, material.terrainParams0.y);
+    }
+
+    float heightStart = material.terrainParams0.z;
+    float heightEnd = material.terrainParams0.w;
+    float heightSpan = max(heightEnd - heightStart, 0.001);
+    float h = saturate((worldPos.y - heightStart) / heightSpan);
+
+    float w0 = 1.0 - h;
+    float w2 = h;
+    float w1 = 1.0 - abs(2.0 * h - 1.0);
+
+    float slope = saturate(1.0 - abs(normalWS.y));
+    float slopeStart = material.terrainParams1.x;
+    float slopeEnd = max(material.terrainParams1.y, slopeStart + 0.001);
+    float steep = smoothstep(slopeStart, slopeEnd, slope);
+
+    w0 *= (1.0 - steep);
+    w1 *= (1.0 - steep * 0.5);
+    w2 = max(w2, steep);
+
+    weights = float3(w0, w1, w2);
+    return normalizedTerrainWeights(weights, material.terrainParams0.y);
 }
 
 inline float henyeyGreensteinPhase(float cosTheta, float g) {
@@ -1047,12 +1091,33 @@ fragment float4 fragment_prepass(
     texture2d<float> roughnessMap [[texture(0)]],
     texture2d<float> ormMap [[texture(1)]],
     texture2d<float> albedoMap [[texture(2)]],
+    texture2d<float> terrainControlMap [[texture(3)]],
+    texture2d<float> terrainLayer0Map [[texture(4)]],
+    texture2d<float> terrainLayer1Map [[texture(5)]],
+    texture2d<float> terrainLayer2Map [[texture(6)]],
+    texture2d<float> terrainLayer0OrmMap [[texture(7)]],
+    texture2d<float> terrainLayer1OrmMap [[texture(8)]],
+    texture2d<float> terrainLayer2OrmMap [[texture(9)]],
     sampler textureSampler [[sampler(0)]]
 ) {
     float3 n = normalize(in.normalVS);
     float2 uv = in.texCoord * material.uvTilingOffset.xy + material.uvTilingOffset.zw;
+    bool terrainEnabled = material.terrainParams0.x > 0.5 &&
+        (material.terrainFlags.y + material.terrainFlags.z + material.terrainFlags.w) > 0.5;
     float alpha = material.albedo.a;
-    if (material.textureFlags.x > 0.5) {
+    if (terrainEnabled) {
+        float2 uv0 = uv * max(material.terrainLayer0ST.xy, float2(0.001));
+        float2 uv1 = uv * max(material.terrainLayer1ST.xy, float2(0.001));
+        float2 uv2 = uv * max(material.terrainLayer2ST.xy, float2(0.001));
+        float3 weights = float3(1.0, 0.0, 0.0);
+        if (material.terrainFlags.x > 0.5) {
+            weights = normalizedTerrainWeights(terrainControlMap.sample(textureSampler, uv).rgb, material.terrainParams0.y);
+        }
+        float a0 = terrainLayer0Map.sample(textureSampler, uv0).a;
+        float a1 = terrainLayer1Map.sample(textureSampler, uv1).a;
+        float a2 = terrainLayer2Map.sample(textureSampler, uv2).a;
+        alpha *= dot(weights, float3(a0, a1, a2));
+    } else if (material.textureFlags.x > 0.5) {
         alpha *= albedoMap.sample(textureSampler, uv).a;
     }
     if (material.textureFlags3.y > 0.5 && alpha < material.textureFlags3.z) {
@@ -1075,7 +1140,19 @@ fragment float4 fragment_prepass(
         }
     }
     float roughness = clamp(material.properties.y, 0.04, 1.0);
-    if (material.textureFlags3.x > 0.5) {
+    if (terrainEnabled) {
+        float2 uv0 = uv * max(material.terrainLayer0ST.xy, float2(0.001));
+        float2 uv1 = uv * max(material.terrainLayer1ST.xy, float2(0.001));
+        float2 uv2 = uv * max(material.terrainLayer2ST.xy, float2(0.001));
+        float3 weights = float3(1.0, 0.0, 0.0);
+        if (material.terrainFlags.x > 0.5) {
+            weights = normalizedTerrainWeights(terrainControlMap.sample(textureSampler, uv).rgb, material.terrainParams0.y);
+        }
+        float ormRough = terrainLayer0OrmMap.sample(textureSampler, uv0).g * weights.x
+            + terrainLayer1OrmMap.sample(textureSampler, uv1).g * weights.y
+            + terrainLayer2OrmMap.sample(textureSampler, uv2).g * weights.z;
+        roughness = clamp(roughness * ormRough, 0.04, 1.0);
+    } else if (material.textureFlags3.x > 0.5) {
         float3 orm = ormMap.sample(textureSampler, uv).rgb;
         if (material.textureFlags.w > 0.5) {
             roughness = clamp(roughness * roughnessMap.sample(textureSampler, uv).r, 0.04, 1.0);
@@ -1439,12 +1516,16 @@ fragment float4 bloom_combine_fragment(
     float3 bloomColor = bloomTex.sample(sourceSampler, in.uv).rgb * params.intensity;
     float3 color = sceneColor + bloomColor;
     float toneMapping = postParams.params1.y;
+    float inputIsLinear = postParams.params1.z;
     if (toneMapping > 0.5) {
         if (toneMapping < 1.5) {
             color = tonemapFilmic(color);
         } else {
             color = tonemapACES(color);
         }
+    } else if (inputIsLinear > 0.5) {
+        // Keep bloom usable even when tone mapping is disabled.
+        color = pow(max(color, float3(0.0)), float3(1.0 / 2.2));
     }
     float gradingIntensity = clamp(postParams.params1.x, 0.0, 1.0);
     if (gradingIntensity > 0.001) {
@@ -2030,6 +2111,16 @@ fragment float4 fragment_main(
     texture2d<float> decalAlbedoMap [[texture(18)]],
     texture2d<float> decalNormalMap [[texture(19)]],
     texture2d<float> decalOrmMap [[texture(20)]],
+    texture2d<float> terrainControlMap [[texture(21)]],
+    texture2d<float> terrainLayer0Map [[texture(22)]],
+    texture2d<float> terrainLayer1Map [[texture(23)]],
+    texture2d<float> terrainLayer2Map [[texture(24)]],
+    texture2d<float> terrainLayer0NormalMap [[texture(25)]],
+    texture2d<float> terrainLayer1NormalMap [[texture(26)]],
+    texture2d<float> terrainLayer2NormalMap [[texture(27)]],
+    texture2d<float> terrainLayer0OrmMap [[texture(28)]],
+    texture2d<float> terrainLayer1OrmMap [[texture(29)]],
+    texture2d<float> terrainLayer2OrmMap [[texture(30)]],
     sampler textureSampler [[sampler(0)]],
     sampler environmentSampler [[sampler(1)]],
     sampler shadowSampler [[sampler(2)]]
@@ -2074,10 +2165,23 @@ fragment float4 fragment_main(
     // Albedo
     float4 albedoSample = albedoMap.sample(textureSampler, uv);
     float3 albedo = material.albedo.rgb * in.color.rgb;
-    if (material.textureFlags.x > 0.5) {
+    bool terrainEnabled = material.terrainParams0.x > 0.5 &&
+        (material.terrainFlags.y + material.terrainFlags.z + material.terrainFlags.w) > 0.5;
+    if (terrainEnabled) {
+        float2 uv0 = uv * max(material.terrainLayer0ST.xy, float2(0.001));
+        float2 uv1 = uv * max(material.terrainLayer1ST.xy, float2(0.001));
+        float2 uv2 = uv * max(material.terrainLayer2ST.xy, float2(0.001));
+        float3 weights = computeTerrainWeights(uv, in.worldPosition, N, material, terrainControlMap, textureSampler);
+        float4 layer0 = terrainLayer0Map.sample(textureSampler, uv0);
+        float4 layer1 = terrainLayer1Map.sample(textureSampler, uv1);
+        float4 layer2 = terrainLayer2Map.sample(textureSampler, uv2);
+        float4 terrainAlbedo = layer0 * weights.x + layer1 * weights.y + layer2 * weights.z;
+        albedo *= terrainAlbedo.rgb;
+        albedoSample = terrainAlbedo;
+    } else if (material.textureFlags.x > 0.5) {
         albedo *= albedoSample.rgb;
     }
-    float alpha = material.albedo.a * (material.textureFlags.x > 0.5 ? albedoSample.a : 1.0);
+    float alpha = material.albedo.a * ((terrainEnabled || material.textureFlags.x > 0.5) ? albedoSample.a : 1.0);
     if (material.textureFlags3.y > 0.5 && alpha < material.textureFlags3.z) {
         discard_fragment();
     }
@@ -2110,7 +2214,19 @@ fragment float4 fragment_main(
     float ssao = ssaoMap.sample(textureSampler, ssaoUV).r;
     ao = clamp(ao * ssao, 0.0, 1.0);
     
-    if (material.textureFlags3.x > 0.5) {
+    if (terrainEnabled) {
+        float2 uv0 = uv * max(material.terrainLayer0ST.xy, float2(0.001));
+        float2 uv1 = uv * max(material.terrainLayer1ST.xy, float2(0.001));
+        float2 uv2 = uv * max(material.terrainLayer2ST.xy, float2(0.001));
+        float3 weights = computeTerrainWeights(uv, in.worldPosition, N, material, terrainControlMap, textureSampler);
+        float3 orm0 = terrainLayer0OrmMap.sample(textureSampler, uv0).rgb;
+        float3 orm1 = terrainLayer1OrmMap.sample(textureSampler, uv1).rgb;
+        float3 orm2 = terrainLayer2OrmMap.sample(textureSampler, uv2).rgb;
+        float3 terrainOrm = orm0 * weights.x + orm1 * weights.y + orm2 * weights.z;
+        metallic = clamp(metallic * terrainOrm.b, 0.0, 1.0);
+        roughness = clamp(roughness * terrainOrm.g, 0.04, 1.0);
+        ao = clamp(ao * terrainOrm.r, 0.0, 1.0);
+    } else if (material.textureFlags3.x > 0.5) {
         float3 orm = ormMap.sample(textureSampler, uv).rgb;
         if (material.textureFlags.z > 0.5) {
             metallic = clamp(metallic * metallicMap.sample(textureSampler, uv).r, 0.0, 1.0);
@@ -2140,7 +2256,18 @@ fragment float4 fragment_main(
     }
     
     // Normalize vectors
-    if (material.textureFlags.y > 0.5) {
+    if (terrainEnabled) {
+        float2 uv0 = uv * max(material.terrainLayer0ST.xy, float2(0.001));
+        float2 uv1 = uv * max(material.terrainLayer1ST.xy, float2(0.001));
+        float2 uv2 = uv * max(material.terrainLayer2ST.xy, float2(0.001));
+        float3 weights = computeTerrainWeights(uv, in.worldPosition, N, material, terrainControlMap, textureSampler);
+        float3 tn0 = terrainLayer0NormalMap.sample(textureSampler, uv0).xyz * 2.0 - 1.0;
+        float3 tn1 = terrainLayer1NormalMap.sample(textureSampler, uv1).xyz * 2.0 - 1.0;
+        float3 tn2 = terrainLayer2NormalMap.sample(textureSampler, uv2).xyz * 2.0 - 1.0;
+        float3 terrainTN = normalize(tn0 * weights.x + tn1 * weights.y + tn2 * weights.z);
+        terrainTN = normalize(float3(terrainTN.xy * material.properties.w, terrainTN.z));
+        N = normalize(TBN * terrainTN);
+    } else if (material.textureFlags.y > 0.5) {
         float3 tangentNormal = normalMap.sample(textureSampler, uv).xyz * 2.0 - 1.0;
         tangentNormal = normalize(float3(tangentNormal.xy * material.properties.w, tangentNormal.z));
         N = normalize(TBN * tangentNormal);
@@ -2315,7 +2442,7 @@ fragment float4 fragment_main(
         float3 diffuseIBL = kD * irradiance * albedo;
         float3 specularIBL = prefilteredColor * (F * envBRDF.x + envBRDF.y);
         
-        environmentLighting = (diffuseIBL + specularIBL) * ao;
+        environmentLighting = (diffuseIBL + specularIBL);
     } else {
         // ========================================
         // FALLBACK IBL with LOD-based sampling
@@ -2336,10 +2463,19 @@ fragment float4 fragment_main(
         float2 envBRDF = float2(1.0 - roughness, 0.0); // Rough approximation
         specularIBL *= (kS_ibl * envBRDF.x + envBRDF.y);
         
-        environmentLighting = (kD_ibl * diffuseIBL + specularIBL) * ao;
+        environmentLighting = (kD_ibl * diffuseIBL + specularIBL);
     }
     
-    environmentLighting *= environment.exposureIntensity.y; // IBL intensity
+    // AO should mostly shape indirect lighting, but full-strength AO often causes muddy shadows.
+    float indirectAO = mix(1.0, ao, 0.6);
+    environmentLighting *= environment.exposureIntensity.y * indirectAO; // IBL intensity
+    
+    // Artist-controlled ambient fill in physically-plausible diffuse form.
+    float3 ambientRadiance = environment.ambientColorIntensity.rgb * environment.ambientColorIntensity.w;
+    float3 F_ambient = fresnelSchlickRoughness(NdotV, F0, roughness);
+    float3 kD_ambient = (float3(1.0) - F_ambient) * (1.0 - metallic);
+    float ambientAO = mix(1.0, ao, 0.35);
+    float3 ambientLighting = ambientRadiance * (kD_ambient * albedo / PI) * ambientAO;
     
     // Add emission (unpack from Vector4)
     float3 emission = material.emission.xyz * material.emission.w; // emissionStrength in w
@@ -2347,8 +2483,8 @@ fragment float4 fragment_main(
         emission += emissionMap.sample(textureSampler, uv).rgb * material.emission.w;
     }
     
-    // Final color - Direct + IBL + emission
-    float3 color = Lo + environmentLighting + emission;
+    // Final color - Direct + IBL + ambient fill + emission
+    float3 color = Lo + environmentLighting + ambientLighting + emission;
     
     // ========== DEBUG: Check shadow map content ==========
     #if 0
@@ -2549,12 +2685,16 @@ fragment float4 blit_fragment(
 ) {
     float3 color = source.sample(sourceSampler, in.uv).rgb;
     float toneMapping = params.params1.y;
+    float inputIsLinear = params.params1.z;
     if (toneMapping > 0.5) {
         if (toneMapping < 1.5) {
             color = tonemapFilmic(color);
         } else {
             color = tonemapACES(color);
         }
+    } else if (inputIsLinear > 0.5) {
+        // If the scene is still linear HDR, apply display gamma at minimum.
+        color = pow(max(color, float3(0.0)), float3(1.0 / 2.2));
     }
     float gradingIntensity = clamp(params.params1.x, 0.0, 1.0);
     if (gradingIntensity > 0.001) {

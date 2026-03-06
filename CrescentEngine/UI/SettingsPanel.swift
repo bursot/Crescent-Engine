@@ -291,11 +291,13 @@ final class SceneSettingsViewModel: ObservableObject {
     @Published var exposureEV: Double = 0.0
     @Published var iblIntensity: Double = 1.0
     @Published var skyIntensity: Double = 1.0
+    @Published var ambientIntensity: Double = 0.25
     @Published var saturation: Double = 1.0
     @Published var contrast: Double = 1.0
     @Published var blurLevel: Double = 0.0
     @Published var rotation: [Double] = [0, 0, 0]
     @Published var tint: Color = .white
+    @Published var ambientColor: Color = .white
     @Published var skyboxVisible: Bool = true
     @Published var autoSunColor: Bool = true
     
@@ -368,6 +370,7 @@ final class SceneSettingsViewModel: ObservableObject {
             exposureEV = env["exposureEV"] as? Double ?? exposureEV
             iblIntensity = env["iblIntensity"] as? Double ?? iblIntensity
             skyIntensity = env["skyIntensity"] as? Double ?? skyIntensity
+            ambientIntensity = env["ambientIntensity"] as? Double ?? ambientIntensity
             saturation = env["saturation"] as? Double ?? saturation
             contrast = env["contrast"] as? Double ?? contrast
             blurLevel = env["blurLevel"] as? Double ?? blurLevel
@@ -378,6 +381,11 @@ final class SceneSettingsViewModel: ObservableObject {
                 tint = Color(red: tintValues[0].doubleValue,
                              green: tintValues[1].doubleValue,
                              blue: tintValues[2].doubleValue)
+            }
+            if let ambientValues = env["ambientColor"] as? [NSNumber], ambientValues.count >= 3 {
+                ambientColor = Color(red: ambientValues[0].doubleValue,
+                                     green: ambientValues[1].doubleValue,
+                                     blue: ambientValues[2].doubleValue)
             }
             skyboxVisible = env["skyboxVisible"] as? Bool ?? skyboxVisible
             skyMode = env["skyMode"] as? Int ?? skyMode
@@ -447,6 +455,7 @@ final class SceneSettingsViewModel: ObservableObject {
     func apply() {
         guard !isLoading else { return }
         let tintValues = components(from: tint)
+        let ambientValues = components(from: ambientColor)
         let fogValues = components(from: fogColor)
         let info: [String: Any] = [
             "environment": [
@@ -455,11 +464,13 @@ final class SceneSettingsViewModel: ObservableObject {
                 "exposureEV": exposureEV,
                 "iblIntensity": iblIntensity,
                 "skyIntensity": skyIntensity,
+                "ambientIntensity": ambientIntensity,
                 "saturation": saturation,
                 "contrast": contrast,
                 "blurLevel": blurLevel,
                 "rotation": rotation,
                 "tint": [tintValues.r, tintValues.g, tintValues.b],
+                "ambientColor": [ambientValues.r, ambientValues.g, ambientValues.b],
                 "skyboxVisible": skyboxVisible,
                 "autoSunColor": autoSunColor
             ],
@@ -822,6 +833,9 @@ private struct SceneSettingsPanel: View {
                 SettingsSlider(title: "Sky Brightness", value: $viewModel.skyIntensity, range: 0...4) {
                     viewModel.apply()
                 }
+                SettingsSlider(title: "Ambient Intensity", value: $viewModel.ambientIntensity, range: 0...4) {
+                    viewModel.apply()
+                }
                 SettingsSlider(title: "Saturation", value: $viewModel.saturation, range: 0...3) {
                     viewModel.apply()
                 }
@@ -835,6 +849,12 @@ private struct SceneSettingsPanel: View {
                 HStack(spacing: 8) {
                     ColorPicker("Tint", selection: $viewModel.tint)
                         .onChange(of: viewModel.tint) { _ in viewModel.apply() }
+                    Spacer()
+                }
+                
+                HStack(spacing: 8) {
+                    ColorPicker("Ambient Color", selection: $viewModel.ambientColor)
+                        .onChange(of: viewModel.ambientColor) { _ in viewModel.apply() }
                     Spacer()
                 }
                 

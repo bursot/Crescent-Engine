@@ -238,7 +238,7 @@ struct BloomCombineParamsGPU {
 
 struct PostProcessParamsGPU {
     Math::Vector4 params0; // vignetteIntensity, grainIntensity, grainScale, time
-    Math::Vector4 params1; // gradingIntensity, toneMapping, padding, padding
+    Math::Vector4 params1; // gradingIntensity, toneMapping, inputIsLinear, padding
 };
 
 struct TAAParamsGPU {
@@ -288,7 +288,13 @@ struct MaterialUniformsGPU {
     Math::Vector4 foliageParams2;  // 16 bytes (windEnabled, lodEnabled, billboardEnabled, ditherEnabled)
     Math::Vector4 foliageParams3;  // 16 bytes (windDir.xyz, padding)
     Math::Vector4 impostorParams0; // 16 bytes (enabled, rows, cols, padding)
-};  // Total = 208 bytes
+    Math::Vector4 terrainParams0;  // 16 bytes (enabled, blendSharpness, heightStart, heightEnd)
+    Math::Vector4 terrainParams1;  // 16 bytes (slopeStart, slopeEnd, unused, unused)
+    Math::Vector4 terrainLayer0ST; // 16 bytes (tiling.xy, unused)
+    Math::Vector4 terrainLayer1ST; // 16 bytes (tiling.xy, unused)
+    Math::Vector4 terrainLayer2ST; // 16 bytes (tiling.xy, unused)
+    Math::Vector4 terrainFlags;    // 16 bytes (hasControl, hasLayer0, hasLayer1, hasLayer2)
+};  // Total = 304 bytes
 
 struct MeshUniformsGPU {
     Math::Vector4 boundsCenter;
@@ -303,13 +309,14 @@ struct LightDataGPU {
 
 struct EnvironmentUniformsGPU {
     Math::Vector4 exposureIntensity; // exposure EV, ibl intensity, sky intensity, blur
+    Math::Vector4 ambientColorIntensity; // ambient color rgb, ambient intensity
     Math::Vector4 colorControl;      // tint rgb, saturation
     Math::Vector4 toneControl;       // contrast, unused, skyboxVisible flag, padding
     Math::Vector4 skyParams;         // skyMode, reserved
     Math::Vector4 rot0;
     Math::Vector4 rot1;
     Math::Vector4 rot2;
-}; // 112 bytes
+}; // 128 bytes
 
 struct ClusterParams {
     Math::Matrix4x4 projection;
@@ -4010,6 +4017,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
                 bool hasRoughnessTex = material->getRoughnessTexture() != nullptr;
                 bool hasORMTex = material->getORMTexture() != nullptr;
+                bool hasTerrainControlTex = material->getTerrainControlTexture() != nullptr;
+                bool hasTerrainLayer0Tex = material->getTerrainLayer0Texture() != nullptr;
+                bool hasTerrainLayer1Tex = material->getTerrainLayer1Texture() != nullptr;
+                bool hasTerrainLayer2Tex = material->getTerrainLayer2Texture() != nullptr;
                 matUniforms.textureFlags = Math::Vector4(
                     material->getAlbedoTexture() ? 1.0f : 0.0f,
                     material->getNormalTexture() ? 1.0f : 0.0f,
@@ -4064,6 +4075,30 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     static_cast<float>(material->getImpostorCols()),
                     0.0f
                 );
+                matUniforms.terrainParams0 = Math::Vector4(
+                    material->getTerrainEnabled() ? 1.0f : 0.0f,
+                    material->getTerrainBlendSharpness(),
+                    material->getTerrainHeightStart(),
+                    material->getTerrainHeightEnd()
+                );
+                matUniforms.terrainParams1 = Math::Vector4(
+                    material->getTerrainSlopeStart(),
+                    material->getTerrainSlopeEnd(),
+                    0.0f,
+                    0.0f
+                );
+                Math::Vector2 terrain0ST = material->getTerrainLayer0Tiling();
+                Math::Vector2 terrain1ST = material->getTerrainLayer1Tiling();
+                Math::Vector2 terrain2ST = material->getTerrainLayer2Tiling();
+                matUniforms.terrainLayer0ST = Math::Vector4(terrain0ST.x, terrain0ST.y, 0.0f, 0.0f);
+                matUniforms.terrainLayer1ST = Math::Vector4(terrain1ST.x, terrain1ST.y, 0.0f, 0.0f);
+                matUniforms.terrainLayer2ST = Math::Vector4(terrain2ST.x, terrain2ST.y, 0.0f, 0.0f);
+                matUniforms.terrainFlags = Math::Vector4(
+                    hasTerrainControlTex ? 1.0f : 0.0f,
+                    hasTerrainLayer0Tex ? 1.0f : 0.0f,
+                    hasTerrainLayer1Tex ? 1.0f : 0.0f,
+                    hasTerrainLayer2Tex ? 1.0f : 0.0f
+                );
             } else {
                 matUniforms.albedo = Math::Vector4(1.0f);
                 matUniforms.properties = Math::Vector4(0.0f, 1.0f, 1.0f, 1.0f);
@@ -4078,6 +4113,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 matUniforms.foliageParams2 = Math::Vector4(0.0f);
                 matUniforms.foliageParams3 = Math::Vector4(0.0f);
                 matUniforms.impostorParams0 = Math::Vector4(0.0f);
+                matUniforms.terrainParams0 = Math::Vector4(0.0f);
+                matUniforms.terrainParams1 = Math::Vector4(0.0f);
+                matUniforms.terrainLayer0ST = Math::Vector4(0.0f);
+                matUniforms.terrainLayer1ST = Math::Vector4(0.0f);
+                matUniforms.terrainLayer2ST = Math::Vector4(0.0f);
+                matUniforms.terrainFlags = Math::Vector4(0.0f);
             }
 
             preEncoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 0);
@@ -4094,9 +4135,23 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             auto albedoTex = (material && material->getAlbedoTexture()) ? material->getAlbedoTexture() : m_defaultWhiteTexture;
             auto roughnessTex = (material && material->getRoughnessTexture()) ? material->getRoughnessTexture() : m_defaultWhiteTexture;
             auto ormTex = (material && material->getORMTexture()) ? material->getORMTexture() : m_defaultBlackTexture;
+            auto terrainControlTex = (material && material->getTerrainControlTexture()) ? material->getTerrainControlTexture() : m_defaultWhiteTexture;
+            auto terrainLayer0Tex = (material && material->getTerrainLayer0Texture()) ? material->getTerrainLayer0Texture() : albedoTex;
+            auto terrainLayer1Tex = (material && material->getTerrainLayer1Texture()) ? material->getTerrainLayer1Texture() : albedoTex;
+            auto terrainLayer2Tex = (material && material->getTerrainLayer2Texture()) ? material->getTerrainLayer2Texture() : albedoTex;
+            auto terrainLayer0OrmTex = (material && material->getTerrainLayer0ORMTexture()) ? material->getTerrainLayer0ORMTexture() : m_defaultWhiteTexture;
+            auto terrainLayer1OrmTex = (material && material->getTerrainLayer1ORMTexture()) ? material->getTerrainLayer1ORMTexture() : m_defaultWhiteTexture;
+            auto terrainLayer2OrmTex = (material && material->getTerrainLayer2ORMTexture()) ? material->getTerrainLayer2ORMTexture() : m_defaultWhiteTexture;
             preEncoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 2);
             preEncoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 0);
             preEncoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 1);
+            preEncoder->setFragmentTexture(terrainControlTex ? terrainControlTex->getHandle() : nullptr, 3);
+            preEncoder->setFragmentTexture(terrainLayer0Tex ? terrainLayer0Tex->getHandle() : nullptr, 4);
+            preEncoder->setFragmentTexture(terrainLayer1Tex ? terrainLayer1Tex->getHandle() : nullptr, 5);
+            preEncoder->setFragmentTexture(terrainLayer2Tex ? terrainLayer2Tex->getHandle() : nullptr, 6);
+            preEncoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 7);
+            preEncoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 8);
+            preEncoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 9);
             if (m_samplerState) {
                 preEncoder->setFragmentSamplerState(m_samplerState, 0);
             }
@@ -4150,6 +4205,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
                         bool hasRoughnessTex = batch.material->getRoughnessTexture() != nullptr;
                         bool hasORMTex = batch.material->getORMTexture() != nullptr;
+                        bool hasTerrainControlTex = batch.material->getTerrainControlTexture() != nullptr;
+                        bool hasTerrainLayer0Tex = batch.material->getTerrainLayer0Texture() != nullptr;
+                        bool hasTerrainLayer1Tex = batch.material->getTerrainLayer1Texture() != nullptr;
+                        bool hasTerrainLayer2Tex = batch.material->getTerrainLayer2Texture() != nullptr;
                         matUniforms.textureFlags = Math::Vector4(
                             batch.material->getAlbedoTexture() ? 1.0f : 0.0f,
                             batch.material->getNormalTexture() ? 1.0f : 0.0f,
@@ -4204,6 +4263,30 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                             static_cast<float>(batch.material->getImpostorCols()),
                             0.0f
                         );
+                        matUniforms.terrainParams0 = Math::Vector4(
+                            batch.material->getTerrainEnabled() ? 1.0f : 0.0f,
+                            batch.material->getTerrainBlendSharpness(),
+                            batch.material->getTerrainHeightStart(),
+                            batch.material->getTerrainHeightEnd()
+                        );
+                        matUniforms.terrainParams1 = Math::Vector4(
+                            batch.material->getTerrainSlopeStart(),
+                            batch.material->getTerrainSlopeEnd(),
+                            0.0f,
+                            0.0f
+                        );
+                        Math::Vector2 terrain0ST = batch.material->getTerrainLayer0Tiling();
+                        Math::Vector2 terrain1ST = batch.material->getTerrainLayer1Tiling();
+                        Math::Vector2 terrain2ST = batch.material->getTerrainLayer2Tiling();
+                        matUniforms.terrainLayer0ST = Math::Vector4(terrain0ST.x, terrain0ST.y, 0.0f, 0.0f);
+                        matUniforms.terrainLayer1ST = Math::Vector4(terrain1ST.x, terrain1ST.y, 0.0f, 0.0f);
+                        matUniforms.terrainLayer2ST = Math::Vector4(terrain2ST.x, terrain2ST.y, 0.0f, 0.0f);
+                        matUniforms.terrainFlags = Math::Vector4(
+                            hasTerrainControlTex ? 1.0f : 0.0f,
+                            hasTerrainLayer0Tex ? 1.0f : 0.0f,
+                            hasTerrainLayer1Tex ? 1.0f : 0.0f,
+                            hasTerrainLayer2Tex ? 1.0f : 0.0f
+                        );
                     } else {
                         matUniforms.albedo = Math::Vector4(1.0f);
                         matUniforms.properties = Math::Vector4(0.0f, 1.0f, 1.0f, 1.0f);
@@ -4218,6 +4301,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                         matUniforms.foliageParams2 = Math::Vector4(0.0f);
                         matUniforms.foliageParams3 = Math::Vector4(0.0f);
                         matUniforms.impostorParams0 = Math::Vector4(0.0f);
+                        matUniforms.terrainParams0 = Math::Vector4(0.0f);
+                        matUniforms.terrainParams1 = Math::Vector4(0.0f);
+                        matUniforms.terrainLayer0ST = Math::Vector4(0.0f);
+                        matUniforms.terrainLayer1ST = Math::Vector4(0.0f);
+                        matUniforms.terrainLayer2ST = Math::Vector4(0.0f);
+                        matUniforms.terrainFlags = Math::Vector4(0.0f);
                     }
 
                     preEncoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 0);
@@ -4230,9 +4319,23 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     auto albedoTex = (batch.material && batch.material->getAlbedoTexture()) ? batch.material->getAlbedoTexture() : m_defaultWhiteTexture;
                     auto roughnessTex = (batch.material && batch.material->getRoughnessTexture()) ? batch.material->getRoughnessTexture() : m_defaultWhiteTexture;
                     auto ormTex = (batch.material && batch.material->getORMTexture()) ? batch.material->getORMTexture() : m_defaultBlackTexture;
+                    auto terrainControlTex = (batch.material && batch.material->getTerrainControlTexture()) ? batch.material->getTerrainControlTexture() : m_defaultWhiteTexture;
+                    auto terrainLayer0Tex = (batch.material && batch.material->getTerrainLayer0Texture()) ? batch.material->getTerrainLayer0Texture() : albedoTex;
+                    auto terrainLayer1Tex = (batch.material && batch.material->getTerrainLayer1Texture()) ? batch.material->getTerrainLayer1Texture() : albedoTex;
+                    auto terrainLayer2Tex = (batch.material && batch.material->getTerrainLayer2Texture()) ? batch.material->getTerrainLayer2Texture() : albedoTex;
+                    auto terrainLayer0OrmTex = (batch.material && batch.material->getTerrainLayer0ORMTexture()) ? batch.material->getTerrainLayer0ORMTexture() : m_defaultWhiteTexture;
+                    auto terrainLayer1OrmTex = (batch.material && batch.material->getTerrainLayer1ORMTexture()) ? batch.material->getTerrainLayer1ORMTexture() : m_defaultWhiteTexture;
+                    auto terrainLayer2OrmTex = (batch.material && batch.material->getTerrainLayer2ORMTexture()) ? batch.material->getTerrainLayer2ORMTexture() : m_defaultWhiteTexture;
                     preEncoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 2);
                     preEncoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 0);
                     preEncoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 1);
+                    preEncoder->setFragmentTexture(terrainControlTex ? terrainControlTex->getHandle() : nullptr, 3);
+                    preEncoder->setFragmentTexture(terrainLayer0Tex ? terrainLayer0Tex->getHandle() : nullptr, 4);
+                    preEncoder->setFragmentTexture(terrainLayer1Tex ? terrainLayer1Tex->getHandle() : nullptr, 5);
+                    preEncoder->setFragmentTexture(terrainLayer2Tex ? terrainLayer2Tex->getHandle() : nullptr, 6);
+                    preEncoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 7);
+                    preEncoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 8);
+                    preEncoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 9);
                     if (m_samplerState) {
                         preEncoder->setFragmentSamplerState(m_samplerState, 0);
                     }
@@ -4284,6 +4387,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
                         bool hasRoughnessTex = draw.material->getRoughnessTexture() != nullptr;
                         bool hasORMTex = draw.material->getORMTexture() != nullptr;
+                        bool hasTerrainControlTex = draw.material->getTerrainControlTexture() != nullptr;
+                        bool hasTerrainLayer0Tex = draw.material->getTerrainLayer0Texture() != nullptr;
+                        bool hasTerrainLayer1Tex = draw.material->getTerrainLayer1Texture() != nullptr;
+                        bool hasTerrainLayer2Tex = draw.material->getTerrainLayer2Texture() != nullptr;
                         matUniforms.textureFlags = Math::Vector4(
                             draw.material->getAlbedoTexture() ? 1.0f : 0.0f,
                             draw.material->getNormalTexture() ? 1.0f : 0.0f,
@@ -4338,6 +4445,30 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                             static_cast<float>(draw.material->getImpostorCols()),
                             0.0f
                         );
+                        matUniforms.terrainParams0 = Math::Vector4(
+                            draw.material->getTerrainEnabled() ? 1.0f : 0.0f,
+                            draw.material->getTerrainBlendSharpness(),
+                            draw.material->getTerrainHeightStart(),
+                            draw.material->getTerrainHeightEnd()
+                        );
+                        matUniforms.terrainParams1 = Math::Vector4(
+                            draw.material->getTerrainSlopeStart(),
+                            draw.material->getTerrainSlopeEnd(),
+                            0.0f,
+                            0.0f
+                        );
+                        Math::Vector2 terrain0ST = draw.material->getTerrainLayer0Tiling();
+                        Math::Vector2 terrain1ST = draw.material->getTerrainLayer1Tiling();
+                        Math::Vector2 terrain2ST = draw.material->getTerrainLayer2Tiling();
+                        matUniforms.terrainLayer0ST = Math::Vector4(terrain0ST.x, terrain0ST.y, 0.0f, 0.0f);
+                        matUniforms.terrainLayer1ST = Math::Vector4(terrain1ST.x, terrain1ST.y, 0.0f, 0.0f);
+                        matUniforms.terrainLayer2ST = Math::Vector4(terrain2ST.x, terrain2ST.y, 0.0f, 0.0f);
+                        matUniforms.terrainFlags = Math::Vector4(
+                            hasTerrainControlTex ? 1.0f : 0.0f,
+                            hasTerrainLayer0Tex ? 1.0f : 0.0f,
+                            hasTerrainLayer1Tex ? 1.0f : 0.0f,
+                            hasTerrainLayer2Tex ? 1.0f : 0.0f
+                        );
                     } else {
                         matUniforms.albedo = Math::Vector4(1.0f);
                         matUniforms.properties = Math::Vector4(0.0f, 1.0f, 1.0f, 1.0f);
@@ -4352,6 +4483,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                         matUniforms.foliageParams2 = Math::Vector4(0.0f);
                         matUniforms.foliageParams3 = Math::Vector4(0.0f);
                         matUniforms.impostorParams0 = Math::Vector4(0.0f);
+                        matUniforms.terrainParams0 = Math::Vector4(0.0f);
+                        matUniforms.terrainParams1 = Math::Vector4(0.0f);
+                        matUniforms.terrainLayer0ST = Math::Vector4(0.0f);
+                        matUniforms.terrainLayer1ST = Math::Vector4(0.0f);
+                        matUniforms.terrainLayer2ST = Math::Vector4(0.0f);
+                        matUniforms.terrainFlags = Math::Vector4(0.0f);
                     }
 
                     preEncoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 0);
@@ -4364,9 +4501,23 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     auto albedoTex = (draw.material && draw.material->getAlbedoTexture()) ? draw.material->getAlbedoTexture() : m_defaultWhiteTexture;
                     auto roughnessTex = (draw.material && draw.material->getRoughnessTexture()) ? draw.material->getRoughnessTexture() : m_defaultWhiteTexture;
                     auto ormTex = (draw.material && draw.material->getORMTexture()) ? draw.material->getORMTexture() : m_defaultBlackTexture;
+                    auto terrainControlTex = (draw.material && draw.material->getTerrainControlTexture()) ? draw.material->getTerrainControlTexture() : m_defaultWhiteTexture;
+                    auto terrainLayer0Tex = (draw.material && draw.material->getTerrainLayer0Texture()) ? draw.material->getTerrainLayer0Texture() : albedoTex;
+                    auto terrainLayer1Tex = (draw.material && draw.material->getTerrainLayer1Texture()) ? draw.material->getTerrainLayer1Texture() : albedoTex;
+                    auto terrainLayer2Tex = (draw.material && draw.material->getTerrainLayer2Texture()) ? draw.material->getTerrainLayer2Texture() : albedoTex;
+                    auto terrainLayer0OrmTex = (draw.material && draw.material->getTerrainLayer0ORMTexture()) ? draw.material->getTerrainLayer0ORMTexture() : m_defaultWhiteTexture;
+                    auto terrainLayer1OrmTex = (draw.material && draw.material->getTerrainLayer1ORMTexture()) ? draw.material->getTerrainLayer1ORMTexture() : m_defaultWhiteTexture;
+                    auto terrainLayer2OrmTex = (draw.material && draw.material->getTerrainLayer2ORMTexture()) ? draw.material->getTerrainLayer2ORMTexture() : m_defaultWhiteTexture;
                     preEncoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 2);
                     preEncoder->setFragmentTexture(roughnessTex ? roughnessTex->getHandle() : nullptr, 0);
                     preEncoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 1);
+                    preEncoder->setFragmentTexture(terrainControlTex ? terrainControlTex->getHandle() : nullptr, 3);
+                    preEncoder->setFragmentTexture(terrainLayer0Tex ? terrainLayer0Tex->getHandle() : nullptr, 4);
+                    preEncoder->setFragmentTexture(terrainLayer1Tex ? terrainLayer1Tex->getHandle() : nullptr, 5);
+                    preEncoder->setFragmentTexture(terrainLayer2Tex ? terrainLayer2Tex->getHandle() : nullptr, 6);
+                    preEncoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 7);
+                    preEncoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 8);
+                    preEncoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 9);
                     if (m_samplerState) {
                         preEncoder->setFragmentSamplerState(m_samplerState, 0);
                     }
@@ -4919,6 +5070,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             bool hasEmissionTex = material->getEmissionTexture() != nullptr;
             bool hasHeightTex = material->getHeightTexture() != nullptr;
             bool hasORMTex = material->getORMTexture() != nullptr;
+            bool hasTerrainControlTex = material->getTerrainControlTexture() != nullptr;
+            bool hasTerrainLayer0Tex = material->getTerrainLayer0Texture() != nullptr;
+            bool hasTerrainLayer1Tex = material->getTerrainLayer1Texture() != nullptr;
+            bool hasTerrainLayer2Tex = material->getTerrainLayer2Texture() != nullptr;
             bool invertHeight = material->getHeightInvert();
             
             matUniforms.textureFlags = Math::Vector4(
@@ -4975,6 +5130,30 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 static_cast<float>(material->getImpostorCols()),
                 0.0f
             );
+            matUniforms.terrainParams0 = Math::Vector4(
+                material->getTerrainEnabled() ? 1.0f : 0.0f,
+                material->getTerrainBlendSharpness(),
+                material->getTerrainHeightStart(),
+                material->getTerrainHeightEnd()
+            );
+            matUniforms.terrainParams1 = Math::Vector4(
+                material->getTerrainSlopeStart(),
+                material->getTerrainSlopeEnd(),
+                0.0f,
+                0.0f
+            );
+            Math::Vector2 terrain0ST = material->getTerrainLayer0Tiling();
+            Math::Vector2 terrain1ST = material->getTerrainLayer1Tiling();
+            Math::Vector2 terrain2ST = material->getTerrainLayer2Tiling();
+            matUniforms.terrainLayer0ST = Math::Vector4(terrain0ST.x, terrain0ST.y, 0.0f, 0.0f);
+            matUniforms.terrainLayer1ST = Math::Vector4(terrain1ST.x, terrain1ST.y, 0.0f, 0.0f);
+            matUniforms.terrainLayer2ST = Math::Vector4(terrain2ST.x, terrain2ST.y, 0.0f, 0.0f);
+            matUniforms.terrainFlags = Math::Vector4(
+                hasTerrainControlTex ? 1.0f : 0.0f,
+                hasTerrainLayer0Tex ? 1.0f : 0.0f,
+                hasTerrainLayer1Tex ? 1.0f : 0.0f,
+                hasTerrainLayer2Tex ? 1.0f : 0.0f
+            );
             
             encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
             if (!isSkinned) {
@@ -4997,6 +5176,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             auto emissionTex = hasEmissionTex ? material->getEmissionTexture() : m_defaultBlackTexture;
             auto heightTex = hasHeightTex ? material->getHeightTexture() : m_defaultHeightTexture;
             auto ormTex = hasORMTex ? material->getORMTexture() : m_defaultBlackTexture;
+            auto terrainControlTex = hasTerrainControlTex ? material->getTerrainControlTexture() : m_defaultWhiteTexture;
+            auto terrainLayer0Tex = hasTerrainLayer0Tex ? material->getTerrainLayer0Texture() : albedoTex;
+            auto terrainLayer1Tex = hasTerrainLayer1Tex ? material->getTerrainLayer1Texture() : albedoTex;
+            auto terrainLayer2Tex = hasTerrainLayer2Tex ? material->getTerrainLayer2Texture() : albedoTex;
+            auto terrainLayer0NormalTex = material->getTerrainLayer0NormalTexture() ? material->getTerrainLayer0NormalTexture() : m_defaultNormalTexture;
+            auto terrainLayer1NormalTex = material->getTerrainLayer1NormalTexture() ? material->getTerrainLayer1NormalTexture() : m_defaultNormalTexture;
+            auto terrainLayer2NormalTex = material->getTerrainLayer2NormalTexture() ? material->getTerrainLayer2NormalTexture() : m_defaultNormalTexture;
+            auto terrainLayer0OrmTex = material->getTerrainLayer0ORMTexture() ? material->getTerrainLayer0ORMTexture() : m_defaultWhiteTexture;
+            auto terrainLayer1OrmTex = material->getTerrainLayer1ORMTexture() ? material->getTerrainLayer1ORMTexture() : m_defaultWhiteTexture;
+            auto terrainLayer2OrmTex = material->getTerrainLayer2ORMTexture() ? material->getTerrainLayer2ORMTexture() : m_defaultWhiteTexture;
             
             encoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 0);
             encoder->setFragmentTexture(normalTex ? normalTex->getHandle() : nullptr, 1);
@@ -5006,6 +5195,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             encoder->setFragmentTexture(emissionTex ? emissionTex->getHandle() : nullptr, 5);
             encoder->setFragmentTexture(heightTex ? heightTex->getHandle() : nullptr, 6);
             encoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 16);
+            encoder->setFragmentTexture(terrainControlTex ? terrainControlTex->getHandle() : nullptr, 21);
+            encoder->setFragmentTexture(terrainLayer0Tex ? terrainLayer0Tex->getHandle() : nullptr, 22);
+            encoder->setFragmentTexture(terrainLayer1Tex ? terrainLayer1Tex->getHandle() : nullptr, 23);
+            encoder->setFragmentTexture(terrainLayer2Tex ? terrainLayer2Tex->getHandle() : nullptr, 24);
+            encoder->setFragmentTexture(terrainLayer0NormalTex ? terrainLayer0NormalTex->getHandle() : nullptr, 25);
+            encoder->setFragmentTexture(terrainLayer1NormalTex ? terrainLayer1NormalTex->getHandle() : nullptr, 26);
+            encoder->setFragmentTexture(terrainLayer2NormalTex ? terrainLayer2NormalTex->getHandle() : nullptr, 27);
+            encoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 28);
+            encoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 29);
+            encoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 30);
             
             // IBL textures (slots 8, 9, 10)
             if (m_hasIBL && m_iblIrradiance && m_iblPrefiltered && m_iblBRDFLUT) {
@@ -5143,6 +5342,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 bool hasEmissionTex = batch.material->getEmissionTexture() != nullptr;
                 bool hasHeightTex = batch.material->getHeightTexture() != nullptr;
                 bool hasORMTex = batch.material->getORMTexture() != nullptr;
+                bool hasTerrainControlTex = batch.material->getTerrainControlTexture() != nullptr;
+                bool hasTerrainLayer0Tex = batch.material->getTerrainLayer0Texture() != nullptr;
+                bool hasTerrainLayer1Tex = batch.material->getTerrainLayer1Texture() != nullptr;
+                bool hasTerrainLayer2Tex = batch.material->getTerrainLayer2Texture() != nullptr;
                 bool invertHeight = batch.material->getHeightInvert();
 
                 matUniforms.textureFlags = Math::Vector4(
@@ -5193,6 +5396,36 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 matUniforms.foliageParams3 = Math::Vector4(
                     windDir.x, windDir.y, windDir.z, 0.0f
                 );
+                matUniforms.impostorParams0 = Math::Vector4(
+                    batch.material->getImpostorEnabled() ? 1.0f : 0.0f,
+                    static_cast<float>(batch.material->getImpostorRows()),
+                    static_cast<float>(batch.material->getImpostorCols()),
+                    0.0f
+                );
+                matUniforms.terrainParams0 = Math::Vector4(
+                    batch.material->getTerrainEnabled() ? 1.0f : 0.0f,
+                    batch.material->getTerrainBlendSharpness(),
+                    batch.material->getTerrainHeightStart(),
+                    batch.material->getTerrainHeightEnd()
+                );
+                matUniforms.terrainParams1 = Math::Vector4(
+                    batch.material->getTerrainSlopeStart(),
+                    batch.material->getTerrainSlopeEnd(),
+                    0.0f,
+                    0.0f
+                );
+                Math::Vector2 terrain0ST = batch.material->getTerrainLayer0Tiling();
+                Math::Vector2 terrain1ST = batch.material->getTerrainLayer1Tiling();
+                Math::Vector2 terrain2ST = batch.material->getTerrainLayer2Tiling();
+                matUniforms.terrainLayer0ST = Math::Vector4(terrain0ST.x, terrain0ST.y, 0.0f, 0.0f);
+                matUniforms.terrainLayer1ST = Math::Vector4(terrain1ST.x, terrain1ST.y, 0.0f, 0.0f);
+                matUniforms.terrainLayer2ST = Math::Vector4(terrain2ST.x, terrain2ST.y, 0.0f, 0.0f);
+                matUniforms.terrainFlags = Math::Vector4(
+                    hasTerrainControlTex ? 1.0f : 0.0f,
+                    hasTerrainLayer0Tex ? 1.0f : 0.0f,
+                    hasTerrainLayer1Tex ? 1.0f : 0.0f,
+                    hasTerrainLayer2Tex ? 1.0f : 0.0f
+                );
 
                 encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
                 MeshUniformsGPU meshUniforms{};
@@ -5210,6 +5443,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 auto emissionTex = hasEmissionTex ? batch.material->getEmissionTexture() : m_defaultBlackTexture;
                 auto heightTex = hasHeightTex ? batch.material->getHeightTexture() : m_defaultHeightTexture;
                 auto ormTex = hasORMTex ? batch.material->getORMTexture() : m_defaultBlackTexture;
+                auto terrainControlTex = hasTerrainControlTex ? batch.material->getTerrainControlTexture() : m_defaultWhiteTexture;
+                auto terrainLayer0Tex = hasTerrainLayer0Tex ? batch.material->getTerrainLayer0Texture() : albedoTex;
+                auto terrainLayer1Tex = hasTerrainLayer1Tex ? batch.material->getTerrainLayer1Texture() : albedoTex;
+                auto terrainLayer2Tex = hasTerrainLayer2Tex ? batch.material->getTerrainLayer2Texture() : albedoTex;
+                auto terrainLayer0NormalTex = batch.material->getTerrainLayer0NormalTexture() ? batch.material->getTerrainLayer0NormalTexture() : m_defaultNormalTexture;
+                auto terrainLayer1NormalTex = batch.material->getTerrainLayer1NormalTexture() ? batch.material->getTerrainLayer1NormalTexture() : m_defaultNormalTexture;
+                auto terrainLayer2NormalTex = batch.material->getTerrainLayer2NormalTexture() ? batch.material->getTerrainLayer2NormalTexture() : m_defaultNormalTexture;
+                auto terrainLayer0OrmTex = batch.material->getTerrainLayer0ORMTexture() ? batch.material->getTerrainLayer0ORMTexture() : m_defaultWhiteTexture;
+                auto terrainLayer1OrmTex = batch.material->getTerrainLayer1ORMTexture() ? batch.material->getTerrainLayer1ORMTexture() : m_defaultWhiteTexture;
+                auto terrainLayer2OrmTex = batch.material->getTerrainLayer2ORMTexture() ? batch.material->getTerrainLayer2ORMTexture() : m_defaultWhiteTexture;
 
                 encoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 0);
                 encoder->setFragmentTexture(normalTex ? normalTex->getHandle() : nullptr, 1);
@@ -5219,6 +5462,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 encoder->setFragmentTexture(emissionTex ? emissionTex->getHandle() : nullptr, 5);
                 encoder->setFragmentTexture(heightTex ? heightTex->getHandle() : nullptr, 6);
                 encoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 16);
+                encoder->setFragmentTexture(terrainControlTex ? terrainControlTex->getHandle() : nullptr, 21);
+                encoder->setFragmentTexture(terrainLayer0Tex ? terrainLayer0Tex->getHandle() : nullptr, 22);
+                encoder->setFragmentTexture(terrainLayer1Tex ? terrainLayer1Tex->getHandle() : nullptr, 23);
+                encoder->setFragmentTexture(terrainLayer2Tex ? terrainLayer2Tex->getHandle() : nullptr, 24);
+                encoder->setFragmentTexture(terrainLayer0NormalTex ? terrainLayer0NormalTex->getHandle() : nullptr, 25);
+                encoder->setFragmentTexture(terrainLayer1NormalTex ? terrainLayer1NormalTex->getHandle() : nullptr, 26);
+                encoder->setFragmentTexture(terrainLayer2NormalTex ? terrainLayer2NormalTex->getHandle() : nullptr, 27);
+                encoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 28);
+                encoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 29);
+                encoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 30);
 
                 if (m_hasIBL && m_iblIrradiance && m_iblPrefiltered && m_iblBRDFLUT) {
                     encoder->setFragmentTexture(m_iblIrradiance, 8);
@@ -5335,6 +5588,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 bool hasEmissionTex = draw.material->getEmissionTexture() != nullptr;
                 bool hasHeightTex = draw.material->getHeightTexture() != nullptr;
                 bool hasORMTex = draw.material->getORMTexture() != nullptr;
+                bool hasTerrainControlTex = draw.material->getTerrainControlTexture() != nullptr;
+                bool hasTerrainLayer0Tex = draw.material->getTerrainLayer0Texture() != nullptr;
+                bool hasTerrainLayer1Tex = draw.material->getTerrainLayer1Texture() != nullptr;
+                bool hasTerrainLayer2Tex = draw.material->getTerrainLayer2Texture() != nullptr;
                 bool invertHeight = draw.material->getHeightInvert();
 
                 matUniforms.textureFlags = Math::Vector4(
@@ -5385,6 +5642,36 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 matUniforms.foliageParams3 = Math::Vector4(
                     windDir.x, windDir.y, windDir.z, 0.0f
                 );
+                matUniforms.impostorParams0 = Math::Vector4(
+                    draw.material->getImpostorEnabled() ? 1.0f : 0.0f,
+                    static_cast<float>(draw.material->getImpostorRows()),
+                    static_cast<float>(draw.material->getImpostorCols()),
+                    0.0f
+                );
+                matUniforms.terrainParams0 = Math::Vector4(
+                    draw.material->getTerrainEnabled() ? 1.0f : 0.0f,
+                    draw.material->getTerrainBlendSharpness(),
+                    draw.material->getTerrainHeightStart(),
+                    draw.material->getTerrainHeightEnd()
+                );
+                matUniforms.terrainParams1 = Math::Vector4(
+                    draw.material->getTerrainSlopeStart(),
+                    draw.material->getTerrainSlopeEnd(),
+                    0.0f,
+                    0.0f
+                );
+                Math::Vector2 terrain0ST = draw.material->getTerrainLayer0Tiling();
+                Math::Vector2 terrain1ST = draw.material->getTerrainLayer1Tiling();
+                Math::Vector2 terrain2ST = draw.material->getTerrainLayer2Tiling();
+                matUniforms.terrainLayer0ST = Math::Vector4(terrain0ST.x, terrain0ST.y, 0.0f, 0.0f);
+                matUniforms.terrainLayer1ST = Math::Vector4(terrain1ST.x, terrain1ST.y, 0.0f, 0.0f);
+                matUniforms.terrainLayer2ST = Math::Vector4(terrain2ST.x, terrain2ST.y, 0.0f, 0.0f);
+                matUniforms.terrainFlags = Math::Vector4(
+                    hasTerrainControlTex ? 1.0f : 0.0f,
+                    hasTerrainLayer0Tex ? 1.0f : 0.0f,
+                    hasTerrainLayer1Tex ? 1.0f : 0.0f,
+                    hasTerrainLayer2Tex ? 1.0f : 0.0f
+                );
 
                 encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
                 MeshUniformsGPU meshUniforms{};
@@ -5402,6 +5689,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 auto emissionTex = hasEmissionTex ? draw.material->getEmissionTexture() : m_defaultBlackTexture;
                 auto heightTex = hasHeightTex ? draw.material->getHeightTexture() : m_defaultHeightTexture;
                 auto ormTex = hasORMTex ? draw.material->getORMTexture() : m_defaultBlackTexture;
+                auto terrainControlTex = hasTerrainControlTex ? draw.material->getTerrainControlTexture() : m_defaultWhiteTexture;
+                auto terrainLayer0Tex = hasTerrainLayer0Tex ? draw.material->getTerrainLayer0Texture() : albedoTex;
+                auto terrainLayer1Tex = hasTerrainLayer1Tex ? draw.material->getTerrainLayer1Texture() : albedoTex;
+                auto terrainLayer2Tex = hasTerrainLayer2Tex ? draw.material->getTerrainLayer2Texture() : albedoTex;
+                auto terrainLayer0NormalTex = draw.material->getTerrainLayer0NormalTexture() ? draw.material->getTerrainLayer0NormalTexture() : m_defaultNormalTexture;
+                auto terrainLayer1NormalTex = draw.material->getTerrainLayer1NormalTexture() ? draw.material->getTerrainLayer1NormalTexture() : m_defaultNormalTexture;
+                auto terrainLayer2NormalTex = draw.material->getTerrainLayer2NormalTexture() ? draw.material->getTerrainLayer2NormalTexture() : m_defaultNormalTexture;
+                auto terrainLayer0OrmTex = draw.material->getTerrainLayer0ORMTexture() ? draw.material->getTerrainLayer0ORMTexture() : m_defaultWhiteTexture;
+                auto terrainLayer1OrmTex = draw.material->getTerrainLayer1ORMTexture() ? draw.material->getTerrainLayer1ORMTexture() : m_defaultWhiteTexture;
+                auto terrainLayer2OrmTex = draw.material->getTerrainLayer2ORMTexture() ? draw.material->getTerrainLayer2ORMTexture() : m_defaultWhiteTexture;
 
                 encoder->setFragmentTexture(albedoTex ? albedoTex->getHandle() : nullptr, 0);
                 encoder->setFragmentTexture(normalTex ? normalTex->getHandle() : nullptr, 1);
@@ -5411,6 +5708,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 encoder->setFragmentTexture(emissionTex ? emissionTex->getHandle() : nullptr, 5);
                 encoder->setFragmentTexture(heightTex ? heightTex->getHandle() : nullptr, 6);
                 encoder->setFragmentTexture(ormTex ? ormTex->getHandle() : nullptr, 16);
+                encoder->setFragmentTexture(terrainControlTex ? terrainControlTex->getHandle() : nullptr, 21);
+                encoder->setFragmentTexture(terrainLayer0Tex ? terrainLayer0Tex->getHandle() : nullptr, 22);
+                encoder->setFragmentTexture(terrainLayer1Tex ? terrainLayer1Tex->getHandle() : nullptr, 23);
+                encoder->setFragmentTexture(terrainLayer2Tex ? terrainLayer2Tex->getHandle() : nullptr, 24);
+                encoder->setFragmentTexture(terrainLayer0NormalTex ? terrainLayer0NormalTex->getHandle() : nullptr, 25);
+                encoder->setFragmentTexture(terrainLayer1NormalTex ? terrainLayer1NormalTex->getHandle() : nullptr, 26);
+                encoder->setFragmentTexture(terrainLayer2NormalTex ? terrainLayer2NormalTex->getHandle() : nullptr, 27);
+                encoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 28);
+                encoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 29);
+                encoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 30);
 
                 if (m_hasIBL && m_iblIrradiance && m_iblPrefiltered && m_iblBRDFLUT) {
                     encoder->setFragmentTexture(m_iblIrradiance, 8);
@@ -6029,7 +6336,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 160.0f,
                 static_cast<float>(m_frameIndex) * 0.013f
             );
-            postParams.params1 = Math::Vector4(gradingIntensity, toneMapping, 0.0f, 0.0f);
+            postParams.params1 = Math::Vector4(
+                gradingIntensity,
+                toneMapping,
+                m_outputHDR ? 1.0f : 0.0f,
+                0.0f
+            );
             bool lutValid = (m_colorGradingLUT != nullptr) || (m_colorGradingNeutralLUT != nullptr);
             MTL::Texture* lutTexture = m_colorGradingLUT ? m_colorGradingLUT->getHandle() : nullptr;
             if (!lutTexture && m_colorGradingNeutralLUT) {
@@ -6337,6 +6649,12 @@ void Renderer::updateEnvironmentUniforms() {
         m_environmentSettings.skyIntensity,
         Math::Clamp(m_environmentSettings.blurLevel, 0.0f, 12.0f)
     );
+    env->ambientColorIntensity = Math::Vector4(
+        Math::Clamp(m_environmentSettings.ambientColor.x, 0.0f, 8.0f),
+        Math::Clamp(m_environmentSettings.ambientColor.y, 0.0f, 8.0f),
+        Math::Clamp(m_environmentSettings.ambientColor.z, 0.0f, 8.0f),
+        Math::Clamp(m_environmentSettings.ambientIntensity, 0.0f, 8.0f)
+    );
     
     env->colorControl = Math::Vector4(
         m_environmentSettings.tint.x,
@@ -6455,6 +6773,18 @@ void Renderer::setEnvironmentIblIntensity(float intensity) {
 
 void Renderer::setEnvironmentSkyIntensity(float intensity) {
     m_environmentSettings.skyIntensity = std::max(0.0f, intensity);
+}
+
+void Renderer::setEnvironmentAmbientIntensity(float intensity) {
+    m_environmentSettings.ambientIntensity = std::max(0.0f, intensity);
+}
+
+void Renderer::setEnvironmentAmbientColor(const Math::Vector3& color) {
+    m_environmentSettings.ambientColor = Math::Vector3(
+        std::max(0.0f, color.x),
+        std::max(0.0f, color.y),
+        std::max(0.0f, color.z)
+    );
 }
 
 void Renderer::setEnvironmentTint(const Math::Vector3& tint) {

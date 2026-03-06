@@ -177,6 +177,17 @@ enum ViewMode: Int, CaseIterable {
     }
 }
 
+struct TerrainPaintConfig: Equatable {
+    var enabled: Bool = false
+    var targetEntityUUID: String = ""
+    var layer: Int = 0
+    var radius: Float = 1.5
+    var hardness: Float = 0.65
+    var strength: Float = 0.35
+    var spacing: Float = 0.25
+    var autoNormalize: Bool = true
+}
+
 // Editor state - Observable object to manage editor state
 class EditorState: ObservableObject {
     @Published var selectedEntityUUIDs: Set<String> = []  // Swift manages multi-selection
@@ -205,6 +216,13 @@ class EditorState: ObservableObject {
     @Published var projectScenesURL: URL?
     @Published var hasProject: Bool = false
     @Published var settingsWindowRequested: Bool = false
+    @Published var terrainPaintEnabled: Bool = false
+    @Published var terrainPaintLayer: Int = 0
+    @Published var terrainBrushRadius: Float = 1.5
+    @Published var terrainBrushHardness: Float = 0.65
+    @Published var terrainBrushStrength: Float = 0.35
+    @Published var terrainBrushSpacing: Float = 0.25
+    @Published var terrainBrushAutoNormalize: Bool = true
     
     private var updateTimer: Timer?
     private var lastEngineSelectionUUIDs: Set<String> = []  // Track engine selection changes
@@ -216,6 +234,19 @@ class EditorState: ObservableObject {
     private var keyDownMonitor: Any?
     private var keyUpMonitor: Any?
     private var flagsChangedMonitor: Any?
+
+    var terrainPaintConfig: TerrainPaintConfig {
+        TerrainPaintConfig(
+            enabled: terrainPaintEnabled && !isPlaying && viewMode == .scene,
+            targetEntityUUID: primarySelectionUUID ?? "",
+            layer: terrainPaintLayer,
+            radius: terrainBrushRadius,
+            hardness: terrainBrushHardness,
+            strength: terrainBrushStrength,
+            spacing: terrainBrushSpacing,
+            autoNormalize: terrainBrushAutoNormalize
+        )
+    }
     
     init() {
         // Add initial welcome messages
@@ -713,6 +744,10 @@ class EditorState: ObservableObject {
             }
             addLog(.info, "Exited Play Mode")
         } else {
+            if terrainPaintEnabled {
+                terrainPaintEnabled = false
+                bridge.endTerrainPaint()
+            }
             bridge.enterPlayMode()
             isPlaying = true
             isPaused = false
@@ -742,6 +777,10 @@ class EditorState: ObservableObject {
             return
         }
         viewMode = mode
+        if mode != .scene && terrainPaintEnabled {
+            terrainPaintEnabled = false
+            CrescentEngineBridge.shared().endTerrainPaint()
+        }
         CrescentEngineBridge.shared().setViewMode(Int32(mode.rawValue))
     }
 

@@ -297,7 +297,12 @@ struct ViewportPanel: View {
             let borderColor = isActive ? EditorTheme.textAccent : EditorTheme.panelStroke
 
             let content = ZStack(alignment: .topLeading) {
-                MetalView(viewKind: viewKind, isActive: isActive, drivesLoop: drivesLoop)
+                MetalView(
+                    viewKind: viewKind,
+                    isActive: isActive,
+                    drivesLoop: drivesLoop,
+                    terrainPaintConfig: editorState.terrainPaintConfig
+                )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .background(Color.black.opacity(0.6))
                     .clipped()
@@ -341,6 +346,30 @@ struct ViewportPanel: View {
                         .padding(10)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .allowsHitTesting(false)
+                }
+
+                if viewKind == .scene && isActive && editorState.terrainPaintConfig.enabled {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Terrain Paint ON")
+                            .font(EditorTheme.font(size: 10, weight: .semibold))
+                        Text("Layer \(editorState.terrainPaintLayer)  Radius \(String(format: "%.2f", editorState.terrainBrushRadius))  Strength \(String(format: "%.2f", editorState.terrainBrushStrength))")
+                            .font(EditorTheme.mono(size: 10))
+                        Text("Hardness \(String(format: "%.2f", editorState.terrainBrushHardness))  Spacing \(String(format: "%.2f", editorState.terrainBrushSpacing))  Option=Erase")
+                            .font(EditorTheme.mono(size: 10))
+                            .foregroundColor(EditorTheme.textMuted)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(EditorTheme.panelBackground.opacity(0.9))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(EditorTheme.textAccent.opacity(0.8), lineWidth: 1)
+                    )
+                    .cornerRadius(6)
+                    .padding(10)
+                    .padding(.top, 36)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .allowsHitTesting(false)
                 }
 
                 if allowsDrop && isDropping {

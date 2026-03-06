@@ -143,6 +143,34 @@ public:
 
     int getImpostorCols() const { return m_ImpostorCols; }
     void setImpostorCols(int cols) { m_ImpostorCols = std::max(1, cols); }
+
+    // Terrain layering (Unity/Unreal-style)
+    bool getTerrainEnabled() const { return m_TerrainEnabled; }
+    void setTerrainEnabled(bool enabled) { m_TerrainEnabled = enabled; }
+
+    float getTerrainBlendSharpness() const { return m_TerrainBlendSharpness; }
+    void setTerrainBlendSharpness(float value) { m_TerrainBlendSharpness = Math::Clamp(value, 0.1f, 8.0f); }
+
+    float getTerrainHeightStart() const { return m_TerrainHeightStart; }
+    void setTerrainHeightStart(float value) { m_TerrainHeightStart = value; }
+
+    float getTerrainHeightEnd() const { return m_TerrainHeightEnd; }
+    void setTerrainHeightEnd(float value) { m_TerrainHeightEnd = value; }
+
+    float getTerrainSlopeStart() const { return m_TerrainSlopeStart; }
+    void setTerrainSlopeStart(float value) { m_TerrainSlopeStart = Math::Clamp(value, 0.0f, 1.0f); }
+
+    float getTerrainSlopeEnd() const { return m_TerrainSlopeEnd; }
+    void setTerrainSlopeEnd(float value) { m_TerrainSlopeEnd = Math::Clamp(value, 0.0f, 1.0f); }
+
+    const Math::Vector2& getTerrainLayer0Tiling() const { return m_TerrainLayer0Tiling; }
+    void setTerrainLayer0Tiling(const Math::Vector2& value) { m_TerrainLayer0Tiling = value; }
+
+    const Math::Vector2& getTerrainLayer1Tiling() const { return m_TerrainLayer1Tiling; }
+    void setTerrainLayer1Tiling(const Math::Vector2& value) { m_TerrainLayer1Tiling = value; }
+
+    const Math::Vector2& getTerrainLayer2Tiling() const { return m_TerrainLayer2Tiling; }
+    void setTerrainLayer2Tiling(const Math::Vector2& value) { m_TerrainLayer2Tiling = value; }
     
     // Textures (stored as void* to avoid Metal types in header)
     std::shared_ptr<Texture2D> getAlbedoTexture() const { return m_AlbedoTexture; }
@@ -171,6 +199,36 @@ public:
 
     std::shared_ptr<Texture2D> getOpacityTexture() const { return m_OpacityTexture; }
     void setOpacityTexture(std::shared_ptr<Texture2D> texture) { m_OpacityTexture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainControlTexture() const { return m_TerrainControlTexture; }
+    void setTerrainControlTexture(std::shared_ptr<Texture2D> texture) { m_TerrainControlTexture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer0Texture() const { return m_TerrainLayer0Texture; }
+    void setTerrainLayer0Texture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer0Texture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer1Texture() const { return m_TerrainLayer1Texture; }
+    void setTerrainLayer1Texture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer1Texture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer2Texture() const { return m_TerrainLayer2Texture; }
+    void setTerrainLayer2Texture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer2Texture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer0NormalTexture() const { return m_TerrainLayer0NormalTexture; }
+    void setTerrainLayer0NormalTexture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer0NormalTexture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer1NormalTexture() const { return m_TerrainLayer1NormalTexture; }
+    void setTerrainLayer1NormalTexture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer1NormalTexture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer2NormalTexture() const { return m_TerrainLayer2NormalTexture; }
+    void setTerrainLayer2NormalTexture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer2NormalTexture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer0ORMTexture() const { return m_TerrainLayer0ORMTexture; }
+    void setTerrainLayer0ORMTexture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer0ORMTexture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer1ORMTexture() const { return m_TerrainLayer1ORMTexture; }
+    void setTerrainLayer1ORMTexture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer1ORMTexture = texture; }
+
+    std::shared_ptr<Texture2D> getTerrainLayer2ORMTexture() const { return m_TerrainLayer2ORMTexture; }
+    void setTerrainLayer2ORMTexture(std::shared_ptr<Texture2D> texture) { m_TerrainLayer2ORMTexture = texture; }
     
     // Shader
     void* getShader() const { return m_Shader; }
@@ -221,6 +279,13 @@ private:
     bool m_ImpostorEnabled;
     int m_ImpostorRows;
     int m_ImpostorCols;
+
+    bool m_TerrainEnabled;
+    float m_TerrainBlendSharpness;
+    float m_TerrainHeightStart;
+    float m_TerrainHeightEnd;
+    float m_TerrainSlopeStart;
+    float m_TerrainSlopeEnd;
     
     // Textures (as void* to avoid Metal types)
     std::shared_ptr<Texture2D> m_AlbedoTexture;
@@ -232,9 +297,22 @@ private:
     std::shared_ptr<Texture2D> m_ORMTexture;
     std::shared_ptr<Texture2D> m_HeightTexture;
     std::shared_ptr<Texture2D> m_OpacityTexture;
+    std::shared_ptr<Texture2D> m_TerrainControlTexture;
+    std::shared_ptr<Texture2D> m_TerrainLayer0Texture;
+    std::shared_ptr<Texture2D> m_TerrainLayer1Texture;
+    std::shared_ptr<Texture2D> m_TerrainLayer2Texture;
+    std::shared_ptr<Texture2D> m_TerrainLayer0NormalTexture;
+    std::shared_ptr<Texture2D> m_TerrainLayer1NormalTexture;
+    std::shared_ptr<Texture2D> m_TerrainLayer2NormalTexture;
+    std::shared_ptr<Texture2D> m_TerrainLayer0ORMTexture;
+    std::shared_ptr<Texture2D> m_TerrainLayer1ORMTexture;
+    std::shared_ptr<Texture2D> m_TerrainLayer2ORMTexture;
     
     Math::Vector2 m_UVTiling;
     Math::Vector2 m_UVOffset;
+    Math::Vector2 m_TerrainLayer0Tiling;
+    Math::Vector2 m_TerrainLayer1Tiling;
+    Math::Vector2 m_TerrainLayer2Tiling;
     float m_NormalScale;
     float m_HeightScale;
     bool m_HeightInvert;

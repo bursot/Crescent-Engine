@@ -4,6 +4,7 @@
 
 #import "CrescentEngineBridge.h"
 #include "../Engine/Core/Engine.hpp"
+#include "../Engine/Core/SelectionSystem.hpp"
 #include "../Engine/Renderer/Renderer.hpp"
 #include "../Engine/Scene/SceneManager.hpp"
 #include "../Engine/Scene/SceneCommands.hpp"
@@ -12,6 +13,7 @@
 #include "../Engine/Components/MeshRenderer.hpp"
 #include "../Engine/Components/SkinnedMeshRenderer.hpp"
 #include "../Engine/Components/InstancedMeshRenderer.hpp"
+#include "../Engine/Components/PrimitiveMesh.hpp"
 #include "../Engine/Components/Animator.hpp"
 #include "../Engine/Components/IKConstraint.hpp"
 #include "../Engine/Components/Rigidbody.hpp"
@@ -33,6 +35,8 @@
 #include "../Engine/Physics/PhysicsWorld.hpp"
 #include "../Engine/Rendering/Material.hpp"
 #include "../Engine/Rendering/Texture.hpp"
+#include "../Engine/Rendering/stb_image.h"
+#include "../Engine/Rendering/stb_image_write.h"
 #include "../../../ThirdParty/nlohmann/json.hpp"
 #include <atomic>
 #include <dispatch/dispatch.h>
@@ -43,6 +47,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <unordered_map>
+#include <vector>
 
 using namespace Crescent;
 static const void* kEngineQueueKey = &kEngineQueueKey;
@@ -250,6 +255,12 @@ static bool ApplyMaterialJson(const nlohmann::json& j,
         if (p.contains("impostorEnabled")) material->setImpostorEnabled(p["impostorEnabled"].get<bool>());
         if (p.contains("impostorRows")) material->setImpostorRows(p["impostorRows"].get<int>());
         if (p.contains("impostorCols")) material->setImpostorCols(p["impostorCols"].get<int>());
+        if (p.contains("terrainEnabled")) material->setTerrainEnabled(p["terrainEnabled"].get<bool>());
+        if (p.contains("terrainBlendSharpness")) material->setTerrainBlendSharpness(p["terrainBlendSharpness"].get<float>());
+        if (p.contains("terrainHeightStart")) material->setTerrainHeightStart(p["terrainHeightStart"].get<float>());
+        if (p.contains("terrainHeightEnd")) material->setTerrainHeightEnd(p["terrainHeightEnd"].get<float>());
+        if (p.contains("terrainSlopeStart")) material->setTerrainSlopeStart(p["terrainSlopeStart"].get<float>());
+        if (p.contains("terrainSlopeEnd")) material->setTerrainSlopeEnd(p["terrainSlopeEnd"].get<float>());
         if (p.contains("tiling") && p["tiling"].is_array() && p["tiling"].size() >= 2) {
             material->setUVTiling(Math::Vector2(
                 p["tiling"][0].get<float>(),
@@ -259,6 +270,21 @@ static bool ApplyMaterialJson(const nlohmann::json& j,
             material->setUVOffset(Math::Vector2(
                 p["offset"][0].get<float>(),
                 p["offset"][1].get<float>()));
+        }
+        if (p.contains("terrainLayer0Tiling") && p["terrainLayer0Tiling"].is_array() && p["terrainLayer0Tiling"].size() >= 2) {
+            material->setTerrainLayer0Tiling(Math::Vector2(
+                p["terrainLayer0Tiling"][0].get<float>(),
+                p["terrainLayer0Tiling"][1].get<float>()));
+        }
+        if (p.contains("terrainLayer1Tiling") && p["terrainLayer1Tiling"].is_array() && p["terrainLayer1Tiling"].size() >= 2) {
+            material->setTerrainLayer1Tiling(Math::Vector2(
+                p["terrainLayer1Tiling"][0].get<float>(),
+                p["terrainLayer1Tiling"][1].get<float>()));
+        }
+        if (p.contains("terrainLayer2Tiling") && p["terrainLayer2Tiling"].is_array() && p["terrainLayer2Tiling"].size() >= 2) {
+            material->setTerrainLayer2Tiling(Math::Vector2(
+                p["terrainLayer2Tiling"][0].get<float>(),
+                p["terrainLayer2Tiling"][1].get<float>()));
         }
     }
 
@@ -278,6 +304,16 @@ static bool ApplyMaterialJson(const nlohmann::json& j,
         material->setEmissionTexture(load("emission", true));
         material->setORMTexture(load("orm", false));
         material->setHeightTexture(load("height", false));
+        material->setTerrainControlTexture(load("terrainControl", false));
+        material->setTerrainLayer0Texture(load("terrainLayer0", true));
+        material->setTerrainLayer1Texture(load("terrainLayer1", true));
+        material->setTerrainLayer2Texture(load("terrainLayer2", true));
+        material->setTerrainLayer0NormalTexture(load("terrainLayer0Normal", false));
+        material->setTerrainLayer1NormalTexture(load("terrainLayer1Normal", false));
+        material->setTerrainLayer2NormalTexture(load("terrainLayer2Normal", false));
+        material->setTerrainLayer0ORMTexture(load("terrainLayer0ORM", false));
+        material->setTerrainLayer1ORMTexture(load("terrainLayer1ORM", false));
+        material->setTerrainLayer2ORMTexture(load("terrainLayer2ORM", false));
     }
     return true;
 }
@@ -448,6 +484,42 @@ static void ApplyMaterialScalar(const std::shared_ptr<Material>& material,
         material->setImpostorRows(static_cast<int>(std::round(value)));
     } else if (prop == "impostorCols") {
         material->setImpostorCols(static_cast<int>(std::round(value)));
+    } else if (prop == "terrainEnabled") {
+        material->setTerrainEnabled(value >= 0.5f);
+    } else if (prop == "terrainBlendSharpness") {
+        material->setTerrainBlendSharpness(value);
+    } else if (prop == "terrainHeightStart") {
+        material->setTerrainHeightStart(value);
+    } else if (prop == "terrainHeightEnd") {
+        material->setTerrainHeightEnd(value);
+    } else if (prop == "terrainSlopeStart") {
+        material->setTerrainSlopeStart(value);
+    } else if (prop == "terrainSlopeEnd") {
+        material->setTerrainSlopeEnd(value);
+    } else if (prop == "terrainLayer0TilingX") {
+        Math::Vector2 tiling = material->getTerrainLayer0Tiling();
+        tiling.x = value;
+        material->setTerrainLayer0Tiling(tiling);
+    } else if (prop == "terrainLayer0TilingY") {
+        Math::Vector2 tiling = material->getTerrainLayer0Tiling();
+        tiling.y = value;
+        material->setTerrainLayer0Tiling(tiling);
+    } else if (prop == "terrainLayer1TilingX") {
+        Math::Vector2 tiling = material->getTerrainLayer1Tiling();
+        tiling.x = value;
+        material->setTerrainLayer1Tiling(tiling);
+    } else if (prop == "terrainLayer1TilingY") {
+        Math::Vector2 tiling = material->getTerrainLayer1Tiling();
+        tiling.y = value;
+        material->setTerrainLayer1Tiling(tiling);
+    } else if (prop == "terrainLayer2TilingX") {
+        Math::Vector2 tiling = material->getTerrainLayer2Tiling();
+        tiling.x = value;
+        material->setTerrainLayer2Tiling(tiling);
+    } else if (prop == "terrainLayer2TilingY") {
+        Math::Vector2 tiling = material->getTerrainLayer2Tiling();
+        tiling.y = value;
+        material->setTerrainLayer2Tiling(tiling);
     }
     else if (prop == "tilingX") {
         Math::Vector2 tiling = material->getUVTiling();
@@ -498,6 +570,403 @@ static void ApplyMaterialTexture(const std::shared_ptr<Material>& material,
     else if (slotStr == "emission") material->setEmissionTexture(texture);
     else if (slotStr == "orm") material->setORMTexture(texture);
     else if (slotStr == "height") material->setHeightTexture(texture);
+    else if (slotStr == "terrainControl") material->setTerrainControlTexture(texture);
+    else if (slotStr == "terrainLayer0") material->setTerrainLayer0Texture(texture);
+    else if (slotStr == "terrainLayer1") material->setTerrainLayer1Texture(texture);
+    else if (slotStr == "terrainLayer2") material->setTerrainLayer2Texture(texture);
+    else if (slotStr == "terrainLayer0Normal") material->setTerrainLayer0NormalTexture(texture);
+    else if (slotStr == "terrainLayer1Normal") material->setTerrainLayer1NormalTexture(texture);
+    else if (slotStr == "terrainLayer2Normal") material->setTerrainLayer2NormalTexture(texture);
+    else if (slotStr == "terrainLayer0ORM") material->setTerrainLayer0ORMTexture(texture);
+    else if (slotStr == "terrainLayer1ORM") material->setTerrainLayer1ORMTexture(texture);
+    else if (slotStr == "terrainLayer2ORM") material->setTerrainLayer2ORMTexture(texture);
+}
+
+struct TerrainPaintStrokeState {
+    bool active = false;
+    bool dirty = false;
+    std::string entityUUID;
+    std::string texturePath;
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> pixels; // RGBA8 in file orientation (top-left origin)
+    float lastU = 0.0f;
+    float lastV = 0.0f;
+    bool hasLastUV = false;
+};
+
+struct TerrainPaintTarget {
+    MaterialBinding binding;
+    std::shared_ptr<Mesh> mesh;
+    std::shared_ptr<Material> material;
+};
+
+struct TerrainBrushParams {
+    int layer = 0;
+    float radius = 1.0f;
+    float hardness = 0.7f;
+    float strength = 0.5f;
+    float spacing = 0.25f;
+    bool autoNormalize = true;
+    bool invert = false;
+};
+
+static bool ResolveTerrainPaintTarget(const std::string& entityUUID, TerrainPaintTarget& outTarget) {
+    MaterialBinding binding = GetMaterialBindingForEntityUUID(entityUUID);
+    if (!binding.entity || !binding.renderer) {
+        return false;
+    }
+    auto* primitive = binding.entity->getComponent<PrimitiveMesh>();
+    if (!primitive || primitive->getType() != PrimitiveType::Plane) {
+        return false;
+    }
+    auto mesh = binding.renderer->getMesh();
+    if (!mesh) {
+        return false;
+    }
+    auto material = EnsureUniqueMaterialForEntity(binding);
+    if (!material) {
+        return false;
+    }
+    outTarget.binding = std::move(binding);
+    outTarget.mesh = std::move(mesh);
+    outTarget.material = std::move(material);
+    return true;
+}
+
+static bool LoadRGBA8Image(const std::string& path,
+                           std::vector<unsigned char>& pixels,
+                           int& width,
+                           int& height) {
+    width = 0;
+    height = 0;
+    if (path.empty()) {
+        return false;
+    }
+    int channels = 0;
+    stbi_set_flip_vertically_on_load(0);
+    stbi_uc* raw = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    if (!raw || width <= 0 || height <= 0) {
+        if (raw) {
+            stbi_image_free(raw);
+        }
+        return false;
+    }
+    pixels.assign(raw, raw + static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull);
+    stbi_image_free(raw);
+    return true;
+}
+
+static bool SaveRGBA8Image(const std::string& path,
+                           const std::vector<unsigned char>& pixels,
+                           int width,
+                           int height) {
+    if (path.empty() || width <= 0 || height <= 0) {
+        return false;
+    }
+    if (pixels.size() < static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    int ok = stbi_write_png(path.c_str(), width, height, 4, pixels.data(), width * 4);
+    return ok != 0;
+}
+
+static std::string BuildTerrainControlTexturePath(Entity* entity) {
+    std::string base;
+    if (auto project = ProjectManager::getInstance().getActiveProject()) {
+        base = project->getAssetsPath();
+    }
+    if (base.empty()) {
+        base = AssetDatabase::getInstance().getRootPath();
+    }
+    if (base.empty()) {
+        base = (std::filesystem::current_path() / "Assets").string();
+    }
+    std::string safeName = SanitizeFilename(entity ? entity->getName() : "Terrain");
+    std::string uuidStr = entity ? entity->getUUID().toString() : "00000000";
+    if (uuidStr.size() > 8) {
+        uuidStr = uuidStr.substr(0, 8);
+    }
+    std::filesystem::path path = std::filesystem::path(base) / "Generated" / "TerrainControl";
+    path /= safeName + "_" + uuidStr + "_control.png";
+    return path.lexically_normal().string();
+}
+
+static bool EnsureTerrainControlPaintData(TerrainPaintStrokeState& state,
+                                          const TerrainPaintTarget& target,
+                                          Renderer* renderer) {
+    if (!target.material || !target.binding.entity || !renderer || !renderer->getTextureLoader()) {
+        return false;
+    }
+    std::string texturePath;
+    if (auto control = target.material->getTerrainControlTexture()) {
+        const std::string& currentPath = control->getPath();
+        if (!currentPath.empty() && currentPath.rfind("builtin://", 0) != 0) {
+            texturePath = currentPath;
+        }
+    }
+    if (texturePath.empty()) {
+        texturePath = BuildTerrainControlTexturePath(target.binding.entity);
+    }
+
+    if (state.entityUUID == target.binding.entity->getUUID().toString() &&
+        state.texturePath == texturePath &&
+        state.width > 0 && state.height > 0 &&
+        state.pixels.size() >= static_cast<size_t>(state.width) * static_cast<size_t>(state.height) * 4ull) {
+        return true;
+    }
+
+    std::vector<unsigned char> pixels;
+    int width = 0;
+    int height = 0;
+    if (!LoadRGBA8Image(texturePath, pixels, width, height)) {
+        width = 1024;
+        height = 1024;
+        pixels.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull, 0u);
+        for (size_t i = 0; i < pixels.size(); i += 4) {
+            pixels[i + 0] = 255; // Default to layer 0
+            pixels[i + 3] = 255;
+        }
+        SaveRGBA8Image(texturePath, pixels, width, height);
+        AssetDatabase::getInstance().registerAsset(texturePath);
+    }
+
+    auto* loader = renderer->getTextureLoader();
+    std::shared_ptr<Texture2D> texture = loader->loadTexture(texturePath, false, true);
+    if (!texture) {
+        texture = loader->createTextureFromRGBA8(texturePath, pixels.data(), width, height, false, true);
+    }
+    if (!texture) {
+        return false;
+    }
+
+    target.material->setTerrainControlTexture(texture);
+    target.material->setTerrainEnabled(true);
+    state.entityUUID = target.binding.entity->getUUID().toString();
+    state.texturePath = texturePath;
+    state.width = width;
+    state.height = height;
+    state.pixels = std::move(pixels);
+    state.dirty = false;
+    state.hasLastUV = false;
+    return true;
+}
+
+static bool ScreenToPlaneUV(const TerrainPaintTarget& target,
+                            float screenX,
+                            float screenY,
+                            float screenWidth,
+                            float screenHeight,
+                            float& outU,
+                            float& outV) {
+    if (!target.binding.entity || !target.mesh) {
+        return false;
+    }
+    Scene* activeScene = SceneManager::getInstance().getActiveScene();
+    Camera* camera = Camera::getMainCamera();
+    if (!activeScene || !camera || screenWidth <= 1.0f || screenHeight <= 1.0f) {
+        return false;
+    }
+
+    Ray ray = SelectionSystem::screenPointToRay(
+        Math::Vector2(screenX, screenY),
+        Math::Vector2(screenWidth, screenHeight),
+        camera
+    );
+
+    Math::Matrix4x4 world = target.binding.entity->getTransform()->getWorldMatrix();
+    Math::Matrix4x4 invWorld = world.inversed();
+    Math::Vector3 localOrigin = invWorld.transformPoint(ray.origin);
+    Math::Vector3 localDir = invWorld.transformDirection(ray.direction);
+    if (std::abs(localDir.y) < 1e-6f) {
+        return false;
+    }
+    float t = -localOrigin.y / localDir.y;
+    if (t < 0.0f) {
+        return false;
+    }
+
+    Math::Vector3 localHit = localOrigin + localDir * t;
+    Math::Vector3 minB = target.mesh->getBoundsMin();
+    Math::Vector3 maxB = target.mesh->getBoundsMax();
+    if (localHit.x < minB.x || localHit.x > maxB.x || localHit.z < minB.z || localHit.z > maxB.z) {
+        return false;
+    }
+
+    float width = std::max(maxB.x - minB.x, 1e-6f);
+    float depth = std::max(maxB.z - minB.z, 1e-6f);
+    outU = std::clamp((localHit.x - minB.x) / width, 0.0f, 1.0f);
+    outV = std::clamp((localHit.z - minB.z) / depth, 0.0f, 1.0f);
+    return true;
+}
+
+static float BrushFalloff(float distance01, float hardness) {
+    if (distance01 >= 1.0f) {
+        return 0.0f;
+    }
+    hardness = std::clamp(hardness, 0.001f, 1.0f);
+    if (distance01 <= hardness) {
+        return 1.0f;
+    }
+    float t = (distance01 - hardness) / std::max(1.0f - hardness, 1e-6f);
+    t = std::clamp(t, 0.0f, 1.0f);
+    float smooth = t * t * (3.0f - 2.0f * t);
+    return 1.0f - smooth;
+}
+
+static void ApplyBrushSample(TerrainPaintStrokeState& state,
+                             const TerrainPaintTarget& target,
+                             float u,
+                             float v,
+                             const TerrainBrushParams& brush) {
+    if (state.width <= 0 || state.height <= 0 || state.pixels.empty() || !target.binding.entity || !target.mesh) {
+        return;
+    }
+
+    Math::Vector3 minB = target.mesh->getBoundsMin();
+    Math::Vector3 maxB = target.mesh->getBoundsMax();
+    float localWidth = std::max(maxB.x - minB.x, 1e-6f);
+    float localDepth = std::max(maxB.z - minB.z, 1e-6f);
+    Math::Vector3 scale = target.binding.entity->getTransform()->getScale();
+    float worldScaleX = std::max(std::abs(scale.x), 1e-4f);
+    float worldScaleZ = std::max(std::abs(scale.z), 1e-4f);
+    float localRadiusX = std::max(brush.radius / worldScaleX, 1e-4f);
+    float localRadiusZ = std::max(brush.radius / worldScaleZ, 1e-4f);
+    float radiusUvX = localRadiusX / localWidth;
+    float radiusUvY = localRadiusZ / localDepth;
+
+    float cx = std::clamp(u, 0.0f, 1.0f) * float(state.width - 1);
+    float cy = (1.0f - std::clamp(v, 0.0f, 1.0f)) * float(state.height - 1);
+    float rx = std::max(radiusUvX * float(state.width - 1), 0.5f);
+    float ry = std::max(radiusUvY * float(state.height - 1), 0.5f);
+
+    int minX = std::max(0, static_cast<int>(std::floor(cx - rx - 1.0f)));
+    int maxX = std::min(state.width - 1, static_cast<int>(std::ceil(cx + rx + 1.0f)));
+    int minY = std::max(0, static_cast<int>(std::floor(cy - ry - 1.0f)));
+    int maxY = std::min(state.height - 1, static_cast<int>(std::ceil(cy + ry + 1.0f)));
+    int layer = std::clamp(brush.layer, 0, 2);
+    float signedStrength = brush.invert ? -brush.strength : brush.strength;
+    signedStrength = std::clamp(signedStrength, -1.0f, 1.0f);
+
+    for (int py = minY; py <= maxY; ++py) {
+        float ny = (float(py) - cy) / ry;
+        for (int px = minX; px <= maxX; ++px) {
+            float nx = (float(px) - cx) / rx;
+            float d = std::sqrt(nx * nx + ny * ny);
+            if (d > 1.0f) {
+                continue;
+            }
+            float weight = BrushFalloff(d, brush.hardness);
+            float strength = signedStrength * weight;
+            if (std::abs(strength) < 1e-6f) {
+                continue;
+            }
+
+            size_t index = (static_cast<size_t>(py) * static_cast<size_t>(state.width) + static_cast<size_t>(px)) * 4ull;
+            float channels[3] = {
+                state.pixels[index + 0] / 255.0f,
+                state.pixels[index + 1] / 255.0f,
+                state.pixels[index + 2] / 255.0f
+            };
+            float selected = channels[layer];
+            float targetValue = selected;
+            if (strength >= 0.0f) {
+                targetValue = selected + strength * (1.0f - selected);
+            } else {
+                targetValue = selected + strength * selected;
+            }
+            targetValue = std::clamp(targetValue, 0.0f, 1.0f);
+
+            if (brush.autoNormalize) {
+                float otherSum = 0.0f;
+                for (int i = 0; i < 3; ++i) {
+                    if (i != layer) {
+                        otherSum += channels[i];
+                    }
+                }
+                if (otherSum > 1e-6f) {
+                    float scaleOther = std::max(0.0f, 1.0f - targetValue) / otherSum;
+                    for (int i = 0; i < 3; ++i) {
+                        if (i != layer) {
+                            channels[i] = std::clamp(channels[i] * scaleOther, 0.0f, 1.0f);
+                        }
+                    }
+                } else {
+                    float shared = std::max(0.0f, 1.0f - targetValue) * 0.5f;
+                    for (int i = 0; i < 3; ++i) {
+                        if (i != layer) {
+                            channels[i] = shared;
+                        }
+                    }
+                }
+                channels[layer] = targetValue;
+            } else {
+                channels[layer] = targetValue;
+            }
+
+            state.pixels[index + 0] = static_cast<unsigned char>(std::clamp(channels[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+            state.pixels[index + 1] = static_cast<unsigned char>(std::clamp(channels[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+            state.pixels[index + 2] = static_cast<unsigned char>(std::clamp(channels[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+            state.pixels[index + 3] = 255;
+            state.dirty = true;
+        }
+    }
+}
+
+static void ApplyTerrainBrushStroke(TerrainPaintStrokeState& state,
+                                    const TerrainPaintTarget& target,
+                                    float u,
+                                    float v,
+                                    const TerrainBrushParams& brush,
+                                    bool beginStroke) {
+    if (beginStroke || !state.hasLastUV) {
+        ApplyBrushSample(state, target, u, v, brush);
+        state.lastU = u;
+        state.lastV = v;
+        state.hasLastUV = true;
+        return;
+    }
+
+    float localWidth = std::max(target.mesh->getBoundsMax().x - target.mesh->getBoundsMin().x, 1e-6f);
+    float localDepth = std::max(target.mesh->getBoundsMax().z - target.mesh->getBoundsMin().z, 1e-6f);
+    Math::Vector3 scale = target.binding.entity->getTransform()->getScale();
+    float worldScaleX = std::max(std::abs(scale.x), 1e-4f);
+    float worldScaleZ = std::max(std::abs(scale.z), 1e-4f);
+    float localRadiusX = std::max(brush.radius / worldScaleX, 1e-4f);
+    float localRadiusZ = std::max(brush.radius / worldScaleZ, 1e-4f);
+    float radiusUvX = localRadiusX / localWidth;
+    float radiusUvY = localRadiusZ / localDepth;
+    float radiusPxX = std::max(radiusUvX * float(state.width - 1), 0.5f);
+    float radiusPxY = std::max(radiusUvY * float(state.height - 1), 0.5f);
+    float spacingPx = std::max(0.5f, std::min(radiusPxX, radiusPxY) * std::clamp(brush.spacing, 0.05f, 1.0f));
+
+    float dx = (u - state.lastU) * float(state.width - 1);
+    float dy = (v - state.lastV) * float(state.height - 1);
+    float distancePx = std::sqrt(dx * dx + dy * dy);
+    int steps = std::max(1, static_cast<int>(std::ceil(distancePx / spacingPx)));
+    for (int i = 1; i <= steps; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(steps);
+        float sampleU = state.lastU + (u - state.lastU) * t;
+        float sampleV = state.lastV + (v - state.lastV) * t;
+        ApplyBrushSample(state, target, sampleU, sampleV, brush);
+    }
+    state.lastU = u;
+    state.lastV = v;
+    state.hasLastUV = true;
+}
+
+static void CommitTerrainPaintState(TerrainPaintStrokeState& state) {
+    if (!state.dirty || state.texturePath.empty() || state.width <= 0 || state.height <= 0) {
+        state.hasLastUV = false;
+        return;
+    }
+    if (SaveRGBA8Image(state.texturePath, state.pixels, state.width, state.height)) {
+        AssetDatabase::getInstance().registerAsset(state.texturePath);
+        state.dirty = false;
+    }
+    state.hasLastUV = false;
 }
 
 static SkinnedMeshRenderer* GetSkinnedByUUID(const std::string& entityUUID) {
@@ -703,6 +1172,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     float _pendingMouseDragW;
     float _pendingMouseDragH;
     bool _hasPendingMouseDrag;
+    TerrainPaintStrokeState _terrainPaintState;
 }
 
 + (instancetype)shared {
@@ -1478,6 +1948,149 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (void)beginTerrainPaintForEntity:(NSString *)uuid
+                                  x:(float)x
+                                  y:(float)y
+                        screenWidth:(float)width
+                       screenHeight:(float)height
+                              layer:(NSInteger)layer
+                             radius:(float)radius
+                           hardness:(float)hardness
+                           strength:(float)strength
+                            spacing:(float)spacing
+                      autoNormalize:(BOOL)autoNormalize
+                             invert:(BOOL)invert {
+    [self performAsync:^{
+        if (!_engine || !uuid || uuid.length == 0) {
+            return;
+        }
+        if (!SceneManager::getInstance().isSceneView() || SceneManager::getInstance().isPlaying()) {
+            return;
+        }
+        std::string entityUUID = [uuid UTF8String];
+        if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
+            CommitTerrainPaintState(_terrainPaintState);
+            _terrainPaintState.active = false;
+        }
+
+        TerrainPaintTarget target;
+        if (!ResolveTerrainPaintTarget(entityUUID, target)) {
+            return;
+        }
+        Renderer* renderer = _engine->getRenderer();
+        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+            return;
+        }
+        _terrainPaintState.active = true;
+        _terrainPaintState.entityUUID = entityUUID;
+
+        float u = 0.0f;
+        float v = 0.0f;
+        if (!ScreenToPlaneUV(target, x, y, width, height, u, v)) {
+            return;
+        }
+
+        TerrainBrushParams brush;
+        brush.layer = static_cast<int>(layer);
+        brush.radius = std::max(0.01f, radius);
+        brush.hardness = std::clamp(hardness, 0.0f, 1.0f);
+        brush.strength = std::clamp(strength, 0.0f, 1.0f);
+        brush.spacing = std::clamp(spacing, 0.05f, 1.0f);
+        brush.autoNormalize = autoNormalize;
+        brush.invert = invert;
+
+        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, true);
+        if (renderer && renderer->getTextureLoader()) {
+            renderer->getTextureLoader()->updateTextureFromRGBA8(
+                target.material->getTerrainControlTexture(),
+                _terrainPaintState.pixels.data(),
+                _terrainPaintState.width,
+                _terrainPaintState.height,
+                true
+            );
+        }
+    }];
+}
+
+- (void)updateTerrainPaintForEntity:(NSString *)uuid
+                                   x:(float)x
+                                   y:(float)y
+                         screenWidth:(float)width
+                        screenHeight:(float)height
+                               layer:(NSInteger)layer
+                              radius:(float)radius
+                            hardness:(float)hardness
+                            strength:(float)strength
+                             spacing:(float)spacing
+                       autoNormalize:(BOOL)autoNormalize
+                              invert:(BOOL)invert {
+    [self performAsync:^{
+        if (!_engine || !uuid || uuid.length == 0) {
+            return;
+        }
+        if (!SceneManager::getInstance().isSceneView() || SceneManager::getInstance().isPlaying()) {
+            return;
+        }
+        std::string entityUUID = [uuid UTF8String];
+        bool beginStroke = false;
+        if (!_terrainPaintState.active || _terrainPaintState.entityUUID != entityUUID) {
+            if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
+                CommitTerrainPaintState(_terrainPaintState);
+            }
+            _terrainPaintState.active = true;
+            _terrainPaintState.entityUUID = entityUUID;
+            _terrainPaintState.hasLastUV = false;
+            beginStroke = true;
+        }
+
+        TerrainPaintTarget target;
+        if (!ResolveTerrainPaintTarget(entityUUID, target)) {
+            return;
+        }
+        Renderer* renderer = _engine->getRenderer();
+        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+            return;
+        }
+
+        float u = 0.0f;
+        float v = 0.0f;
+        if (!ScreenToPlaneUV(target, x, y, width, height, u, v)) {
+            return;
+        }
+
+        TerrainBrushParams brush;
+        brush.layer = static_cast<int>(layer);
+        brush.radius = std::max(0.01f, radius);
+        brush.hardness = std::clamp(hardness, 0.0f, 1.0f);
+        brush.strength = std::clamp(strength, 0.0f, 1.0f);
+        brush.spacing = std::clamp(spacing, 0.05f, 1.0f);
+        brush.autoNormalize = autoNormalize;
+        brush.invert = invert;
+
+        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, beginStroke);
+        if (renderer && renderer->getTextureLoader()) {
+            renderer->getTextureLoader()->updateTextureFromRGBA8(
+                target.material->getTerrainControlTexture(),
+                _terrainPaintState.pixels.data(),
+                _terrainPaintState.width,
+                _terrainPaintState.height,
+                true
+            );
+        }
+    }];
+}
+
+- (void)endTerrainPaint {
+    [self performAsync:^{
+        if (!_terrainPaintState.active) {
+            return;
+        }
+        CommitTerrainPaintState(_terrainPaintState);
+        _terrainPaintState.active = false;
+        _terrainPaintState.hasLastUV = false;
+    }];
+}
+
 // MARK: - Gizmo Controls
 
 - (void)setGizmoMode:(int)mode {
@@ -1573,6 +2186,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (NSDictionary *)getMaterialInfoForEntity:(NSString *)uuid {
     return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, [uuid UTF8String]) : nullptr;
         auto material = GetPrimaryMaterialForEntityUUID([uuid UTF8String]);
         if (!material) return @{};
         
@@ -1580,6 +2195,9 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         Math::Vector3 emission = material->getEmission();
         Math::Vector2 tiling = material->getUVTiling();
         Math::Vector2 offset = material->getUVOffset();
+        Math::Vector2 terrainLayer0Tiling = material->getTerrainLayer0Tiling();
+        Math::Vector2 terrainLayer1Tiling = material->getTerrainLayer1Tiling();
+        Math::Vector2 terrainLayer2Tiling = material->getTerrainLayer2Tiling();
         Math::Vector3 windDir = material->getWindDirection();
         
         auto texturePath = [](const std::shared_ptr<Texture2D>& tex) -> NSString* {
@@ -1599,8 +2217,25 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"ao": texturePath(material->getAOTexture()),
             @"emission": texturePath(material->getEmissionTexture()),
             @"orm": texturePath(material->getORMTexture()),
-            @"height": texturePath(material->getHeightTexture())
+            @"height": texturePath(material->getHeightTexture()),
+            @"terrainControl": texturePath(material->getTerrainControlTexture()),
+            @"terrainLayer0": texturePath(material->getTerrainLayer0Texture()),
+            @"terrainLayer1": texturePath(material->getTerrainLayer1Texture()),
+            @"terrainLayer2": texturePath(material->getTerrainLayer2Texture()),
+            @"terrainLayer0Normal": texturePath(material->getTerrainLayer0NormalTexture()),
+            @"terrainLayer1Normal": texturePath(material->getTerrainLayer1NormalTexture()),
+            @"terrainLayer2Normal": texturePath(material->getTerrainLayer2NormalTexture()),
+            @"terrainLayer0ORM": texturePath(material->getTerrainLayer0ORMTexture()),
+            @"terrainLayer1ORM": texturePath(material->getTerrainLayer1ORMTexture()),
+            @"terrainLayer2ORM": texturePath(material->getTerrainLayer2ORMTexture())
         };
+
+        bool isEnginePlane = false;
+        if (entity) {
+            if (auto* primitive = entity->getComponent<PrimitiveMesh>()) {
+                isEnginePlane = primitive->getType() == PrimitiveType::Plane;
+            }
+        }
         
         return @{
             @"name": [NSString stringWithUTF8String:material->getName().c_str()],
@@ -1633,6 +2268,16 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"impostorEnabled": @(material->getImpostorEnabled() ? 1 : 0),
             @"impostorRows": @(material->getImpostorRows()),
             @"impostorCols": @(material->getImpostorCols()),
+            @"terrainEnabled": @(material->getTerrainEnabled() ? 1 : 0),
+            @"terrainBlendSharpness": @(material->getTerrainBlendSharpness()),
+            @"terrainHeightStart": @(material->getTerrainHeightStart()),
+            @"terrainHeightEnd": @(material->getTerrainHeightEnd()),
+            @"terrainSlopeStart": @(material->getTerrainSlopeStart()),
+            @"terrainSlopeEnd": @(material->getTerrainSlopeEnd()),
+            @"terrainLayer0Tiling": @[@(terrainLayer0Tiling.x), @(terrainLayer0Tiling.y)],
+            @"terrainLayer1Tiling": @[@(terrainLayer1Tiling.x), @(terrainLayer1Tiling.y)],
+            @"terrainLayer2Tiling": @[@(terrainLayer2Tiling.x), @(terrainLayer2Tiling.y)],
+            @"isEnginePlane": @(isEnginePlane ? 1 : 0),
             @"tiling": @[@(tiling.x), @(tiling.y)],
             @"offset": @[@(offset.x), @(offset.y)],
             @"textures": textures
@@ -1717,7 +2362,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (!material) return NO;
         
         std::string slotStr = [slot UTF8String];
-        bool srgb = (slotStr == "albedo" || slotStr == "emission");
+        bool srgb = (slotStr == "albedo" || slotStr == "emission" || slotStr == "terrainLayer0" || slotStr == "terrainLayer1" || slotStr == "terrainLayer2");
         if (slotStr == "height") srgb = false;
         
         auto texture = _engine->getRenderer()->getTextureLoader()->loadTexture([path UTF8String], srgb, true);
@@ -1815,7 +2460,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         EnsureUniqueMaterialsForEntity(entity);
 
         std::string slotStr = [slot UTF8String];
-        bool srgb = (slotStr == "albedo" || slotStr == "emission");
+        bool srgb = (slotStr == "albedo" || slotStr == "emission" || slotStr == "terrainLayer0" || slotStr == "terrainLayer1" || slotStr == "terrainLayer2");
         if (slotStr == "height") srgb = false;
 
         auto texture = _engine->getRenderer()->getTextureLoader()->loadTexture([path UTF8String], srgb, true);
@@ -1993,6 +2638,9 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         Math::Vector3 emission = material->getEmission();
         Math::Vector2 tiling = material->getUVTiling();
         Math::Vector2 offset = material->getUVOffset();
+        Math::Vector2 terrainLayer0Tiling = material->getTerrainLayer0Tiling();
+        Math::Vector2 terrainLayer1Tiling = material->getTerrainLayer1Tiling();
+        Math::Vector2 terrainLayer2Tiling = material->getTerrainLayer2Tiling();
         Math::Vector3 windDir = material->getWindDirection();
 
         props["albedo"] = {albedo.x, albedo.y, albedo.z, albedo.w};
@@ -2025,6 +2673,15 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         props["impostorEnabled"] = material->getImpostorEnabled();
         props["impostorRows"] = material->getImpostorRows();
         props["impostorCols"] = material->getImpostorCols();
+        props["terrainEnabled"] = material->getTerrainEnabled();
+        props["terrainBlendSharpness"] = material->getTerrainBlendSharpness();
+        props["terrainHeightStart"] = material->getTerrainHeightStart();
+        props["terrainHeightEnd"] = material->getTerrainHeightEnd();
+        props["terrainSlopeStart"] = material->getTerrainSlopeStart();
+        props["terrainSlopeEnd"] = material->getTerrainSlopeEnd();
+        props["terrainLayer0Tiling"] = {terrainLayer0Tiling.x, terrainLayer0Tiling.y};
+        props["terrainLayer1Tiling"] = {terrainLayer1Tiling.x, terrainLayer1Tiling.y};
+        props["terrainLayer2Tiling"] = {terrainLayer2Tiling.x, terrainLayer2Tiling.y};
         props["tiling"] = {tiling.x, tiling.y};
         props["offset"] = {offset.x, offset.y};
         j["properties"] = props;
@@ -2038,6 +2695,16 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         textures["emission"] = SerializeTexturePath(material->getEmissionTexture(), db);
         textures["orm"] = SerializeTexturePath(material->getORMTexture(), db);
         textures["height"] = SerializeTexturePath(material->getHeightTexture(), db);
+        textures["terrainControl"] = SerializeTexturePath(material->getTerrainControlTexture(), db);
+        textures["terrainLayer0"] = SerializeTexturePath(material->getTerrainLayer0Texture(), db);
+        textures["terrainLayer1"] = SerializeTexturePath(material->getTerrainLayer1Texture(), db);
+        textures["terrainLayer2"] = SerializeTexturePath(material->getTerrainLayer2Texture(), db);
+        textures["terrainLayer0Normal"] = SerializeTexturePath(material->getTerrainLayer0NormalTexture(), db);
+        textures["terrainLayer1Normal"] = SerializeTexturePath(material->getTerrainLayer1NormalTexture(), db);
+        textures["terrainLayer2Normal"] = SerializeTexturePath(material->getTerrainLayer2NormalTexture(), db);
+        textures["terrainLayer0ORM"] = SerializeTexturePath(material->getTerrainLayer0ORMTexture(), db);
+        textures["terrainLayer1ORM"] = SerializeTexturePath(material->getTerrainLayer1ORMTexture(), db);
+        textures["terrainLayer2ORM"] = SerializeTexturePath(material->getTerrainLayer2ORMTexture(), db);
         j["textures"] = textures;
 
         std::ofstream out(target);
@@ -2176,6 +2843,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"exposure": @(env.exposureEV),
             @"iblIntensity": @(env.iblIntensity),
             @"skyIntensity": @(env.skyIntensity),
+            @"ambientIntensity": @(env.ambientIntensity),
+            @"ambientColor": @[@(env.ambientColor.x), @(env.ambientColor.y), @(env.ambientColor.z)],
             @"rotation": @[@(env.rotation.x), @(env.rotation.y), @(env.rotation.z)],
             @"tint": @[@(env.tint.x), @(env.tint.y), @(env.tint.z)],
             @"saturation": @(env.saturation),
@@ -2244,6 +2913,30 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             Scene* scene = SceneManager::getInstance().getActiveScene();
             if (scene) {
                 scene->getSettings().environment.skyIntensity = intensity;
+            }
+        }
+    }];
+}
+
+- (void)setEnvironmentAmbientIntensity:(float)intensity {
+    [self performAsync:^{
+        if (_engine && _engine->getRenderer()) {
+            _engine->getRenderer()->setEnvironmentAmbientIntensity(intensity);
+            Scene* scene = SceneManager::getInstance().getActiveScene();
+            if (scene) {
+                scene->getSettings().environment.ambientIntensity = intensity;
+            }
+        }
+    }];
+}
+
+- (void)setEnvironmentAmbientColorWithR:(float)r g:(float)g b:(float)b {
+    [self performAsync:^{
+        if (_engine && _engine->getRenderer()) {
+            _engine->getRenderer()->setEnvironmentAmbientColor(Crescent::Math::Vector3(r, g, b));
+            Scene* scene = SceneManager::getInstance().getActiveScene();
+            if (scene) {
+                scene->getSettings().environment.ambientColor = Math::Vector3(r, g, b);
             }
         }
     }];
@@ -2782,6 +3475,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             settings.environment.exposureEV = env.exposureEV;
             settings.environment.iblIntensity = env.iblIntensity;
             settings.environment.skyIntensity = env.skyIntensity;
+            settings.environment.ambientIntensity = env.ambientIntensity;
+            settings.environment.ambientColor = env.ambientColor;
             settings.environment.saturation = env.saturation;
             settings.environment.contrast = env.contrast;
             settings.environment.blurLevel = env.blurLevel;
@@ -2802,6 +3497,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"exposureEV": @(settings.environment.exposureEV),
             @"iblIntensity": @(settings.environment.iblIntensity),
             @"skyIntensity": @(settings.environment.skyIntensity),
+            @"ambientIntensity": @(settings.environment.ambientIntensity),
+            @"ambientColor": vec3ToArray(settings.environment.ambientColor),
             @"saturation": @(settings.environment.saturation),
             @"contrast": @(settings.environment.contrast),
             @"blurLevel": @(settings.environment.blurLevel),
@@ -2899,6 +3596,15 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             }
             if (env[@"skyIntensity"]) {
                 updated.environment.skyIntensity = [env[@"skyIntensity"] floatValue];
+            }
+            if (env[@"ambientIntensity"]) {
+                updated.environment.ambientIntensity = [env[@"ambientIntensity"] floatValue];
+            }
+            if (env[@"ambientColor"] && [env[@"ambientColor"] isKindOfClass:[NSArray class]]) {
+                NSArray* ambient = env[@"ambientColor"];
+                if (ambient.count >= 3) {
+                    updated.environment.ambientColor = Math::Vector3([ambient[0] floatValue], [ambient[1] floatValue], [ambient[2] floatValue]);
+                }
             }
             if (env[@"saturation"]) {
                 updated.environment.saturation = [env[@"saturation"] floatValue];

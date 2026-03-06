@@ -11,9 +11,11 @@ struct SceneEnvironmentSettings {
     float exposureEV = 0.0f;
     float iblIntensity = 1.0f;
     float skyIntensity = 1.0f;
+    float ambientIntensity = 0.25f;
     float saturation = 1.0f;
     float contrast = 1.0f;
     float blurLevel = 0.0f;
+    Math::Vector3 ambientColor = Math::Vector3(1.0f);
     Math::Vector3 tint = Math::Vector3(1.0f);
     Math::Vector3 rotation = Math::Vector3(0.0f);
     bool skyboxVisible = true;

@@ -129,6 +129,16 @@ static bool ReplaceMaterialTexture(Material* material,
     swapIfMatch(material->getORMTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setORMTexture(tex); });
     swapIfMatch(material->getHeightTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setHeightTexture(tex); });
     swapIfMatch(material->getOpacityTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setOpacityTexture(tex); });
+    swapIfMatch(material->getTerrainControlTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainControlTexture(tex); });
+    swapIfMatch(material->getTerrainLayer0Texture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer0Texture(tex); });
+    swapIfMatch(material->getTerrainLayer1Texture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer1Texture(tex); });
+    swapIfMatch(material->getTerrainLayer2Texture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer2Texture(tex); });
+    swapIfMatch(material->getTerrainLayer0NormalTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer0NormalTexture(tex); });
+    swapIfMatch(material->getTerrainLayer1NormalTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer1NormalTexture(tex); });
+    swapIfMatch(material->getTerrainLayer2NormalTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer2NormalTexture(tex); });
+    swapIfMatch(material->getTerrainLayer0ORMTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer0ORMTexture(tex); });
+    swapIfMatch(material->getTerrainLayer1ORMTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer1ORMTexture(tex); });
+    swapIfMatch(material->getTerrainLayer2ORMTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer2ORMTexture(tex); });
     return updated;
 }
 

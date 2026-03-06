@@ -687,6 +687,40 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
     return tex;
 }
 
+bool TextureLoader::updateTextureFromRGBA8(const std::shared_ptr<Texture2D>& texture,
+                                           const unsigned char* rgba,
+                                           int width,
+                                           int height,
+                                           bool flipVertical) {
+    if (!texture || !texture->getHandle() || !rgba || width <= 0 || height <= 0) {
+        return false;
+    }
+    if (static_cast<int>(texture->getWidth()) != width || static_cast<int>(texture->getHeight()) != height) {
+        return false;
+    }
+
+    const unsigned char* uploadData = rgba;
+    std::vector<unsigned char> flipped;
+    if (flipVertical && height > 1) {
+        size_t rowBytes = static_cast<size_t>(width) * 4;
+        flipped.resize(static_cast<size_t>(height) * rowBytes);
+        for (int y = 0; y < height; ++y) {
+            std::memcpy(
+                flipped.data() + rowBytes * static_cast<size_t>(y),
+                rgba + rowBytes * static_cast<size_t>(height - 1 - y),
+                rowBytes
+            );
+        }
+        uploadData = flipped.data();
+    }
+
+    MTL::Texture* handle = texture->getHandle();
+    MTL::Region region = MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height));
+    handle->replaceRegion(region, 0, uploadData, static_cast<NS::UInteger>(width * 4));
+    generateMipmaps(handle);
+    return true;
+}
+
 std::shared_ptr<Texture2D> TextureLoader::loadEXRTexture(const std::string& path, bool flipVertical) {
     if (!m_Device) {
         return nullptr;

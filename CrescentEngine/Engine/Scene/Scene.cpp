@@ -390,6 +390,8 @@ void Scene::applySettings() {
     renderer->setEnvironmentExposure(env.exposureEV);
     renderer->setEnvironmentIblIntensity(env.iblIntensity);
     renderer->setEnvironmentSkyIntensity(env.skyIntensity);
+    renderer->setEnvironmentAmbientIntensity(env.ambientIntensity);
+    renderer->setEnvironmentAmbientColor(env.ambientColor);
     renderer->setEnvironmentTint(env.tint);
     renderer->setEnvironmentSaturation(env.saturation);
     renderer->setEnvironmentContrast(env.contrast);

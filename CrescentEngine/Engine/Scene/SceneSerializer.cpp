@@ -314,6 +314,15 @@ json SerializeMaterial(const Material& material) {
     j["impostorEnabled"] = material.getImpostorEnabled();
     j["impostorRows"] = material.getImpostorRows();
     j["impostorCols"] = material.getImpostorCols();
+    j["terrainEnabled"] = material.getTerrainEnabled();
+    j["terrainBlendSharpness"] = material.getTerrainBlendSharpness();
+    j["terrainHeightStart"] = material.getTerrainHeightStart();
+    j["terrainHeightEnd"] = material.getTerrainHeightEnd();
+    j["terrainSlopeStart"] = material.getTerrainSlopeStart();
+    j["terrainSlopeEnd"] = material.getTerrainSlopeEnd();
+    j["terrainLayer0Tiling"] = Vec2ToJson(material.getTerrainLayer0Tiling());
+    j["terrainLayer1Tiling"] = Vec2ToJson(material.getTerrainLayer1Tiling());
+    j["terrainLayer2Tiling"] = Vec2ToJson(material.getTerrainLayer2Tiling());
 
     json textures = json::object();
     auto pushPath = [&textures](const char* key, const std::shared_ptr<Texture2D>& tex, const char* typeKey) {
@@ -331,6 +340,16 @@ json SerializeMaterial(const Material& material) {
     pushPath("orm", material.getORMTexture(), "texture");
     pushPath("height", material.getHeightTexture(), "texture");
     pushPath("opacity", material.getOpacityTexture(), "texture");
+    pushPath("terrainControl", material.getTerrainControlTexture(), "texture");
+    pushPath("terrainLayer0", material.getTerrainLayer0Texture(), "texture");
+    pushPath("terrainLayer1", material.getTerrainLayer1Texture(), "texture");
+    pushPath("terrainLayer2", material.getTerrainLayer2Texture(), "texture");
+    pushPath("terrainLayer0Normal", material.getTerrainLayer0NormalTexture(), "texture");
+    pushPath("terrainLayer1Normal", material.getTerrainLayer1NormalTexture(), "texture");
+    pushPath("terrainLayer2Normal", material.getTerrainLayer2NormalTexture(), "texture");
+    pushPath("terrainLayer0ORM", material.getTerrainLayer0ORMTexture(), "texture");
+    pushPath("terrainLayer1ORM", material.getTerrainLayer1ORMTexture(), "texture");
+    pushPath("terrainLayer2ORM", material.getTerrainLayer2ORMTexture(), "texture");
 
     if (!textures.empty()) {
         j["textures"] = textures;
@@ -442,6 +461,8 @@ SceneEnvironmentSettings EnvironmentFromRenderer(Renderer* renderer) {
     env.exposureEV = src.exposureEV;
     env.iblIntensity = src.iblIntensity;
     env.skyIntensity = src.skyIntensity;
+    env.ambientIntensity = src.ambientIntensity;
+    env.ambientColor = src.ambientColor;
     env.saturation = src.saturation;
     env.contrast = src.contrast;
     env.blurLevel = src.blurLevel;
@@ -449,6 +470,7 @@ SceneEnvironmentSettings EnvironmentFromRenderer(Renderer* renderer) {
     env.rotation = src.rotation;
     env.skyboxVisible = src.skyboxVisible;
     env.skyMode = src.skyMode;
+    env.autoSunColor = src.autoSunColor;
     return env;
 }
 
@@ -465,6 +487,8 @@ json SerializeEnvironmentSettings(const SceneEnvironmentSettings& env) {
     e["exposureEV"] = env.exposureEV;
     e["iblIntensity"] = env.iblIntensity;
     e["skyIntensity"] = env.skyIntensity;
+    e["ambientIntensity"] = env.ambientIntensity;
+    e["ambientColor"] = Vec3ToJson(env.ambientColor);
     e["saturation"] = env.saturation;
     e["contrast"] = env.contrast;
     e["blurLevel"] = env.blurLevel;
@@ -566,6 +590,10 @@ SceneEnvironmentSettings DeserializeEnvironmentSettings(const json& j) {
     env.exposureEV = j.value("exposureEV", env.exposureEV);
     env.iblIntensity = j.value("iblIntensity", env.iblIntensity);
     env.skyIntensity = j.value("skyIntensity", env.skyIntensity);
+    env.ambientIntensity = j.value("ambientIntensity", env.ambientIntensity);
+    if (j.contains("ambientColor")) {
+        env.ambientColor = JsonToVec3(j["ambientColor"], env.ambientColor);
+    }
     env.saturation = j.value("saturation", env.saturation);
     env.contrast = j.value("contrast", env.contrast);
     env.blurLevel = j.value("blurLevel", env.blurLevel);
@@ -865,6 +893,21 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
     material->setImpostorEnabled(j.value("impostorEnabled", material->getImpostorEnabled()));
     material->setImpostorRows(j.value("impostorRows", material->getImpostorRows()));
     material->setImpostorCols(j.value("impostorCols", material->getImpostorCols()));
+    material->setTerrainEnabled(j.value("terrainEnabled", material->getTerrainEnabled()));
+    material->setTerrainBlendSharpness(j.value("terrainBlendSharpness", material->getTerrainBlendSharpness()));
+    material->setTerrainHeightStart(j.value("terrainHeightStart", material->getTerrainHeightStart()));
+    material->setTerrainHeightEnd(j.value("terrainHeightEnd", material->getTerrainHeightEnd()));
+    material->setTerrainSlopeStart(j.value("terrainSlopeStart", material->getTerrainSlopeStart()));
+    material->setTerrainSlopeEnd(j.value("terrainSlopeEnd", material->getTerrainSlopeEnd()));
+    if (j.contains("terrainLayer0Tiling")) {
+        material->setTerrainLayer0Tiling(JsonToVec2(j["terrainLayer0Tiling"], material->getTerrainLayer0Tiling()));
+    }
+    if (j.contains("terrainLayer1Tiling")) {
+        material->setTerrainLayer1Tiling(JsonToVec2(j["terrainLayer1Tiling"], material->getTerrainLayer1Tiling()));
+    }
+    if (j.contains("terrainLayer2Tiling")) {
+        material->setTerrainLayer2Tiling(JsonToVec2(j["terrainLayer2Tiling"], material->getTerrainLayer2Tiling()));
+    }
 
     if (j.contains("textures") && j["textures"].is_object()) {
         const json& t = j["textures"];
@@ -887,6 +930,16 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
         if (auto tex = load("orm", false, false)) material->setORMTexture(tex);
         if (auto tex = load("height", false, false)) material->setHeightTexture(tex);
         if (auto tex = load("opacity", false, false)) material->setOpacityTexture(tex);
+        if (auto tex = load("terrainControl", false, false)) material->setTerrainControlTexture(tex);
+        if (auto tex = load("terrainLayer0", true, false)) material->setTerrainLayer0Texture(tex);
+        if (auto tex = load("terrainLayer1", true, false)) material->setTerrainLayer1Texture(tex);
+        if (auto tex = load("terrainLayer2", true, false)) material->setTerrainLayer2Texture(tex);
+        if (auto tex = load("terrainLayer0Normal", false, true)) material->setTerrainLayer0NormalTexture(tex);
+        if (auto tex = load("terrainLayer1Normal", false, true)) material->setTerrainLayer1NormalTexture(tex);
+        if (auto tex = load("terrainLayer2Normal", false, true)) material->setTerrainLayer2NormalTexture(tex);
+        if (auto tex = load("terrainLayer0ORM", false, false)) material->setTerrainLayer0ORMTexture(tex);
+        if (auto tex = load("terrainLayer1ORM", false, false)) material->setTerrainLayer1ORMTexture(tex);
+        if (auto tex = load("terrainLayer2ORM", false, false)) material->setTerrainLayer2ORMTexture(tex);
     }
 
     return material;

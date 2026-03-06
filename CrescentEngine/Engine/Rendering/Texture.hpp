@@ -55,6 +55,11 @@ public:
     std::shared_ptr<Texture2D> loadTexture(const std::string& path, bool srgb = true, bool flipVertical = true, bool normalMap = false);
     std::shared_ptr<Texture2D> loadTextureFromMemory(const unsigned char* data, size_t size, bool srgb, bool flipVertical, const std::string& cacheKey, bool normalMap = false);
     std::shared_ptr<Texture2D> createTextureFromRGBA8(const std::string& cacheKey, const unsigned char* rgba, int width, int height, bool srgb, bool flipVertical, bool normalMap = false);
+    bool updateTextureFromRGBA8(const std::shared_ptr<Texture2D>& texture,
+                                const unsigned char* rgba,
+                                int width,
+                                int height,
+                                bool flipVertical = false);
     void invalidateTexture(const std::string& path);
     
     // Utility textures for defaults/fallbacks

@@ -7,6 +7,7 @@ final class EnvironmentViewModel: ObservableObject {
     @Published var exposure: Double = 0.0
     @Published var iblIntensity: Double = 1.0
     @Published var skyIntensity: Double = 1.0
+    @Published var ambientIntensity: Double = 0.25
     @Published var pitch: Double = 0.0
     @Published var yaw: Double = 0.0
     @Published var roll: Double = 0.0
@@ -14,6 +15,7 @@ final class EnvironmentViewModel: ObservableObject {
     @Published var contrast: Double = 1.0
     @Published var blur: Double = 0.0
     @Published var tint: Color = .white
+    @Published var ambientColor: Color = .white
     @Published var skyboxVisible: Bool = true
     @Published var currentFileName: String = "Builtin Sky"
     
@@ -29,6 +31,7 @@ final class EnvironmentViewModel: ObservableObject {
         exposure = dict["exposure"] as? Double ?? 0.0
         iblIntensity = dict["iblIntensity"] as? Double ?? 1.0
         skyIntensity = dict["skyIntensity"] as? Double ?? 1.0
+        ambientIntensity = dict["ambientIntensity"] as? Double ?? 0.25
         
         if let rot = dict["rotation"] as? [NSNumber], rot.count >= 3 {
             pitch = rot[0].doubleValue
@@ -40,6 +43,11 @@ final class EnvironmentViewModel: ObservableObject {
             tint = Color(red: tintValues[0].doubleValue,
                          green: tintValues[1].doubleValue,
                          blue: tintValues[2].doubleValue)
+        }
+        if let ambientValues = dict["ambientColor"] as? [NSNumber], ambientValues.count >= 3 {
+            ambientColor = Color(red: ambientValues[0].doubleValue,
+                                 green: ambientValues[1].doubleValue,
+                                 blue: ambientValues[2].doubleValue)
         }
         
         saturation = dict["saturation"] as? Double ?? 1.0
@@ -83,6 +91,17 @@ final class EnvironmentViewModel: ObservableObject {
     
     func pushSky() {
         CrescentEngineBridge.shared().setEnvironmentSkyIntensity(Float(skyIntensity))
+    }
+    
+    func pushAmbientIntensity() {
+        CrescentEngineBridge.shared().setEnvironmentAmbientIntensity(Float(ambientIntensity))
+    }
+    
+    func pushAmbientColor() {
+        let components = ambientColor.rgbComponents()
+        CrescentEngineBridge.shared().setEnvironmentAmbientColorWithR(Float(components.r),
+                                                                      g: Float(components.g),
+                                                                      b: Float(components.b))
     }
     
     func pushRotation() {
@@ -165,6 +184,7 @@ struct EnvironmentPanel: View {
             EnvironmentSlider(title: "Exposure (EV)", value: $viewModel.exposure, range: -8...8, onCommit: viewModel.pushExposure)
             EnvironmentSlider(title: "IBL Intensity", value: $viewModel.iblIntensity, range: 0...4, onCommit: viewModel.pushIBL)
             EnvironmentSlider(title: "Sky Brightness", value: $viewModel.skyIntensity, range: 0...4, onCommit: viewModel.pushSky)
+            EnvironmentSlider(title: "Ambient Intensity", value: $viewModel.ambientIntensity, range: 0...4, onCommit: viewModel.pushAmbientIntensity)
             EnvironmentSlider(title: "Background Blur (LOD)", value: $viewModel.blur, range: 0...8, onCommit: viewModel.pushBlur)
             EnvironmentSlider(title: "Saturation", value: $viewModel.saturation, range: 0...3, onCommit: viewModel.pushSaturation)
             EnvironmentSlider(title: "Contrast", value: $viewModel.contrast, range: 0.2...3, onCommit: viewModel.pushContrast)
@@ -180,6 +200,9 @@ struct EnvironmentPanel: View {
             
             ColorPicker("Tint", selection: $viewModel.tint, supportsOpacity: false)
                 .onChange(of: viewModel.tint) { _ in viewModel.pushTint() }
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            ColorPicker("Ambient Color", selection: $viewModel.ambientColor, supportsOpacity: false)
+                .onChange(of: viewModel.ambientColor) { _ in viewModel.pushAmbientColor() }
                 .font(EditorTheme.font(size: 11, weight: .semibold))
         }
         .padding(14)

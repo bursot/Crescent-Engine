@@ -67,6 +67,31 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)handleMouseClickAtX:(float)x y:(float)y screenWidth:(float)width screenHeight:(float)height additive:(BOOL)additive;
 - (void)handleMouseDragAtX:(float)x y:(float)y screenWidth:(float)width screenHeight:(float)height;
 - (void)handleMouseUpEvent;
+- (void)beginTerrainPaintForEntity:(NSString *)uuid
+                                  x:(float)x
+                                  y:(float)y
+                        screenWidth:(float)width
+                       screenHeight:(float)height
+                              layer:(NSInteger)layer
+                             radius:(float)radius
+                           hardness:(float)hardness
+                           strength:(float)strength
+                            spacing:(float)spacing
+                      autoNormalize:(BOOL)autoNormalize
+                             invert:(BOOL)invert NS_SWIFT_NAME(beginTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:autoNormalize:invert:));
+- (void)updateTerrainPaintForEntity:(NSString *)uuid
+                                   x:(float)x
+                                   y:(float)y
+                         screenWidth:(float)width
+                        screenHeight:(float)height
+                               layer:(NSInteger)layer
+                              radius:(float)radius
+                            hardness:(float)hardness
+                            strength:(float)strength
+                             spacing:(float)spacing
+                       autoNormalize:(BOOL)autoNormalize
+                              invert:(BOOL)invert NS_SWIFT_NAME(updateTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:autoNormalize:invert:));
+- (void)endTerrainPaint NS_SWIFT_NAME(endTerrainPaint());
 
 // Gizmo controls
 - (void)setGizmoMode:(int)mode; // 0=Translate, 1=Rotate, 2=Scale
@@ -106,6 +131,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setEnvironmentExposure:(float)ev;
 - (void)setEnvironmentIBLIntensity:(float)intensity;
 - (void)setEnvironmentSkyIntensity:(float)intensity;
+- (void)setEnvironmentAmbientIntensity:(float)intensity;
+- (void)setEnvironmentAmbientColorWithR:(float)r g:(float)g b:(float)b;
 - (void)setEnvironmentRotationWithX:(float)x y:(float)y z:(float)z;
 - (void)setEnvironmentTintWithR:(float)r g:(float)g b:(float)b;
 - (void)setEnvironmentSaturation:(float)saturation;

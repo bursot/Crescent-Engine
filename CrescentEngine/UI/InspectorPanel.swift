@@ -2225,6 +2225,9 @@ struct AxisField: View {
 
 private enum TextureSlot: String, CaseIterable {
     case albedo, normal, metallic, roughness, ao, orm, emission, height
+    case terrainControl, terrainLayer0, terrainLayer1, terrainLayer2
+    case terrainLayer0Normal, terrainLayer1Normal, terrainLayer2Normal
+    case terrainLayer0ORM, terrainLayer1ORM, terrainLayer2ORM
     
     var displayName: String {
         switch self {
@@ -2236,6 +2239,16 @@ private enum TextureSlot: String, CaseIterable {
         case .orm: return "ORM (AO/Roughness/Metallic)"
         case .emission: return "Emission Map"
         case .height: return "Height Map"
+        case .terrainControl: return "Terrain Control (Splat)"
+        case .terrainLayer0: return "Terrain Layer 0 (Lower)"
+        case .terrainLayer1: return "Terrain Layer 1 (Middle)"
+        case .terrainLayer2: return "Terrain Layer 2 (Upper)"
+        case .terrainLayer0Normal: return "Layer 0 Normal"
+        case .terrainLayer1Normal: return "Layer 1 Normal"
+        case .terrainLayer2Normal: return "Layer 2 Normal"
+        case .terrainLayer0ORM: return "Layer 0 ORM (AO/R/M)"
+        case .terrainLayer1ORM: return "Layer 1 ORM (AO/R/M)"
+        case .terrainLayer2ORM: return "Layer 2 ORM (AO/R/M)"
         }
     }
 }
@@ -2274,6 +2287,15 @@ struct MaterialInspector: View {
     @State private var impostorEnabled: Bool = false
     @State private var impostorRows: Float = 8.0
     @State private var impostorCols: Float = 8.0
+    @State private var terrainEnabled: Bool = false
+    @State private var terrainBlendSharpness: Float = 1.0
+    @State private var terrainHeightStart: Float = 0.0
+    @State private var terrainHeightEnd: Float = 8.0
+    @State private var terrainSlopeStart: Float = 0.35
+    @State private var terrainSlopeEnd: Float = 0.85
+    @State private var terrainLayer0Tiling: [Float] = [1, 1]
+    @State private var terrainLayer1Tiling: [Float] = [1, 1]
+    @State private var terrainLayer2Tiling: [Float] = [1, 1]
     @State private var tiling: [Float] = [1, 1]
     @State private var offset: [Float] = [0, 0]
     @State private var texturePaths: [String: String] = [:]
@@ -2287,8 +2309,22 @@ struct MaterialInspector: View {
     @State private var applyToAllMaterials: Bool = false
     @State private var materialAssetName: String = ""
     @State private var showMaterialImporter: Bool = false
+    @State private var isEnginePlane: Bool = false
     
     private let timer = Timer.publish(every: 0.75, on: .main, in: .common).autoconnect()
+
+    private var standardTextureSlots: [TextureSlot] {
+        [.albedo, .normal, .metallic, .roughness, .ao, .orm, .emission, .height]
+    }
+
+    private var terrainTextureSlots: [TextureSlot] {
+        [
+            .terrainControl,
+            .terrainLayer0, .terrainLayer0Normal, .terrainLayer0ORM,
+            .terrainLayer1, .terrainLayer1Normal, .terrainLayer1ORM,
+            .terrainLayer2, .terrainLayer2Normal, .terrainLayer2ORM
+        ]
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2607,15 +2643,132 @@ struct MaterialInspector: View {
                     }), range: -5...5, step: 0.05, tint: .gray, onChange: { _ in })
             }
             
-            Divider()
-                .overlay(EditorTheme.panelStroke)
+            if isEnginePlane {
+                Divider()
+                    .overlay(EditorTheme.panelStroke)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Terrain")
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
+                        .foregroundColor(EditorTheme.textPrimary)
+
+                    Toggle(isOn: Binding(
+                        get: { terrainEnabled },
+                        set: { newVal in
+                            terrainEnabled = newVal
+                            sendScalar(property: "terrainEnabled", value: newVal ? 1.0 : 0.0)
+                        })) {
+                        Text("Enable Terrain Layering")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+
+                    SliderRow(title: "Blend Sharpness", value: $terrainBlendSharpness, range: 0.1...8.0, step: 0.05, tint: .brown) { newVal in
+                        sendScalar(property: "terrainBlendSharpness", value: newVal)
+                    }
+                    SliderRow(title: "Height Start", value: $terrainHeightStart, range: -100...100, step: 0.25, tint: .green) { newVal in
+                        sendScalar(property: "terrainHeightStart", value: newVal)
+                    }
+                    SliderRow(title: "Height End", value: $terrainHeightEnd, range: -100...100, step: 0.25, tint: .green) { newVal in
+                        sendScalar(property: "terrainHeightEnd", value: newVal)
+                    }
+                    SliderRow(title: "Slope Start", value: $terrainSlopeStart, range: 0...1, step: 0.01, tint: .orange) { newVal in
+                        sendScalar(property: "terrainSlopeStart", value: newVal)
+                    }
+                    SliderRow(title: "Slope End", value: $terrainSlopeEnd, range: 0...1, step: 0.01, tint: .orange) { newVal in
+                        sendScalar(property: "terrainSlopeEnd", value: newVal)
+                    }
+
+                    SliderRow(title: "Layer0 Tiling X", value: Binding(
+                        get: { terrainLayer0Tiling[safe: 0] ?? 1 },
+                        set: { newVal in
+                            if terrainLayer0Tiling.count > 0 { terrainLayer0Tiling[0] = newVal }
+                            sendScalar(property: "terrainLayer0TilingX", value: newVal)
+                        }), range: 0.1...20, step: 0.1, tint: .brown, onChange: { _ in })
+                    SliderRow(title: "Layer0 Tiling Y", value: Binding(
+                        get: { terrainLayer0Tiling[safe: 1] ?? 1 },
+                        set: { newVal in
+                            if terrainLayer0Tiling.count > 1 { terrainLayer0Tiling[1] = newVal }
+                            sendScalar(property: "terrainLayer0TilingY", value: newVal)
+                        }), range: 0.1...20, step: 0.1, tint: .brown, onChange: { _ in })
+
+                    SliderRow(title: "Layer1 Tiling X", value: Binding(
+                        get: { terrainLayer1Tiling[safe: 0] ?? 1 },
+                        set: { newVal in
+                            if terrainLayer1Tiling.count > 0 { terrainLayer1Tiling[0] = newVal }
+                            sendScalar(property: "terrainLayer1TilingX", value: newVal)
+                        }), range: 0.1...20, step: 0.1, tint: .brown, onChange: { _ in })
+                    SliderRow(title: "Layer1 Tiling Y", value: Binding(
+                        get: { terrainLayer1Tiling[safe: 1] ?? 1 },
+                        set: { newVal in
+                            if terrainLayer1Tiling.count > 1 { terrainLayer1Tiling[1] = newVal }
+                            sendScalar(property: "terrainLayer1TilingY", value: newVal)
+                        }), range: 0.1...20, step: 0.1, tint: .brown, onChange: { _ in })
+
+                    SliderRow(title: "Layer2 Tiling X", value: Binding(
+                        get: { terrainLayer2Tiling[safe: 0] ?? 1 },
+                        set: { newVal in
+                            if terrainLayer2Tiling.count > 0 { terrainLayer2Tiling[0] = newVal }
+                            sendScalar(property: "terrainLayer2TilingX", value: newVal)
+                        }), range: 0.1...20, step: 0.1, tint: .brown, onChange: { _ in })
+                    SliderRow(title: "Layer2 Tiling Y", value: Binding(
+                        get: { terrainLayer2Tiling[safe: 1] ?? 1 },
+                        set: { newVal in
+                            if terrainLayer2Tiling.count > 1 { terrainLayer2Tiling[1] = newVal }
+                            sendScalar(property: "terrainLayer2TilingY", value: newVal)
+                        }), range: 0.1...20, step: 0.1, tint: .brown, onChange: { _ in })
+
+                    Divider()
+                        .overlay(EditorTheme.panelStroke)
+
+                    Toggle(isOn: Binding(
+                        get: { editorState.terrainPaintEnabled },
+                        set: { enabled in
+                            editorState.terrainPaintEnabled = enabled
+                            if !enabled {
+                                CrescentEngineBridge.shared().endTerrainPaint()
+                            }
+                        })) {
+                        Text("Terrain Paint Mode")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Brush Layer")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                            .foregroundColor(EditorTheme.textPrimary)
+                        Picker("", selection: $editorState.terrainPaintLayer) {
+                            Text("Layer 0").tag(0)
+                            Text("Layer 1").tag(1)
+                            Text("Layer 2").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    SliderRow(title: "Brush Radius", value: $editorState.terrainBrushRadius, range: 0.1...15.0, step: 0.05, tint: .orange) { _ in }
+                    SliderRow(title: "Brush Hardness", value: $editorState.terrainBrushHardness, range: 0.0...1.0, step: 0.01, tint: .orange) { _ in }
+                    SliderRow(title: "Brush Strength", value: $editorState.terrainBrushStrength, range: 0.01...1.0, step: 0.01, tint: .orange) { _ in }
+                    SliderRow(title: "Brush Spacing", value: $editorState.terrainBrushSpacing, range: 0.05...1.0, step: 0.01, tint: .orange) { _ in }
+
+                    Toggle(isOn: $editorState.terrainBrushAutoNormalize) {
+                        Text("Weight Normalize (Unreal Style)")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+
+                    Text("Viewport: left-drag paints, Option erases.")
+                        .font(EditorTheme.font(size: 10, weight: .regular))
+                        .foregroundColor(EditorTheme.textMuted)
+                }
+
+                Divider()
+                    .overlay(EditorTheme.panelStroke)
+            }
             
             VStack(alignment: .leading, spacing: 8) {
                 Text("Texture Maps")
                     .font(EditorTheme.font(size: 11, weight: .semibold))
                     .foregroundColor(EditorTheme.textPrimary)
                 
-                ForEach(TextureSlot.allCases, id: \.self) { slot in
+                ForEach(isEnginePlane ? terrainTextureSlots : standardTextureSlots, id: \.self) { slot in
                     TextureSlotRow(
                         title: slot.displayName,
                         path: texturePaths[slot.rawValue] ?? ""
@@ -2721,6 +2874,32 @@ struct MaterialInspector: View {
         }
         impostorRows = (info["impostorRows"] as? NSNumber)?.floatValue ?? impostorRows
         impostorCols = (info["impostorCols"] as? NSNumber)?.floatValue ?? impostorCols
+        if let terrainVal = info["terrainEnabled"] as? NSNumber {
+            terrainEnabled = terrainVal.intValue != 0
+        }
+        terrainBlendSharpness = (info["terrainBlendSharpness"] as? NSNumber)?.floatValue ?? terrainBlendSharpness
+        terrainHeightStart = (info["terrainHeightStart"] as? NSNumber)?.floatValue ?? terrainHeightStart
+        terrainHeightEnd = (info["terrainHeightEnd"] as? NSNumber)?.floatValue ?? terrainHeightEnd
+        terrainSlopeStart = (info["terrainSlopeStart"] as? NSNumber)?.floatValue ?? terrainSlopeStart
+        terrainSlopeEnd = (info["terrainSlopeEnd"] as? NSNumber)?.floatValue ?? terrainSlopeEnd
+        if let vals = info["terrainLayer0Tiling"] as? [NSNumber], vals.count >= 2 {
+            terrainLayer0Tiling = vals.map { $0.floatValue }
+        }
+        if let vals = info["terrainLayer1Tiling"] as? [NSNumber], vals.count >= 2 {
+            terrainLayer1Tiling = vals.map { $0.floatValue }
+        }
+        if let vals = info["terrainLayer2Tiling"] as? [NSNumber], vals.count >= 2 {
+            terrainLayer2Tiling = vals.map { $0.floatValue }
+        }
+        if let planeVal = info["isEnginePlane"] as? NSNumber {
+            isEnginePlane = planeVal.intValue != 0
+        } else {
+            isEnginePlane = false
+        }
+        if !isEnginePlane && editorState.terrainPaintEnabled {
+            editorState.terrainPaintEnabled = false
+            CrescentEngineBridge.shared().endTerrainPaint()
+        }
         
         if let tilingVals = info["tiling"] as? [NSNumber], tilingVals.count >= 2 {
             tiling = tilingVals.map { $0.floatValue }

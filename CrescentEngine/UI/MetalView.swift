@@ -21,11 +21,16 @@ struct MetalView: NSViewRepresentable {
     let viewKind: RenderViewKind
     let isActive: Bool
     let drivesLoop: Bool
+    let terrainPaintConfig: TerrainPaintConfig
 
-    init(viewKind: RenderViewKind, isActive: Bool, drivesLoop: Bool = false) {
+    init(viewKind: RenderViewKind,
+         isActive: Bool,
+         drivesLoop: Bool = false,
+         terrainPaintConfig: TerrainPaintConfig = TerrainPaintConfig()) {
         self.viewKind = viewKind
         self.isActive = isActive
         self.drivesLoop = drivesLoop
+        self.terrainPaintConfig = terrainPaintConfig
     }
     
     func makeCoordinator() -> Coordinator {
@@ -38,6 +43,14 @@ struct MetalView: NSViewRepresentable {
         metalView.allowsPicking = (viewKind == .scene) && isActive
         metalView.allowsCameraControl = isActive
         metalView.inputDelegate = isActive ? context.coordinator : nil
+        metalView.terrainPaintEnabled = terrainPaintConfig.enabled
+        metalView.terrainPaintTargetUUID = terrainPaintConfig.targetEntityUUID
+        metalView.terrainPaintLayer = terrainPaintConfig.layer
+        metalView.terrainBrushRadius = terrainPaintConfig.radius
+        metalView.terrainBrushHardness = terrainPaintConfig.hardness
+        metalView.terrainBrushStrength = terrainPaintConfig.strength
+        metalView.terrainBrushSpacing = terrainPaintConfig.spacing
+        metalView.terrainBrushAutoNormalize = terrainPaintConfig.autoNormalize
         context.coordinator.metalView = metalView
         
         // Initialize engine (delayed until view is laid out)
@@ -57,6 +70,14 @@ struct MetalView: NSViewRepresentable {
         nsView.allowsPicking = (viewKind == .scene) && isActive
         nsView.allowsCameraControl = isActive
         nsView.inputDelegate = isActive ? context.coordinator : nil
+        nsView.terrainPaintEnabled = terrainPaintConfig.enabled
+        nsView.terrainPaintTargetUUID = terrainPaintConfig.targetEntityUUID
+        nsView.terrainPaintLayer = terrainPaintConfig.layer
+        nsView.terrainBrushRadius = terrainPaintConfig.radius
+        nsView.terrainBrushHardness = terrainPaintConfig.hardness
+        nsView.terrainBrushStrength = terrainPaintConfig.strength
+        nsView.terrainBrushSpacing = terrainPaintConfig.spacing
+        nsView.terrainBrushAutoNormalize = terrainPaintConfig.autoNormalize
         context.coordinator.setInputMonitoring(active: isActive)
         if isActive, let window = nsView.window, window.firstResponder !== nsView {
             window.makeFirstResponder(nsView)
@@ -301,6 +322,74 @@ struct MetalView: NSViewRepresentable {
             bridge?.handleMouseUpEvent()
         }
 
+        func beginTerrainPaint(at point: CGPoint,
+                               viewSize: CGSize,
+                               entityUUID: String,
+                               layer: Int,
+                               radius: Float,
+                               hardness: Float,
+                               strength: Float,
+                               spacing: Float,
+                               autoNormalize: Bool,
+                               invert: Bool) {
+            guard let metalView = metalView else { return }
+            let scale = metalView.layer?.contentsScale ?? 2.0
+            let x = Float(point.x * scale)
+            let y = Float(point.y * scale)
+            let width = Float(viewSize.width * scale)
+            let height = Float(viewSize.height * scale)
+            bridge?.beginTerrainPaint(
+                entity: entityUUID,
+                x: x,
+                y: y,
+                screenWidth: width,
+                screenHeight: height,
+                layer: layer,
+                radius: radius,
+                hardness: hardness,
+                strength: strength,
+                spacing: spacing,
+                autoNormalize: autoNormalize,
+                invert: invert
+            )
+        }
+
+        func updateTerrainPaint(at point: CGPoint,
+                                viewSize: CGSize,
+                                entityUUID: String,
+                                layer: Int,
+                                radius: Float,
+                                hardness: Float,
+                                strength: Float,
+                                spacing: Float,
+                                autoNormalize: Bool,
+                                invert: Bool) {
+            guard let metalView = metalView else { return }
+            let scale = metalView.layer?.contentsScale ?? 2.0
+            let x = Float(point.x * scale)
+            let y = Float(point.y * scale)
+            let width = Float(viewSize.width * scale)
+            let height = Float(viewSize.height * scale)
+            bridge?.updateTerrainPaint(
+                entity: entityUUID,
+                x: x,
+                y: y,
+                screenWidth: width,
+                screenHeight: height,
+                layer: layer,
+                radius: radius,
+                hardness: hardness,
+                strength: strength,
+                spacing: spacing,
+                autoNormalize: autoNormalize,
+                invert: invert
+            )
+        }
+
+        func endTerrainPaint() {
+            bridge?.endTerrainPaint()
+        }
+
         func setInputMonitoring(active: Bool) {
             if active {
                 installInputMonitorsIfNeeded()
@@ -399,6 +488,26 @@ class MetalDisplayView: NSView {
     weak var coordinator: MetalView.Coordinator?
     var allowsPicking: Bool = true
     var allowsCameraControl: Bool = true
+    var terrainPaintEnabled: Bool = false {
+        didSet {
+            if oldValue && !terrainPaintEnabled {
+                coordinator?.endTerrainPaint()
+            }
+        }
+    }
+    var terrainPaintTargetUUID: String = "" {
+        didSet {
+            if oldValue != terrainPaintTargetUUID {
+                coordinator?.endTerrainPaint()
+            }
+        }
+    }
+    var terrainPaintLayer: Int = 0
+    var terrainBrushRadius: Float = 1.5
+    var terrainBrushHardness: Float = 0.65
+    var terrainBrushStrength: Float = 0.35
+    var terrainBrushSpacing: Float = 0.25
+    var terrainBrushAutoNormalize: Bool = true
     private var trackingArea: NSTrackingArea?
     private var isRightMouseDown: Bool = false
     private var isLeftMouseDown: Bool = false
@@ -548,16 +657,51 @@ class MetalDisplayView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         isLeftMouseDown = true
+        let point = convert(event.locationInWindow, from: nil)
+        let invert = event.modifierFlags.contains(.option)
+
+        if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty {
+            coordinator?.beginTerrainPaint(
+                at: point,
+                viewSize: bounds.size,
+                entityUUID: terrainPaintTargetUUID,
+                layer: terrainPaintLayer,
+                radius: terrainBrushRadius,
+                hardness: terrainBrushHardness,
+                strength: terrainBrushStrength,
+                spacing: terrainBrushSpacing,
+                autoNormalize: terrainBrushAutoNormalize,
+                invert: invert
+            )
+            return
+        }
+
         inputDelegate?.handleMouseButton(0, pressed: true)
         guard allowsPicking else { return }
         
         // Get click position
-        let point = convert(event.locationInWindow, from: nil)
         let additive = event.modifierFlags.contains(.command)
         coordinator?.handleMouseClick(at: point, viewSize: bounds.size, additive: additive)
     }
     
     override func mouseDragged(with event: NSEvent) {
+        if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty && isLeftMouseDown {
+            let point = convert(event.locationInWindow, from: nil)
+            let invert = event.modifierFlags.contains(.option)
+            coordinator?.updateTerrainPaint(
+                at: point,
+                viewSize: bounds.size,
+                entityUUID: terrainPaintTargetUUID,
+                layer: terrainPaintLayer,
+                radius: terrainBrushRadius,
+                hardness: terrainBrushHardness,
+                strength: terrainBrushStrength,
+                spacing: terrainBrushSpacing,
+                autoNormalize: terrainBrushAutoNormalize,
+                invert: invert
+            )
+            return
+        }
         guard allowsPicking else { return }
         if isLeftMouseDown {
             // Get current position
@@ -568,6 +712,10 @@ class MetalDisplayView: NSView {
     
     override func mouseUp(with event: NSEvent) {
         isLeftMouseDown = false
+        if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty {
+            coordinator?.endTerrainPaint()
+            return
+        }
         inputDelegate?.handleMouseButton(0, pressed: false)
         guard allowsPicking else { return }
         coordinator?.handleMouseUpEvent()
