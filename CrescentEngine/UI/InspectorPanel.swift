@@ -11,91 +11,82 @@ struct InspectorPanel: View {
             HStack {
                 Label("Inspector", systemImage: "cube.transparent")
                     .labelStyle(.titleAndIcon)
-                    .font(EditorTheme.font(size: 12, weight: .semibold))
+                    .font(EditorTheme.font(size: 13, weight: .semibold))
                     .foregroundColor(EditorTheme.textPrimary)
                 
                 Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(EditorTheme.panelHeader)
-            
-            Divider()
-                .overlay(EditorTheme.panelStroke)
-            
-            ScrollView {
-                // Get selected entity name from UUID
-                if let selectedUUID = editorState.primarySelectionUUID,
-                   let selectedEntity = editorState.entityList.first(where: { $0.uuid == selectedUUID }) {
-                    let lightSection = LightInspectorSection(uuid: selectedEntity.uuid)
-                    let animationSection = AnimationInspectorSection(uuid: selectedEntity.uuid)
-                    let decalSection = DecalInspectorSection(uuid: selectedEntity.uuid)
-                    let physicsSection = PhysicsInspectorSection(uuid: selectedEntity.uuid)
-                    let audioSection = AudioInspectorSection(uuid: selectedEntity.uuid)
-                    VStack(alignment: .leading, spacing: 14) {
-                        InspectorSummaryCard(
-                            entityUUID: selectedEntity.uuid,
-                            entityName: selectedEntity.name,
-                            selectionCount: editorState.selectedEntityUUIDs.count
-                        ) { newName in
-                            let _ = CrescentEngineBridge.shared().setEntityName(uuid: selectedEntity.uuid, name: newName)
-                            editorState.refreshEntityList()
-                        }
-                        
-                        ComponentSection(title: "Transform", icon: "arrow.up.and.down.and.arrow.left.and.right") {
-                            TransformInspector(selectedUUIDs: editorState.selectedEntityUUIDs)  // Pass ALL selected UUIDs
-                        }
-                        
-                        // Only show Material if this entity isn't a light
-                        if lightSection == nil && decalSection == nil {
-                            ComponentSection(title: "Material", icon: "paintpalette.fill") {
-                                MaterialInspector(entityUUID: selectedEntity.uuid,
-                                                  selectedUUIDs: editorState.selectedEntityUUIDs,
-                                                  editorState: editorState)
-                            }
-                        }
 
-                        if editorState.selectedEntityUUIDs.count > 1 {
-                            ComponentSection(title: "HLOD", icon: "square.stack.3d.up") {
-                                HLODInspectorSection(uuids: Array(editorState.selectedEntityUUIDs))
-                            }
-                        }
-
-                        if let physicsView = physicsSection {
-                            physicsView
-                        }
-
-                        if let audioView = audioSection {
-                            audioView
-                        }
-                        
-                        if let animationView = animationSection {
-                            animationView
-                        }
-                        
-                        if let decalView = decalSection {
-                            decalView
-                        }
-                        
-                        if let lightView = lightSection {
-                            lightView
-                        }
-                        
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        editorState.inspectorCollapsed.toggle()
                     }
-                    .padding(12)
-                } else {
-                    InspectorPlaceholder()
-                        .padding(12)
+                } label: {
+                    Image(systemName: editorState.inspectorCollapsed ? "chevron.down" : "chevron.up")
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
+                        .foregroundColor(EditorTheme.textMuted)
+                }
+                .buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(EditorTheme.panelHeader.opacity(0.72))
+            
+            if !editorState.inspectorCollapsed {
+                Divider()
+                    .overlay(EditorTheme.panelStroke)
+                
+                ScrollView {
+                    if let selectedUUID = editorState.primarySelectionUUID,
+                       let selectedEntity = editorState.entityList.first(where: { $0.uuid == selectedUUID }) {
+                        let lightSection = LightInspectorSection(uuid: selectedEntity.uuid)
+                        let animationSection = AnimationInspectorSection(uuid: selectedEntity.uuid)
+                        let decalSection = DecalInspectorSection(uuid: selectedEntity.uuid)
+                        let physicsSection = PhysicsInspectorSection(uuid: selectedEntity.uuid)
+                        let audioSection = AudioInspectorSection(uuid: selectedEntity.uuid)
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            InspectorSummaryCard(
+                                entityUUID: selectedEntity.uuid,
+                                entityName: selectedEntity.name,
+                                selectionCount: editorState.selectedEntityUUIDs.count
+                            ) { newName in
+                                let _ = CrescentEngineBridge.shared().setEntityName(uuid: selectedEntity.uuid, name: newName)
+                                editorState.refreshEntityList()
+                            }
+                            
+                            ComponentSection(title: "Transform", icon: "arrow.up.and.down.and.arrow.left.and.right") {
+                                TransformInspector(selectedUUIDs: editorState.selectedEntityUUIDs)
+                            }
+                            
+                            if lightSection == nil && decalSection == nil {
+                                ComponentSection(title: "Material", icon: "paintpalette.fill") {
+                                    MaterialInspector(entityUUID: selectedEntity.uuid,
+                                                      selectedUUIDs: editorState.selectedEntityUUIDs,
+                                                      editorState: editorState)
+                                }
+                            }
+
+                            if editorState.selectedEntityUUIDs.count > 1 {
+                                ComponentSection(title: "HLOD", icon: "square.stack.3d.up") {
+                                    HLODInspectorSection(uuids: Array(editorState.selectedEntityUUIDs))
+                                }
+                            }
+
+                            if let physicsView = physicsSection { physicsView }
+                            if let audioView = audioSection { audioView }
+                            if let animationView = animationSection { animationView }
+                            if let decalView = decalSection { decalView }
+                            if let lightView = lightSection { lightView }
+                        }
+                        .padding(10)
+                    } else {
+                        InspectorPlaceholder()
+                            .padding(10)
+                    }
                 }
             }
         }
-        .frame(minWidth: 250, maxWidth: 380)
-        .background(EditorTheme.panelBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .editorPanel()
     }
 }
 
@@ -141,12 +132,7 @@ struct ComponentSection<Content: View>: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .background(EditorTheme.surface)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .editorSection()
     }
 }
 
@@ -156,7 +142,7 @@ struct TransformInspector: View {
     @State private var rotation: [Float] = [0, 0, 0]
     @State private var scale: [Float] = [1, 1, 1]
     
-    let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+    let timer = Timer.publish(every: 0.45, on: .main, in: .common).autoconnect()
     
     var body: some View {
         VStack(spacing: 12) {
@@ -314,12 +300,7 @@ struct InspectorSummaryCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(EditorTheme.surface)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .editorSection()
         .onChange(of: entityName) { newValue in
             nameDraft = newValue
         }
@@ -353,13 +334,8 @@ struct InspectorPlaceholder: View {
                 .foregroundColor(EditorTheme.textMuted)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
-        .background(EditorTheme.surface)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(20)
+        .editorSection(cornerRadius: 18)
     }
 }
 
@@ -401,7 +377,7 @@ struct AnimationInspector: View {
     @State private var newEventTime: Float = 0.0
     @State private var eventLog: [AnimationEventItem] = []
     
-    private let timer = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -886,7 +862,7 @@ struct PhysicsInspector: View {
     @State private var fpsMuzzleTexturePath: String = ""
     @State private var showMuzzleFileImporter: Bool = false
 
-    private let timer = Timer.publish(every: 0.8, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     private let bodyTypes = ["Static", "Dynamic", "Kinematic"]
     private let shapeTypes = ["Box", "Sphere", "Capsule", "Mesh"]
     private let combineModes = ["Average", "Min", "Multiply", "Max"]
@@ -2311,7 +2287,7 @@ struct MaterialInspector: View {
     @State private var showMaterialImporter: Bool = false
     @State private var isEnginePlane: Bool = false
     
-    private let timer = Timer.publish(every: 0.75, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     private var standardTextureSlots: [TextureSlot] {
         [.albedo, .normal, .metallic, .roughness, .ao, .orm, .emission, .height]
@@ -3271,7 +3247,7 @@ struct DecalInspector: View {
     @State private var activeSlot: DecalTextureSlot?
     @State private var showFileImporter: Bool = false
 
-    private let timer = Timer.publish(every: 0.75, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

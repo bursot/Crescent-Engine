@@ -9,7 +9,7 @@ struct AssetBrowserPanel: View {
     @State private var selectedFolderURL: URL?
     @State private var folderTree: FolderNode?
     @State private var expandedFolders: Set<String> = []
-    @State private var gridSize: CGFloat = 160
+    @State private var gridSize: CGFloat = 170
     @State private var isDropping: Bool = false
     @State private var selectedAssetID: UUID?
     @State private var viewMode: AssetViewMode = .grid
@@ -17,6 +17,8 @@ struct AssetBrowserPanel: View {
     @State private var selectedModelOptions = ModelImportOptions()
     @State private var selectedTextureOptions = TextureImportOptions()
     @State private var selectedHdriOptions = HdriImportOptions()
+    @State private var folderSidebarWidth: CGFloat = 252
+    @State private var settingsSidebarWidth: CGFloat = 320
     
     private let modelExtensions = [
         "fbx", "obj", "gltf", "glb", "dae", "blend", "3ds",
@@ -107,7 +109,7 @@ struct AssetBrowserPanel: View {
             HStack(spacing: 8) {
                 Label("Explorer", systemImage: "folder.fill")
                     .labelStyle(.titleAndIcon)
-                    .font(EditorTheme.fontBodyMedium)
+                    .font(EditorTheme.font(size: 13, weight: .semibold))
                     .foregroundColor(EditorTheme.textPrimary)
                 
                 Spacer()
@@ -131,43 +133,68 @@ struct AssetBrowserPanel: View {
                 .buttonStyle(.borderless)
                 .help("Import Assets")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(EditorTheme.panelHeader)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(EditorTheme.panelHeader.opacity(0.72))
             
             Divider()
                 .overlay(EditorTheme.panelStroke)
             
-            HStack(alignment: .top, spacing: 12) {
-                AssetFolderSidebar(
-                    folderTree: folderTree,
-                    selectedFolderURL: $selectedFolderURL,
-                    expandedFolders: $expandedFolders,
-                    editorState: editorState,
-                    onRescan: editorState.rescanAssetRoot,
-                    onSelectRoot: { editorState.pickAssetRoot() }
-                )
-                .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
-                .frame(maxHeight: .infinity)
-                
-                VStack(alignment: .leading, spacing: 12) {
-                    AssetGridPanel(
-                        assets: filteredAssets,
-                        gridSize: $gridSize,
-                        viewMode: $viewMode,
-                        selectedFilter: $selectedFilter,
-                        searchText: $searchText,
-                        selectedAssetID: $selectedAssetID,
-                        isDropping: $isDropping,
-                        assetRootURL: assetsRootURL,
-                        onDrop: handleDrop,
-                        onOpenScene: openSceneAsset,
-                        onReveal: revealInFinder,
-                        onRename: promptRename
+            GeometryReader { geometry in
+                let sidebarWidth = clamped(folderSidebarWidth, min: 220, max: min(360, geometry.size.width * 0.32))
+                let detailsWidth = clamped(settingsSidebarWidth, min: 280, max: min(420, geometry.size.width * 0.34))
+                let showDetailsSidebar = selectedAsset != nil && !selectedAssetGuid.isEmpty && geometry.size.width > 1040
+
+                HStack(alignment: .top, spacing: 0) {
+                    AssetFolderSidebar(
+                        folderTree: folderTree,
+                        selectedFolderURL: $selectedFolderURL,
+                        expandedFolders: $expandedFolders,
+                        editorState: editorState,
+                        onRescan: editorState.rescanAssetRoot,
+                        onSelectRoot: { editorState.pickAssetRoot() }
                     )
+                    .frame(width: sidebarWidth)
+                    .frame(maxHeight: .infinity)
+                    .overlay(alignment: .trailing) {
+                        AssetBrowserResizeHandle(currentValue: sidebarWidth) { startValue, delta in
+                            folderSidebarWidth = clamped(startValue + delta, min: 220, max: min(360, geometry.size.width * 0.32))
+                        }
+                        .offset(x: 6)
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        AssetGridPanel(
+                            assets: filteredAssets,
+                            gridSize: $gridSize,
+                            viewMode: $viewMode,
+                            selectedFilter: $selectedFilter,
+                            searchText: $searchText,
+                            selectedAssetID: $selectedAssetID,
+                            isDropping: $isDropping,
+                            assetRootURL: assetsRootURL,
+                            onDrop: handleDrop,
+                            onOpenScene: openSceneAsset,
+                            onReveal: revealInFinder,
+                            onRename: promptRename
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.leading, 8)
+
+                        if !showDetailsSidebar, let selectedAsset = selectedAsset, !selectedAssetGuid.isEmpty {
+                            AssetImportSettingsPanel(
+                                asset: selectedAsset,
+                                modelOptions: $selectedModelOptions,
+                                textureOptions: $selectedTextureOptions,
+                                hdriOptions: $selectedHdriOptions,
+                                onApply: applySelectedAssetSettings,
+                                onReimport: reimportSelectedAsset
+                            )
+                        }
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    if let selectedAsset = selectedAsset, !selectedAssetGuid.isEmpty {
+                    if showDetailsSidebar, let selectedAsset = selectedAsset, !selectedAssetGuid.isEmpty {
                         AssetImportSettingsPanel(
                             asset: selectedAsset,
                             modelOptions: $selectedModelOptions,
@@ -176,21 +203,16 @@ struct AssetBrowserPanel: View {
                             onApply: applySelectedAssetSettings,
                             onReimport: reimportSelectedAsset
                         )
+                        .frame(width: detailsWidth)
+                        .frame(maxHeight: .infinity, alignment: .top)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxHeight: .infinity, alignment: .top)
             .padding(12)
         }
-        .frame(minHeight: 180)
-        .background(EditorTheme.panelBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-                .allowsHitTesting(false)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(minHeight: 260)
+        .editorPanel()
         .clipped()
         .onAppear {
             reloadFolderTree()
@@ -500,13 +522,13 @@ private struct AssetFolderSidebar: View {
     @ObservedObject var editorState: EditorState
     let onRescan: () -> Void
     let onSelectRoot: () -> Void
-    @State private var showImportOptions: Bool = true
+    @State private var showImportOptions: Bool = false
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Project")
-                    .font(EditorTheme.fontBodyMedium)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("Project", systemImage: "folder.badge.gearshape")
+                    .font(EditorTheme.font(size: 12, weight: .semibold))
                     .foregroundColor(EditorTheme.textPrimary)
                 Spacer()
                 Button("Rescan") {
@@ -515,47 +537,54 @@ private struct AssetFolderSidebar: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            
-            if let tree = folderTree {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
-                        FolderRow(
-                            node: tree,
-                            level: 0,
-                            selectedFolderURL: $selectedFolderURL,
-                            expandedFolders: $expandedFolders
-                        )
+
+            Group {
+                if let tree = folderTree {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            FolderRow(
+                                node: tree,
+                                level: 0,
+                                selectedFolderURL: $selectedFolderURL,
+                                expandedFolders: $expandedFolders
+                            )
+                        }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
+                } else {
+                    Button("Select Folder") {
+                        onSelectRoot()
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .frame(maxHeight: .infinity)
-            } else {
-                Button("Select Folder") {
-                    onSelectRoot()
-                }
-                .buttonStyle(.bordered)
             }
-            
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(8)
+            .background(EditorTheme.surfaceMuted.opacity(0.55))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(EditorTheme.panelStroke, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
             DisclosureGroup(isExpanded: $showImportOptions) {
-                ImportOptionsPanel(editorState: editorState, showHeader: false)
-                    .padding(.top, 6)
+                ScrollView {
+                    ImportOptionsPanel(editorState: editorState, showHeader: false)
+                        .padding(.top, 6)
+                }
+                .frame(maxHeight: 156)
             } label: {
                 HStack {
                     Text("Import Options")
-                        .font(EditorTheme.fontBodyMedium)
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
                     Spacer()
                 }
                 .foregroundColor(EditorTheme.textPrimary)
             }
+            .padding(.horizontal, 2)
         }
-        .padding(10)
-        .background(EditorTheme.surface)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .cornerRadius(10)
+        .padding(8)
+        .editorSection()
     }
     
 }
@@ -644,10 +673,7 @@ private struct AssetGridPanel: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                FilterTabs(selected: $selectedFilter)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                
+            HStack(spacing: 10) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(EditorTheme.fontBody)
@@ -657,10 +683,9 @@ private struct AssetGridPanel: View {
                         .font(EditorTheme.fontBody)
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(EditorTheme.surface)
-                .cornerRadius(8)
-                .frame(width: 200)
+                .padding(.vertical, 8)
+                .editorInput()
+                .frame(minWidth: 180, idealWidth: 220, maxWidth: 250)
                 
                 Picker("", selection: $viewMode) {
                     Image(systemName: "square.grid.2x2").tag(AssetViewMode.grid)
@@ -674,12 +699,15 @@ private struct AssetGridPanel: View {
                     HStack(spacing: 6) {
                         Image(systemName: "rectangle.grid.2x2")
                             .font(EditorTheme.fontCaption)
-                        Slider(value: $gridSize, in: 120...220, step: 10)
-                            .frame(width: 120)
+                        Slider(value: $gridSize, in: 140...260, step: 10)
+                            .frame(width: 150)
                     }
                     .foregroundColor(EditorTheme.textMuted)
                 }
             }
+            
+            FilterTabs(selected: $selectedFilter)
+                .frame(maxWidth: .infinity, alignment: .leading)
             
             ZStack {
                 ScrollView {
@@ -777,12 +805,7 @@ private struct AssetGridPanel: View {
             .onDrop(of: [UTType.fileURL], isTargeted: $isDropping, perform: onDrop)
         }
         .padding(10)
-        .background(EditorTheme.surface)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .cornerRadius(10)
+        .editorSection()
     }
 }
 
@@ -856,12 +879,12 @@ private struct FilterTabs: View {
                             .foregroundColor(selected == filter ? EditorTheme.textPrimary : EditorTheme.textMuted)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(selected == filter ? EditorTheme.surfaceElevated : EditorTheme.surface)
+                            .background(selected == filter ? EditorTheme.surfaceElevated : EditorTheme.surfaceMuted)
                             .overlay(
-                                RoundedRectangle(cornerRadius: 8)
+                                Capsule(style: .continuous)
                                     .stroke(selected == filter ? EditorTheme.textAccent.opacity(0.6) : EditorTheme.panelStroke, lineWidth: 1)
                             )
-                            .cornerRadius(8)
+                            .clipShape(Capsule(style: .continuous))
                     }
                     .buttonStyle(.plain)
                 }
@@ -915,12 +938,7 @@ private struct ImportOptionsPanel: View {
                 .font(EditorTheme.fontBody)
         }
         .padding(10)
-        .background(EditorTheme.panelBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .cornerRadius(10)
+        .editorSection()
     }
     
     private var scaleBinding: Binding<Double> {
@@ -951,6 +969,51 @@ private struct ImportOptionsPanel: View {
             get: { editorState.modelImportOptions.mergeStaticMeshes },
             set: { editorState.modelImportOptions.mergeStaticMeshes = $0 }
         )
+    }
+}
+
+private struct AssetBrowserResizeHandle: View {
+    let currentValue: CGFloat
+    let onDrag: (CGFloat, CGFloat) -> Void
+    @State private var dragStartValue: CGFloat?
+    @State private var isHovering: Bool = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 12)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                updateCursor(hovering)
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let startValue = dragStartValue ?? currentValue
+                        dragStartValue = startValue
+                        onDrag(startValue, value.translation.width)
+                    }
+                    .onEnded { _ in
+                        dragStartValue = nil
+                    }
+            )
+            .onDisappear {
+                if isHovering {
+                    NSCursor.pop()
+                    isHovering = false
+                }
+            }
+    }
+
+    private func updateCursor(_ hovering: Bool) {
+        guard hovering != isHovering else { return }
+        isHovering = hovering
+        if hovering {
+            NSCursor.resizeLeftRight.push()
+        } else {
+            NSCursor.pop()
+        }
     }
 }
 
@@ -1112,12 +1175,12 @@ private struct AssetCard: View {
         }
         .padding(10)
         .frame(width: size)
-        .background(isSelected ? EditorTheme.textAccent.opacity(0.15) : EditorTheme.panelBackground)
+        .background(isSelected ? EditorTheme.textAccent.opacity(0.14) : EditorTheme.surfaceMuted.opacity(0.82))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isSelected ? EditorTheme.textAccent : EditorTheme.panelStroke, lineWidth: 1)
         )
-        .cornerRadius(12)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
             onSelect()
@@ -1307,6 +1370,10 @@ private struct AssetThumbnail: View {
             return "film"
         }
     }
+}
+
+private func clamped(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
+    Swift.max(minValue, Swift.min(maxValue, value))
 }
 
 private struct EmptyAssetState: View {

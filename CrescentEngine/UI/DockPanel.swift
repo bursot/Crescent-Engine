@@ -77,37 +77,44 @@ struct DockPanel: View {
                             .foregroundColor(EditorTheme.textMuted)
                     }
                 }
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        editorState.dockCollapsed.toggle()
+                    }
+                } label: {
+                    Image(systemName: editorState.dockCollapsed ? "chevron.up" : "chevron.down")
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
+                        .foregroundColor(EditorTheme.textMuted)
+                }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(EditorTheme.panelHeader)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(EditorTheme.panelStroke, lineWidth: 1)
-                    .allowsHitTesting(false)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(.vertical, 8)
+            .editorSection()
             .zIndex(1)
             
-            Group {
-                if editorState.showAssets && editorState.showConsole {
-                    ZStack {
+            if !editorState.dockCollapsed {
+                Group {
+                    if editorState.showAssets && editorState.showConsole {
+                        ZStack {
+                            AssetBrowserPanel(editorState: editorState)
+                                .opacity(editorState.dockTab == .assets ? 1 : 0)
+                                .allowsHitTesting(editorState.dockTab == .assets)
+                            ConsolePanel(editorState: editorState)
+                                .opacity(editorState.dockTab == .console ? 1 : 0)
+                                .allowsHitTesting(editorState.dockTab == .console)
+                        }
+                    } else if editorState.showAssets {
                         AssetBrowserPanel(editorState: editorState)
-                            .opacity(editorState.dockTab == .assets ? 1 : 0)
-                            .allowsHitTesting(editorState.dockTab == .assets)
+                    } else if editorState.showConsole {
                         ConsolePanel(editorState: editorState)
-                            .opacity(editorState.dockTab == .console ? 1 : 0)
-                            .allowsHitTesting(editorState.dockTab == .console)
                     }
-                } else if editorState.showAssets {
-                    AssetBrowserPanel(editorState: editorState)
-                } else if editorState.showConsole {
-                    ConsolePanel(editorState: editorState)
                 }
+                .transition(.opacity)
+                .frame(maxHeight: .infinity)
+                .zIndex(0)
             }
-            .transition(.opacity)
-            .frame(maxHeight: .infinity)
-            .zIndex(0)
         }
         .clipped()
     }
@@ -127,14 +134,14 @@ private struct DockTabButton: View {
                 .font(EditorTheme.fontBodyMedium)
         }
         .foregroundColor(isSelected ? EditorTheme.textPrimary : EditorTheme.textMuted)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(isSelected ? EditorTheme.surfaceElevated : EditorTheme.surface)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(isSelected ? EditorTheme.surfaceElevated : EditorTheme.surfaceMuted)
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            Capsule(style: .continuous)
                 .stroke(isSelected ? EditorTheme.textAccent.opacity(0.6) : EditorTheme.panelStroke, lineWidth: 1)
         )
-        .cornerRadius(8)
+        .clipShape(Capsule(style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
             action()

@@ -1986,13 +1986,10 @@ void Renderer::setMetalLayer(void* layer, bool applySize) {
             float width = static_cast<float>(drawableSize.width);
             float height = static_cast<float>(drawableSize.height);
             
-            std::cout << "Metal layer set with size: " << width << "x" << height << std::endl;
-            
             // Only resize if we have valid dimensions
             if (width > 0 && height > 0) {
                 resize(width, height);
             } else {
-                std::cout << "Warning: Metal layer has invalid size, using defaults" << std::endl;
                 m_viewportWidth = 1920.0f;
                 m_viewportHeight = 1080.0f;
             }
@@ -2241,11 +2238,9 @@ void Renderer::setRenderTargetPool(RenderTargetPool pool) {
 void Renderer::resize(float width, float height) {
     // Validate dimensions
     if (width <= 0 || height <= 0) {
-        std::cerr << "Invalid viewport dimensions: " << width << "x" << height << std::endl;
         return;
     }
 
-    std::cout << "Resizing viewport to: " << width << "x" << height << std::endl;
     setViewportSize(width, height, true);
 }
 
@@ -2268,9 +2263,7 @@ void Renderer::setViewportSize(float width, float height, bool updateTargets) {
     float scale = std::max(0.5f, std::min(2.0f, m_qualitySettings.renderScale));
     uint32_t renderWidth = static_cast<uint32_t>(std::max(1.0f, std::round(width * scale)));
     uint32_t renderHeight = static_cast<uint32_t>(std::max(1.0f, std::round(height * scale)));
-    uint32_t targetWidth = std::max(renderWidth, m_renderTargetWidth);
-    uint32_t targetHeight = std::max(renderHeight, m_renderTargetHeight);
-    ensureRenderTargets(targetWidth, targetHeight, m_qualitySettings.msaaSamples, m_sceneColorFormat);
+    ensureRenderTargets(renderWidth, renderHeight, m_qualitySettings.msaaSamples, m_sceneColorFormat);
 }
 
 void Renderer::rebuildSamplerState(int anisotropy) {
@@ -3027,9 +3020,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     m_outputHDR = hdrPost;
     uint32_t renderWidth = static_cast<uint32_t>(std::max(1.0f, std::round(m_viewportWidth * renderScale)));
     uint32_t renderHeight = static_cast<uint32_t>(std::max(1.0f, std::round(m_viewportHeight * renderScale)));
-    uint32_t targetWidth = std::max(renderWidth, m_renderTargetWidth);
-    uint32_t targetHeight = std::max(renderHeight, m_renderTargetHeight);
-    ensureRenderTargets(targetWidth, targetHeight, m_qualitySettings.msaaSamples, desiredColorFormat);
+    ensureRenderTargets(renderWidth, renderHeight, m_qualitySettings.msaaSamples, desiredColorFormat);
     if (fogEnabled) {
         ensureFogVolume(renderWidth, renderHeight, fog.volumetricQuality);
     }
@@ -3773,8 +3764,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
         const auto frustumPlanes = ExtractFrustumPlanes(viewProjectionNoJitter);
         Math::Vector2 screenSize(
-            static_cast<float>(m_depthTexture ? m_depthTexture->width() : targetWidth),
-            static_cast<float>(m_depthTexture ? m_depthTexture->height() : targetHeight)
+            static_cast<float>(m_depthTexture ? m_depthTexture->width() : renderWidth),
+            static_cast<float>(m_depthTexture ? m_depthTexture->height() : renderHeight)
         );
         uint32_t hzbMipCount = std::max(1u, m_hzbMipCount);
 

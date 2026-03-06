@@ -203,6 +203,9 @@ class EditorState: ObservableObject {
     @Published var showHierarchy: Bool = true
     @Published var showAssets: Bool = true
     @Published var showConsole: Bool = true
+    @Published var hierarchyCollapsed: Bool = false
+    @Published var inspectorCollapsed: Bool = false
+    @Published var dockCollapsed: Bool = false
     @Published var dockTab: DockTab = .assets
     @Published var modelImportOptions = ModelImportOptions()
     @Published var autoReimportAssets: Bool = true
@@ -228,7 +231,8 @@ class EditorState: ObservableObject {
     @Published var terrainBrushMaskPath: String = ""
     @Published var terrainBrushAutoNormalize: Bool = true
     
-    private var updateTimer: Timer?
+    private var entityRefreshTimer: Timer?
+    private var selectionRefreshTimer: Timer?
     private var lastEngineSelectionUUIDs: Set<String> = []  // Track engine selection changes
     private var assetRootAccessActive: Bool = false
     private var projectRootAccessActive: Bool = false
@@ -259,8 +263,11 @@ class EditorState: ObservableObject {
         addLog(.info, "Crescent Engine Editor Started")
         addLog(.info, "Initializing Metal Renderer...")
         
-        // Refresh entity list periodically
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Keep selection responsive, but refresh the full hierarchy less aggressively.
+        selectionRefreshTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.refreshSelectionState()
+        }
+        entityRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.25, repeats: true) { [weak self] _ in
             self?.refreshEntityList()
         }
 
@@ -269,7 +276,8 @@ class EditorState: ObservableObject {
     }
     
     deinit {
-        updateTimer?.invalidate()
+        entityRefreshTimer?.invalidate()
+        selectionRefreshTimer?.invalidate()
         hotReloadCancellable?.cancel()
         removeKeyboardMonitors()
         if assetRootAccessActive, let url = assetRootURL {
@@ -306,7 +314,11 @@ class EditorState: ObservableObject {
             }
         }
         
-        // Get ALL selected UUIDs from engine (supports multi-select from viewport)
+        refreshSelectionState()
+    }
+
+    func refreshSelectionState() {
+        let bridge = CrescentEngineBridge.shared()
         let engineSelectionOrder = bridge.getAllSelectedUUIDs()
         let engineSelectedUUIDs = Set(engineSelectionOrder)
         let enginePrimary = engineSelectionOrder.first

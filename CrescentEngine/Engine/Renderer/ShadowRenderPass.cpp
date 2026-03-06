@@ -17,6 +17,12 @@
 
 namespace {
 constexpr bool kShadowDebug = false;
+
+inline float ComputeShadowInstanceCullRadius(const Crescent::Math::Vector3& meshSize) {
+    // Keep a safety margin so dense-instance casters do not pop while camera/cascade moves.
+    float sphereRadius = 0.5f * meshSize.length();
+    return sphereRadius * 1.2f + 0.25f;
+}
 }
 
 #define SHADOW_DEBUG_LOG(expr) do { if (kShadowDebug) { std::cout << expr << std::endl; } } while (0)
@@ -1081,7 +1087,7 @@ void ShadowRenderPass::renderInstancedRange(MTL::CommandBuffer* cmdBuffer,
 
         Math::Vector3 meshCenter = draw.boundsCenter;
         Math::Vector3 meshSize = draw.boundsSize;
-        float baseRadius = 0.5f * meshSize.length() * 0.85f;
+        float baseRadius = ComputeShadowInstanceCullRadius(meshSize);
 
         InstanceCullParamsCPU params{};
         for (int p = 0; p < 6; ++p) {
@@ -1331,7 +1337,7 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
 
         Math::Vector3 meshCenter = draw.boundsCenter;
         Math::Vector3 meshSize = draw.boundsSize;
-        float baseRadius = 0.5f * meshSize.length() * 0.85f;
+        float baseRadius = ComputeShadowInstanceCullRadius(meshSize);
 
         InstanceCullParamsCPU params{};
         for (int p = 0; p < 6; ++p) {

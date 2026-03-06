@@ -8,8 +8,6 @@
 #include "../Scene/Scene.hpp"
 #include "../ECS/Entity.hpp"
 #include "../ECS/Transform.hpp"
-#include <iostream>
-
 namespace Crescent {
 
 GizmoSystem::GizmoSystem()
@@ -33,7 +31,6 @@ GizmoSystem::~GizmoSystem() {
 
 void GizmoSystem::initialize(DebugRenderer* debugRenderer) {
     m_debugRenderer = debugRenderer;
-    std::cout << "Gizmo system initialized" << std::endl;
 }
 
 float GizmoSystem::calculateGizmoScale(const Math::Vector3& gizmoPosition, 
@@ -363,12 +360,6 @@ void GizmoSystem::handleMouseDown(const Math::Vector2& mousePos, const Math::Vec
                 break;
         }
         
-        // Only print once when starting drag
-        static int gizmoActivateCount = 0;
-        if (gizmoActivateCount < 3) {
-            std::cout << "[GIZMO] Activated - Axis: " << (int)hitAxis << " Mode: " << (int)m_mode << std::endl;
-            gizmoActivateCount++;
-        }
     }
 }
 
@@ -378,12 +369,6 @@ void GizmoSystem::handleMouseDrag(const Math::Vector2& mousePos, const Math::Vec
     
     // Calculate mouse delta
     Math::Vector2 mouseDelta = mousePos - m_state.mouseStartPosition;
-    
-    static int dragDebugCount = 0;
-    if (dragDebugCount < 3) {
-        std::cout << "[GIZMO DRAG] Delta: (" << mouseDelta.x << ", " << mouseDelta.y << ")" << std::endl;
-        dragDebugCount++;
-    }
     
     // Apply transformation based on mode
     Transform* transform = entity->getTransform();
@@ -410,10 +395,6 @@ void GizmoSystem::handleMouseDrag(const Math::Vector2& mousePos, const Math::Vec
             }
             
             Math::Vector3 newPos = m_state.dragStartValue + offset;
-            
-            if (dragDebugCount < 3) {
-                std::cout << "[GIZMO] New position: (" << newPos.x << ", " << newPos.y << ", " << newPos.z << ")" << std::endl;
-            }
             
             if (m_snapEnabled) {
                 newPos.x = std::round(newPos.x / m_translateSnap) * m_translateSnap;
@@ -494,11 +475,6 @@ void GizmoSystem::handleMouseDrag(const Math::Vector2& mousePos, const Math::Vec
 }
 
 void GizmoSystem::handleMouseUp() {
-    static int gizmoDeactivateCount = 0;
-    if (m_state.isActive && gizmoDeactivateCount < 3) {
-        std::cout << "[GIZMO] Deactivated" << std::endl;
-        gizmoDeactivateCount++;
-    }
     m_state.isActive = false;
     m_state.activeAxis = GizmoAxis::None;
 }

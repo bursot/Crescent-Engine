@@ -97,19 +97,15 @@ struct HierarchyPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            if !editorState.hierarchyCollapsed {
+                Divider()
+                    .overlay(EditorTheme.panelStroke)
 
-            Divider()
-                .overlay(EditorTheme.panelStroke)
-
-            content
+                content
+            }
         }
-        .frame(minWidth: 200, maxWidth: 320)
-        .background(EditorTheme.panelBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .editorPanel()
         .fileImporter(isPresented: $showModelImporter, allowedContentTypes: modelTypes, allowsMultipleSelection: false) { result in
             handleModelImport(result)
         }
@@ -125,7 +121,7 @@ struct HierarchyPanel: View {
         HStack(spacing: 8) {
             Label("Hierarchy", systemImage: "square.grid.2x2")
                 .labelStyle(.titleAndIcon)
-                .font(EditorTheme.fontBodyMedium)
+                .font(EditorTheme.font(size: 13, weight: .semibold))
                 .foregroundColor(EditorTheme.textPrimary)
 
             Spacer()
@@ -161,10 +157,22 @@ struct HierarchyPanel: View {
             }
             .buttonStyle(.borderless)
             .help("Import Model")
+
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    editorState.hierarchyCollapsed.toggle()
+                }
+            }) {
+                Image(systemName: editorState.hierarchyCollapsed ? "chevron.down" : "chevron.up")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textMuted)
+            }
+            .buttonStyle(.borderless)
+            .help(editorState.hierarchyCollapsed ? "Expand Hierarchy" : "Collapse Hierarchy")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(EditorTheme.panelHeader)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(EditorTheme.panelHeader.opacity(0.72))
     }
 
     private var content: some View {
@@ -172,7 +180,7 @@ struct HierarchyPanel: View {
             searchBar
             hierarchyList
         }
-        .padding(12)
+        .padding(10)
     }
 
     private var searchBar: some View {
@@ -185,9 +193,8 @@ struct HierarchyPanel: View {
                 .font(EditorTheme.fontBody)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(EditorTheme.surface)
-        .cornerRadius(6)
+        .padding(.vertical, 8)
+        .editorInput()
     }
 
     private var hierarchyList: some View {
@@ -260,12 +267,12 @@ struct HierarchyPanel: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(EditorTheme.surface)
+        .background(EditorTheme.surfaceElevated)
         .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.accentColor.opacity(0.6), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(EditorTheme.textAccent.opacity(0.7), lineWidth: 1)
         )
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .foregroundColor(EditorTheme.textPrimary)
     }
 
@@ -521,14 +528,14 @@ struct HierarchyItem: View {
             Spacer()
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
         .padding(.leading, CGFloat(depth) * 14)
         .background(rowBackground)
         .overlay(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(rowStroke, lineWidth: 1)
         )
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(Rectangle())
         .simultaneousGesture(
             TapGesture()
@@ -547,20 +554,20 @@ struct HierarchyItem: View {
 
     private var rowBackground: Color {
         if isDropTarget {
-            return Color.accentColor.opacity(0.18)
+            return EditorTheme.textAccent.opacity(0.22)
         }
         if isSelected {
-            return Color.accentColor.opacity(0.2)
+            return EditorTheme.textAccent.opacity(0.14)
         }
-        return Color.clear
+        return EditorTheme.surfaceMuted.opacity(0.22)
     }
 
     private var rowStroke: Color {
         if isDropTarget {
-            return Color.accentColor
+            return EditorTheme.textAccent
         }
         if isSelected {
-            return Color.accentColor
+            return EditorTheme.textAccent.opacity(0.72)
         }
         return EditorTheme.panelStroke
     }

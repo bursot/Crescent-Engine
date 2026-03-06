@@ -64,11 +64,7 @@ struct MetalView: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: MetalDisplayView, context: Context) {
-        // Handle view updates - resize if needed
         context.coordinator.applyMetalLayerIfNeeded()
-        if nsView.bounds.size.width > 0 && nsView.bounds.size.height > 0 {
-            context.coordinator.handleResize(nsView.bounds.size)
-        }
         nsView.allowsPicking = (viewKind == .scene) && isActive
         nsView.allowsCameraControl = isActive
         nsView.inputDelegate = isActive ? context.coordinator : nil
@@ -97,8 +93,8 @@ struct MetalView: NSViewRepresentable {
         private weak var lastAppliedMetalLayer: CAMetalLayer?
         private var lastDrawableWidth: Float = 0
         private var lastDrawableHeight: Float = 0
+        private var pendingResizeWorkItem: DispatchWorkItem?
         private var lastTime: CFTimeInterval = 0
-        private var statsAccumulator: Float = 0
         private var isEngineInitialized = false
         private let viewKind: RenderViewKind
         private let drivesLoop: Bool
@@ -124,19 +120,14 @@ struct MetalView: NSViewRepresentable {
                 return
             }
             
-            print("Initializing engine with view size: \(metalView.bounds.size)")
-            
             // Initialize engine
             let bridge = CrescentEngineBridge.shared()
             if !Coordinator.engineInitialized {
                 Coordinator.engineInitialized = bridge.initialize()
             }
             if Coordinator.engineInitialized {
-                print("Engine initialized successfully from Swift")
-                
                 // Set metal layer
                 if let metalLayer = metalView.metalLayer {
-                    print("Setting metal layer...")
                     switch viewKind {
                     case .scene:
                         bridge.setSceneMetalLayer(metalLayer)
@@ -155,29 +146,30 @@ struct MetalView: NSViewRepresentable {
                 if drivesLoop {
                     setupDisplayLink()
                 }
-                
-                if drivesLoop {
-                    // Print mouse instructions
-                    print("CONTROLS:")
-                    print("  HOLD RIGHT-CLICK and move mouse to look around")
-                    print("  WASD to move, QE for up/down, Shift to sprint")
-                }
             }
         }
         
         func handleResize(_ size: CGSize) {
+            pendingResizeWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.applyResize(size)
+            }
+            pendingResizeWorkItem = workItem
+
+            let delay: DispatchTimeInterval = metalView?.window?.inLiveResize == true ? .milliseconds(33) : .milliseconds(12)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
+
+        private func applyResize(_ size: CGSize) {
             guard let metalView = metalView else { return }
             guard let bridge = bridge else { return }
 
-            let drawableSize = metalView.metalLayer?.drawableSize ?? .zero
             let scale = metalView.layer?.contentsScale ?? 2.0
-            let expectedWidth = size.width * scale
-            let expectedHeight = size.height * scale
-            let width = Float(max(drawableSize.width, expectedWidth))
-            let height = Float(max(drawableSize.height, expectedHeight))
+            let width = Float(max(1.0, ceil(size.width * scale)))
+            let height = Float(max(1.0, ceil(size.height * scale)))
 
             guard width > 0 && height > 0 else { return }
-            if abs(width - lastDrawableWidth) < 0.5, abs(height - lastDrawableHeight) < 0.5 {
+            if abs(width - lastDrawableWidth) < 2.0, abs(height - lastDrawableHeight) < 2.0 {
                 return
             }
             lastDrawableWidth = width
@@ -213,7 +205,6 @@ struct MetalView: NSViewRepresentable {
                 let link = metalView.displayLink(target: self, selector: #selector(renderFrameFromDisplayLink(_:)))
                 link.add(to: .main, forMode: .common)
                 self.displayLink = link
-                print("Display link started (modern API)")
             } else {
                 // Fallback for older macOS versions
                 var cvDisplayLink: CVDisplayLink?
@@ -229,8 +220,6 @@ struct MetalView: NSViewRepresentable {
                 
                 CVDisplayLinkStart(link)
                 self.displayLink = link
-                
-                print("Display link started (CVDisplayLink)")
             }
         }
         
@@ -248,27 +237,10 @@ struct MetalView: NSViewRepresentable {
             if bridge.tick(deltaTime: deltaTime) {
                 lastTime = currentTime
             }
-
-            if drivesLoop {
-                statsAccumulator += deltaTime
-                if statsAccumulator >= 1.0 {
-                    statsAccumulator = 0
-                    if let stats = bridge.getRenderStats() as? [String: Any] {
-                        let drawCalls = (stats["drawCalls"] as? NSNumber)?.intValue ?? 0
-                        let triangles = (stats["triangles"] as? NSNumber)?.intValue ?? 0
-                        let vertices = (stats["vertices"] as? NSNumber)?.intValue ?? 0
-                        let instanceInput = (stats["instanceInput"] as? NSNumber)?.intValue ?? 0
-                        let instanceVisible = (stats["instanceVisible"] as? NSNumber)?.intValue ?? 0
-                        let frameMs = (stats["frameTimeMs"] as? NSNumber)?.floatValue ?? 0
-                        let fps = frameMs > 0 ? (1000.0 / frameMs) : 0
-                        print(String(format: "[STATS] draws=%d tris=%d verts=%d inst=%d/%d frame=%.2fms (~%.1f fps)",
-                                     drawCalls, triangles, vertices, instanceVisible, instanceInput, frameMs, fps))
-                    }
-                }
-            }
         }
         
         deinit {
+            pendingResizeWorkItem?.cancel()
             removeInputMonitors()
             if #available(macOS 15.0, *) {
                 if let link = displayLink as? CADisplayLink {
@@ -594,8 +566,6 @@ class MetalDisplayView: NSView {
             metalLayer.contentsScale = window?.backingScaleFactor
                 ?? NSScreen.main?.backingScaleFactor
                 ?? 2.0
-            
-            print("Metal layer created with scale: \(metalLayer.contentsScale)")
         }
     }
 
@@ -606,13 +576,12 @@ class MetalDisplayView: NSView {
 
         let scale = metalLayer.contentsScale
         let drawableSize = CGSize(
-            width: newSize.width * scale,
-            height: newSize.height * scale
+            width: ceil(newSize.width * scale),
+            height: ceil(newSize.height * scale)
         )
 
         metalLayer.frame = bounds
         metalLayer.drawableSize = drawableSize
-        print("Setting drawable size: \(drawableSize)")
     }
     
     override func setFrameSize(_ newSize: NSSize) {
@@ -624,9 +593,21 @@ class MetalDisplayView: NSView {
         }
     }
 
+    override func setBoundsSize(_ newSize: NSSize) {
+        super.setBoundsSize(newSize)
+        updateDrawableSize(newSize)
+
+        if newSize.width > 0 && newSize.height > 0 {
+            coordinator?.handleResize(CGSize(width: newSize.width, height: newSize.height))
+        }
+    }
+
     override func layout() {
         super.layout()
         updateDrawableSize(bounds.size)
+        if bounds.size.width > 0 && bounds.size.height > 0 {
+            coordinator?.handleResize(bounds.size)
+        }
     }
     
     override func viewDidMoveToWindow() {
@@ -646,8 +627,6 @@ class MetalDisplayView: NSView {
             
             // Setup mouse tracking
             updateTrackingAreas()
-            
-            print("MetalView added to window - Ready to receive input")
         }
     }
 
@@ -681,8 +660,6 @@ class MetalDisplayView: NSView {
         if let trackingArea = trackingArea {
             addTrackingArea(trackingArea)
         }
-        
-        print("Mouse tracking area updated: \(bounds)")
     }
     
     // MARK: - Keyboard Input
@@ -811,7 +788,6 @@ class MetalDisplayView: NSView {
         // Hide cursor (Unity/Unreal style)
         if allowsCameraControl {
             NSCursor.hide()
-            print("Camera control active - Mouse hidden")
         }
         inputDelegate?.handleMouseButton(1, pressed: true)
     }
@@ -823,7 +799,6 @@ class MetalDisplayView: NSView {
         // Show cursor again
         if allowsCameraControl {
             NSCursor.unhide()
-            print("Camera control released - Mouse visible")
         }
         inputDelegate?.handleMouseButton(1, pressed: false)
     }

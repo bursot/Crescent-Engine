@@ -629,17 +629,16 @@ float sampleShadow(const device ShadowGPUData* shadowData,
 
     if (current < cascadeCount - 1) {
         ShadowGPUData curData = shadowData[shadowIdx + current];
-        ShadowGPUData nextData = shadowData[shadowIdx + current + 1];
 
-        // Keep transition narrow to avoid broad blur bands at boundaries.
+        // Keep a wider transition to reduce visible cascade edge shimmer during camera motion.
         float cascadeRange = max(curData.depthRange.y - curData.depthRange.x, 0.001);
-        float blendFactor = 0.24;
+        float blendFactor = 0.35;
         float blendRange = blendFactor * cascadeRange;
         float blendStart = curData.depthRange.y - blendRange;
 
-        if (viewDepth > blendStart && viewDepth < nextData.depthRange.y) {
+        if (viewDepth > blendStart) {
             cascadeB = current + 1;
-            float t = saturate((viewDepth - blendStart) / blendRange);
+            float t = saturate((viewDepth - blendStart) / max(blendRange, 1e-4));
             blend = smoothstep(0.0, 1.0, t);
         }
     }

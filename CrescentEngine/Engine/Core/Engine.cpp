@@ -38,7 +38,6 @@ Engine::Engine()
     m_selectionSystem = std::make_unique<SelectionSystem>();
     m_gizmoSystem = std::make_unique<GizmoSystem>();
     
-    std::cout << "Selection and Gizmo systems created" << std::endl;
 }
 
 Engine::~Engine() {
@@ -275,7 +274,6 @@ void Engine::render() {
 
         auto* debugRenderer = m_renderer->getDebugRenderer();
         const auto& selection = SelectionSystem::getSelection();
-        static int renderDebugCount = 0;
 
         // Scene view render (editor camera)
         if (renderSceneSurface) {
@@ -284,15 +282,6 @@ void Engine::render() {
             m_renderer->setViewportSize(m_sceneSurface.width, m_sceneSurface.height, true);
             if (debugRenderer) {
                 debugRenderer->clear();
-            }
-
-            if (renderDebugCount < 5) {
-                if (!selection.empty()) {
-                    std::cout << "[RENDER] Drawing gizmo for " << selection.size() << " entities" << std::endl;
-                } else {
-                    std::cout << "[RENDER] No selection, skipping gizmo" << std::endl;
-                }
-                renderDebugCount++;
             }
 
             Camera* sceneCamera = SceneManager::getInstance().getSceneCamera();
@@ -611,13 +600,6 @@ void Engine::setGizmoMode(GizmoMode mode) {
     if (m_gizmoSystem) {
         m_gizmoSystem->setMode(mode);
         
-        const char* modeName = "Unknown";
-        switch (mode) {
-            case GizmoMode::Translate: modeName = "Translate"; break;
-            case GizmoMode::Rotate: modeName = "Rotate"; break;
-            case GizmoMode::Scale: modeName = "Scale"; break;
-        }
-        std::cout << "Gizmo mode: " << modeName << std::endl;
     }
 }
 
@@ -625,7 +607,6 @@ void Engine::setGizmoSpace(GizmoSpace space) {
     m_currentGizmoSpace = space;
     if (m_gizmoSystem) {
         m_gizmoSystem->setSpace(space);
-        std::cout << "Gizmo space: " << (space == GizmoSpace::World ? "World" : "Local") << std::endl;
     }
 }
 

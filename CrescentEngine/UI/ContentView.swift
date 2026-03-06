@@ -5,56 +5,135 @@ import simd
 import Combine
 struct ContentView: View {
     @ObservedObject var editorState: EditorState
+    @State private var hierarchyWidthOverride: CGFloat?
+    @State private var inspectorWidthOverride: CGFloat?
+    @State private var dockHeightOverride: CGFloat?
+
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [EditorTheme.backgroundTop, EditorTheme.backgroundBottom],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
-            
-            RadialGradient(
-                gradient: Gradient(colors: [EditorTheme.textAccent.opacity(0.18), Color.clear]),
-                center: .topTrailing,
-                startRadius: 20,
-                endRadius: 420
-            )
-            .blendMode(.screen)
-            .ignoresSafeArea()
-            
-            VStack(spacing: 0) {
-                EditorToolbar(editorState: editorState)
-                
-                Divider()
-                    .overlay(EditorTheme.panelStroke)
+            EditorTheme.appBackdrop
+                .ignoresSafeArea()
 
-                HStack(spacing: 10) {
-                    HierarchyPanel(editorState: editorState)
-                        .frame(width: 260)
+            GeometryReader { geometry in
+                let metrics = EditorLayoutMetrics(
+                    size: geometry.size,
+                    hierarchyVisible: editorState.showHierarchy,
+                    inspectorVisible: editorState.showInspector
+                )
+                let hierarchyWidth = resolvedHierarchyWidth(metrics: metrics, size: geometry.size)
+                let inspectorWidth = resolvedInspectorWidth(metrics: metrics, size: geometry.size)
+                let dockHeight = resolvedDockHeight(metrics: metrics, size: geometry.size)
 
-                    VStack(spacing: 10) {
-                        SceneViewport(editorState: editorState)
-                            .frame(minHeight: 320)
-                            .layoutPriority(1)
-                        
-                        DockPanel(editorState: editorState)
-                            .frame(height: 340)
-                            .clipped()
+                VStack(spacing: 0) {
+                    EditorToolbar(editorState: editorState)
+                        .padding(.horizontal, metrics.chromeInset)
+                        .padding(.top, metrics.chromeInset)
+                        .padding(.bottom, 6)
+
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [EditorTheme.panelStrokeStrong.opacity(0.9), EditorTheme.panelStroke.opacity(0.15)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(height: 1)
+
+                    HStack(spacing: 0) {
+                        if metrics.showsHierarchy {
+                            HierarchyPanel(editorState: editorState)
+                                .frame(width: hierarchyWidth)
+                                .layoutPriority(0)
+                                .overlay(alignment: .trailing) {
+                                    if !editorState.hierarchyCollapsed {
+                                        PanelResizeHandle(axis: .vertical, currentValue: hierarchyWidth) { startValue, delta in
+                                            hierarchyWidthOverride = clamped(
+                                                startValue + delta,
+                                                min: 220,
+                                                max: max(260, min(geometry.size.width * 0.34, 460))
+                                            )
+                                        }
+                                        .offset(x: metrics.contentSpacing * 0.5)
+                                    }
+                                }
+
+                        }
+
+                        VStack(spacing: 0) {
+                            SceneViewport(editorState: editorState)
+                                .frame(minHeight: metrics.viewportMinHeight)
+                                .layoutPriority(1)
+                                .padding(.leading, metrics.showsHierarchy ? metrics.contentSpacing : 0)
+                                .padding(.trailing, metrics.showsInspector ? metrics.contentSpacing : 0)
+                                .overlay(alignment: .bottom) {
+                                    if !editorState.dockCollapsed {
+                                        PanelResizeHandle(axis: .horizontal, currentValue: dockHeight) { startValue, delta in
+                                            dockHeightOverride = clamped(
+                                                startValue - delta,
+                                                min: 260,
+                                                max: max(340, min(geometry.size.height * 0.58, 620))
+                                            )
+                                        }
+                                        .offset(y: metrics.contentSpacing * 0.5)
+                                    }
+                                }
+
+                            DockPanel(editorState: editorState)
+                                .frame(height: dockHeight)
+                                .clipped()
+                                .padding(.top, metrics.contentSpacing)
+                                .padding(.leading, metrics.showsHierarchy ? metrics.contentSpacing : 0)
+                                .padding(.trailing, metrics.showsInspector ? metrics.contentSpacing : 0)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                        if metrics.showsInspector {
+                            InspectorPanel(editorState: editorState)
+                                .frame(width: inspectorWidth)
+                                .layoutPriority(0)
+                                .overlay(alignment: .leading) {
+                                    if !editorState.inspectorCollapsed {
+                                        PanelResizeHandle(axis: .vertical, currentValue: inspectorWidth) { startValue, delta in
+                                            inspectorWidthOverride = clamped(
+                                                startValue - delta,
+                                                min: 260,
+                                                max: max(300, min(geometry.size.width * 0.36, 500))
+                                            )
+                                        }
+                                        .offset(x: -(metrics.contentSpacing * 0.5))
+                                    }
+                                }
+                        }
                     }
-                    .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
-
-                    InspectorPanel(editorState: editorState)
-                        .frame(width: 320)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(metrics.contentInset)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding([.horizontal, .bottom], 10)
+                .editorShell()
+                .overlay(alignment: .topLeading) {
+                    if !metrics.reduceVisualEffects {
+                        RoundedRectangle(cornerRadius: EditorTheme.shellCornerRadius, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.12), Color.clear],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .padding(1)
+                            .blendMode(.screen)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .padding(metrics.windowInset)
             }
+
             if !editorState.hasProject {
                 ProjectLauncherView(editorState: editorState)
             }
         }
-        .frame(minWidth: 1024, minHeight: 768)
+        .frame(minWidth: 860, minHeight: 640)
         .environment(\.colorScheme, .dark)
         .onAppear {
             EditorTheme.isDark = true
@@ -80,6 +159,30 @@ struct ContentView: View {
             editorState.dockTab = .console
         }
     }
+
+    private func resolvedHierarchyWidth(metrics: EditorLayoutMetrics, size: CGSize) -> CGFloat {
+        if editorState.hierarchyCollapsed {
+            return 220
+        }
+        let maxWidth = max(260, min(size.width * 0.34, 460))
+        return clamped(hierarchyWidthOverride ?? metrics.hierarchyWidth, min: 220, max: maxWidth)
+    }
+
+    private func resolvedInspectorWidth(metrics: EditorLayoutMetrics, size: CGSize) -> CGFloat {
+        if editorState.inspectorCollapsed {
+            return 220
+        }
+        let maxWidth = max(300, min(size.width * 0.36, 500))
+        return clamped(inspectorWidthOverride ?? metrics.inspectorWidth, min: 260, max: maxWidth)
+    }
+
+    private func resolvedDockHeight(metrics: EditorLayoutMetrics, size: CGSize) -> CGFloat {
+        if editorState.dockCollapsed {
+            return 64
+        }
+        let maxHeight = max(340, min(size.height * 0.58, 620))
+        return clamped(dockHeightOverride ?? metrics.dockHeight, min: 260, max: maxHeight)
+    }
 }
 
 struct ProjectLauncherView: View {
@@ -88,16 +191,18 @@ struct ProjectLauncherView: View {
     
     var body: some View {
         ZStack {
-            Color.black.opacity(0.55)
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(Color.black.opacity(0.48))
                 .ignoresSafeArea()
             
             VStack(alignment: .leading, spacing: 16) {
                 Text("CrescentEngine")
-                    .font(EditorTheme.font(size: 24, weight: .bold))
+                    .font(EditorTheme.font(size: 30, weight: .bold))
                     .foregroundColor(EditorTheme.textPrimary)
                 
                 Text("Create a project folder to keep assets, scenes, and settings together.")
-                    .font(EditorTheme.font(size: 12))
+                    .font(EditorTheme.font(size: 13))
                     .foregroundColor(EditorTheme.textMuted)
                 
                 VStack(alignment: .leading, spacing: 8) {
@@ -108,12 +213,7 @@ struct ProjectLauncherView: View {
                         .textFieldStyle(.plain)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                        .background(EditorTheme.surface)
-                        .cornerRadius(8)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-                        )
+                        .editorInput()
                 }
                 
                 HStack(spacing: 12) {
@@ -148,14 +248,9 @@ struct ProjectLauncherView: View {
                     .buttonStyle(.bordered)
                 }
             }
-            .padding(20)
-            .frame(width: 420)
-            .background(EditorTheme.panelBackground)
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(EditorTheme.panelStroke, lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .padding(24)
+            .frame(width: 440)
+            .editorPanel(cornerRadius: 24)
         }
     }
 }
@@ -175,7 +270,7 @@ struct ConsolePanel: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Console")
-                    .font(EditorTheme.fontBodyMedium)
+                    .font(EditorTheme.font(size: 13, weight: .semibold))
                     .foregroundColor(EditorTheme.textPrimary)
                 
                 Spacer()
@@ -190,10 +285,9 @@ struct ConsolePanel: View {
                         .textFieldStyle(.plain)
                         .padding(.vertical, 4)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(EditorTheme.surface)
-                .cornerRadius(4)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .editorInput()
                 
                 Button(action: {
                     editorState.clearConsole()
@@ -205,9 +299,9 @@ struct ConsolePanel: View {
                 .buttonStyle(.borderless)
                 .help("Clear Console")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(EditorTheme.panelHeader)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(EditorTheme.panelHeader.opacity(0.72))
             
             Divider()
                 .overlay(EditorTheme.panelStroke)
@@ -222,7 +316,13 @@ struct ConsolePanel: View {
                     }
                     .padding(10)
                 }
-                .background(EditorTheme.backgroundBottom.opacity(0.75))
+                .background(
+                    LinearGradient(
+                        colors: [EditorTheme.surfaceMuted.opacity(0.82), EditorTheme.backgroundBottom.opacity(0.72)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
                 .onChange(of: editorState.consoleLogs.count) { _ in
                     if let lastLog = editorState.consoleLogs.last {
                         withAnimation {
@@ -232,12 +332,7 @@ struct ConsolePanel: View {
                 }
             }
         }
-        .background(EditorTheme.panelBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .editorPanel(cornerRadius: 18)
     }
 }
 
@@ -282,7 +377,7 @@ struct ViewportPanel: View {
     let onDrop: ([NSItemProvider]) -> Bool
     @State private var viewportSize: CGSize = .zero
     @State private var cameraBasis: CameraBasis = .identity
-    private let cameraTimer = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
+    private let cameraTimer = Timer.publish(every: 0.3, on: .main, in: .common).autoconnect()
 
     private var isActive: Bool {
         switch viewKind {
@@ -293,10 +388,19 @@ struct ViewportPanel: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let headerColor = isActive ? EditorTheme.textAccent.opacity(0.25) : EditorTheme.panelHeader
-            let borderColor = isActive ? EditorTheme.textAccent : EditorTheme.panelStroke
+            let headerColor = isActive ? EditorTheme.textAccent.opacity(0.18) : EditorTheme.panelHeader.opacity(0.82)
+            let borderColor = isActive ? EditorTheme.textAccent.opacity(0.9) : EditorTheme.panelStrokeStrong
 
             let content = ZStack(alignment: .topLeading) {
+                EditorTheme.viewportGradient
+                    .overlay(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.08), Color.clear, Color.black.opacity(0.18)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+
                 MetalView(
                     viewKind: viewKind,
                     isActive: isActive,
@@ -315,7 +419,7 @@ struct ViewportPanel: View {
 
                 HStack(spacing: 10) {
                     Label(title, systemImage: systemImage)
-                        .font(EditorTheme.fontBodyMedium)
+                        .font(EditorTheme.font(size: 13, weight: .semibold))
 
                     Text("\(Int(viewportSize.width)) x \(Int(viewportSize.height))")
                         .font(EditorTheme.fontMono)
@@ -328,11 +432,15 @@ struct ViewportPanel: View {
                     }
 
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
                 .background(headerColor)
-                .cornerRadius(6)
-                .padding(10)
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(isActive ? EditorTheme.textAccent.opacity(0.4) : EditorTheme.panelStroke, lineWidth: 1)
+                )
+                .clipShape(Capsule(style: .continuous))
+                .padding(14)
                 .allowsHitTesting(false)
 
                 if viewKind == .game && editorState.isPlaying {
@@ -360,20 +468,20 @@ struct ViewportPanel: View {
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
-                    .background(EditorTheme.panelBackground.opacity(0.9))
+                    .background(EditorTheme.surfaceElevated.opacity(0.9))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .stroke(EditorTheme.textAccent.opacity(0.8), lineWidth: 1)
                     )
-                    .cornerRadius(6)
-                    .padding(10)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(14)
                     .padding(.top, 36)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .allowsHitTesting(false)
                 }
 
                 if allowsDrop && isDropping {
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(EditorTheme.textAccent, style: StrokeStyle(lineWidth: 2, dash: [6]))
                         .background(EditorTheme.textAccent.opacity(0.08))
                 }
@@ -381,12 +489,16 @@ struct ViewportPanel: View {
 
             let styled = content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(EditorTheme.panelBackground)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(borderColor, lineWidth: 1)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .inset(by: 1)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .onTapGesture {
                     if editorState.isPlaying {
                         return
@@ -411,7 +523,9 @@ struct ViewportPanel: View {
             refreshCameraBasis()
         }
         .onReceive(cameraTimer) { _ in
-            refreshCameraBasis()
+            if isActive {
+                refreshCameraBasis()
+            }
         }
     }
 
@@ -593,28 +707,23 @@ struct ViewportTabBar: View {
                     Label(mode.label, systemImage: mode.systemImage)
                         .font(EditorTheme.fontBodyMedium)
                         .foregroundColor(isActive ? EditorTheme.textPrimary : EditorTheme.textMuted)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(isActive ? EditorTheme.surfaceElevated : EditorTheme.surface)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(isActive ? EditorTheme.surfaceElevated : EditorTheme.surfaceMuted)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            Capsule(style: .continuous)
                                 .stroke(isActive ? EditorTheme.textAccent : EditorTheme.panelStroke, lineWidth: 1)
                         )
-                        .cornerRadius(8)
+                        .clipShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
 
             Spacer()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(EditorTheme.panelHeader)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(EditorTheme.panelStroke, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .editorSection()
     }
 }
 
@@ -714,6 +823,112 @@ struct SceneViewport: View {
     private func isHDRIFile(_ url: URL) -> Bool {
         hdriExtensions.contains(url.pathExtension.lowercased())
     }
+}
+
+private struct EditorLayoutMetrics {
+    let showsHierarchy: Bool
+    let showsInspector: Bool
+    let reduceVisualEffects: Bool
+    let windowInset: CGFloat
+    let chromeInset: CGFloat
+    let contentInset: CGFloat
+    let contentSpacing: CGFloat
+    let hierarchyWidth: CGFloat
+    let inspectorWidth: CGFloat
+    let dockHeight: CGFloat
+    let viewportMinHeight: CGFloat
+
+    init(size: CGSize, hierarchyVisible: Bool, inspectorVisible: Bool) {
+        let compactWidth = size.width < 1360
+        let narrowWidth = size.width < 1180
+
+        showsInspector = inspectorVisible && !narrowWidth
+        showsHierarchy = hierarchyVisible && size.width >= 1080
+        reduceVisualEffects = compactWidth
+        windowInset = clamped(size.width * 0.008, min: 6, max: 12)
+        chromeInset = clamped(size.width * 0.006, min: 6, max: 10)
+        contentInset = clamped(size.width * 0.008, min: 6, max: 10)
+        contentSpacing = clamped(size.width * 0.006, min: 6, max: 10)
+
+        let fullWidth = max(size.width - (windowInset * 2) - (contentInset * 2), 640)
+        let sideFraction = fullWidth > 1500 ? 0.19 : 0.21
+        hierarchyWidth = showsHierarchy ? clamped(fullWidth * (compactWidth ? 0.18 : sideFraction), min: 220, max: 320) : 0
+        inspectorWidth = showsInspector ? clamped(fullWidth * (compactWidth ? 0.2 : sideFraction), min: 260, max: 360) : 0
+        dockHeight = clamped(size.height * (compactWidth ? 0.34 : 0.38), min: 300, max: 440)
+        viewportMinHeight = clamped(size.height * (compactWidth ? 0.33 : 0.35), min: 250, max: 420)
+    }
+}
+
+private struct PanelResizeHandle: View {
+    enum Axis {
+        case vertical
+        case horizontal
+    }
+
+    let axis: Axis
+    let currentValue: CGFloat
+    let onDrag: (CGFloat, CGFloat) -> Void
+    @State private var dragStartValue: CGFloat?
+    @State private var isHovering: Bool = false
+
+    var body: some View {
+        Group {
+            if axis == .vertical {
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(width: 12)
+                    .frame(maxHeight: .infinity)
+            } else {
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(height: 12)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            updateCursor(hovering)
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let startValue = dragStartValue ?? currentValue
+                    dragStartValue = startValue
+                    switch axis {
+                    case .vertical:
+                        onDrag(startValue, value.translation.width)
+                    case .horizontal:
+                        onDrag(startValue, value.translation.height)
+                    }
+                }
+                .onEnded { _ in
+                    dragStartValue = nil
+                }
+        )
+        .onDisappear {
+            if isHovering {
+                NSCursor.pop()
+                isHovering = false
+            }
+        }
+    }
+
+    private func updateCursor(_ hovering: Bool) {
+        guard hovering != isHovering else { return }
+        isHovering = hovering
+        switch (axis, hovering) {
+        case (.vertical, true):
+            NSCursor.resizeLeftRight.push()
+        case (.horizontal, true):
+            NSCursor.resizeUpDown.push()
+        case (_, false):
+            NSCursor.pop()
+        }
+    }
+}
+
+private func clamped(_ value: CGFloat, min minValue: CGFloat, max maxValue: CGFloat) -> CGFloat {
+    Swift.max(minValue, Swift.min(maxValue, value))
 }
 
 #Preview {
