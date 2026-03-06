@@ -185,13 +185,15 @@ struct TerrainPaintConfig: Equatable {
     var hardness: Float = 0.65
     var strength: Float = 0.35
     var spacing: Float = 0.25
+    var maskPreset: Int = 0
+    var maskPath: String = ""
     var autoNormalize: Bool = true
 }
 
 // Editor state - Observable object to manage editor state
 class EditorState: ObservableObject {
     @Published var selectedEntityUUIDs: Set<String> = []  // Swift manages multi-selection
-    var primarySelectionUUID: String? { selectedEntityUUIDs.first }
+    @Published var primarySelectionUUID: String? = nil
     @Published var entityList: [EntityInfo] = []
     @Published var assets: [AssetInfo] = []
     @Published var assetRootURL: URL?
@@ -222,6 +224,8 @@ class EditorState: ObservableObject {
     @Published var terrainBrushHardness: Float = 0.65
     @Published var terrainBrushStrength: Float = 0.35
     @Published var terrainBrushSpacing: Float = 0.25
+    @Published var terrainBrushMaskPreset: Int = 0
+    @Published var terrainBrushMaskPath: String = ""
     @Published var terrainBrushAutoNormalize: Bool = true
     
     private var updateTimer: Timer?
@@ -244,6 +248,8 @@ class EditorState: ObservableObject {
             hardness: terrainBrushHardness,
             strength: terrainBrushStrength,
             spacing: terrainBrushSpacing,
+            maskPreset: terrainBrushMaskPreset,
+            maskPath: terrainBrushMaskPath,
             autoNormalize: terrainBrushAutoNormalize
         )
     }
@@ -295,15 +301,21 @@ class EditorState: ObservableObject {
             // Remove deleted entities from selection
             let validUUIDs = Set(entityList.map { $0.uuid })
             selectedEntityUUIDs = selectedEntityUUIDs.filter { validUUIDs.contains($0) }
+            if let primary = primarySelectionUUID, !selectedEntityUUIDs.contains(primary) {
+                primarySelectionUUID = pickPrimarySelection(from: selectedEntityUUIDs)
+            }
         }
         
         // Get ALL selected UUIDs from engine (supports multi-select from viewport)
-        let engineSelectedUUIDs = Set(bridge.getAllSelectedUUIDs() as? [String] ?? [])
+        let engineSelectionOrder = bridge.getAllSelectedUUIDs()
+        let engineSelectedUUIDs = Set(engineSelectionOrder)
+        let enginePrimary = engineSelectionOrder.first
         
         // If engine selection changed, sync to Swift
-        if engineSelectedUUIDs != lastEngineSelectionUUIDs {
+        if engineSelectedUUIDs != lastEngineSelectionUUIDs || enginePrimary != primarySelectionUUID {
             lastEngineSelectionUUIDs = engineSelectedUUIDs
             selectedEntityUUIDs = engineSelectedUUIDs
+            primarySelectionUUID = enginePrimary
         }
         // If engine selection didn't change, keep Swift selection as-is
     }
@@ -312,11 +324,16 @@ class EditorState: ObservableObject {
         if toggle {
             if selectedEntityUUIDs.contains(uuid) {
                 selectedEntityUUIDs.remove(uuid)
+                if primarySelectionUUID == uuid {
+                    primarySelectionUUID = pickPrimarySelection(from: selectedEntityUUIDs)
+                }
             } else {
                 selectedEntityUUIDs.insert(uuid)
+                primarySelectionUUID = uuid
             }
         } else {
             selectedEntityUUIDs = [uuid]
+            primarySelectionUUID = uuid
         }
         
         syncSelectionToEngine()
@@ -336,6 +353,7 @@ class EditorState: ObservableObject {
         let joined = names.joined(separator: ", ")
         addLog(.warning, "Deleted: \(joined)")
         selectedEntityUUIDs = []
+        primarySelectionUUID = nil
         refreshEntityList()
     }
 
@@ -343,22 +361,27 @@ class EditorState: ObservableObject {
         guard !selectedEntityUUIDs.isEmpty else { return }
 
         let uuids = Array(selectedEntityUUIDs)
-        let duplicated = CrescentEngineBridge.shared().duplicateEntities(uuids: uuids) as? [String] ?? []
+        let duplicated = CrescentEngineBridge.shared().duplicateEntities(uuids: uuids)
         refreshEntityList()
         if !duplicated.isEmpty {
             selectedEntityUUIDs = Set(duplicated)
+            primarySelectionUUID = duplicated.first
             syncSelectionToEngine()
             addLog(.info, "Duplicated \(duplicated.count) object(s)")
         }
     }
     
     private func syncSelectionToEngine() {
-        let uuids = Array(selectedEntityUUIDs)
+        let uuids = orderedSelectionUUIDs()
         
         if uuids.isEmpty {
             CrescentEngineBridge.shared().clearSelection()
             lastEngineSelectionUUIDs = []  // Update tracker
+            primarySelectionUUID = nil
         } else {
+            if primarySelectionUUID == nil || !selectedEntityUUIDs.contains(primarySelectionUUID ?? "") {
+                primarySelectionUUID = uuids.first
+            }
             CrescentEngineBridge.shared().setSelection(uuids: uuids)
             lastEngineSelectionUUIDs = selectedEntityUUIDs  // Update tracker
             
@@ -373,6 +396,31 @@ class EditorState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func orderedSelectionUUIDs() -> [String] {
+        guard !selectedEntityUUIDs.isEmpty else { return [] }
+        var ordered: [String] = []
+        if let primary = primarySelectionUUID, selectedEntityUUIDs.contains(primary) {
+            ordered.append(primary)
+        }
+        for entity in entityList where selectedEntityUUIDs.contains(entity.uuid) {
+            if entity.uuid != primarySelectionUUID {
+                ordered.append(entity.uuid)
+            }
+        }
+        if ordered.count < selectedEntityUUIDs.count {
+            let missing = selectedEntityUUIDs.subtracting(Set(ordered)).sorted()
+            ordered.append(contentsOf: missing)
+        }
+        return ordered
+    }
+
+    private func pickPrimarySelection(from selection: Set<String>) -> String? {
+        for entity in entityList where selection.contains(entity.uuid) {
+            return entity.uuid
+        }
+        return selection.first
     }
     
     // Console methods

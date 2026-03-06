@@ -50,6 +50,8 @@ struct MetalView: NSViewRepresentable {
         metalView.terrainBrushHardness = terrainPaintConfig.hardness
         metalView.terrainBrushStrength = terrainPaintConfig.strength
         metalView.terrainBrushSpacing = terrainPaintConfig.spacing
+        metalView.terrainBrushMaskPreset = terrainPaintConfig.maskPreset
+        metalView.terrainBrushMaskPath = terrainPaintConfig.maskPath
         metalView.terrainBrushAutoNormalize = terrainPaintConfig.autoNormalize
         context.coordinator.metalView = metalView
         
@@ -77,6 +79,8 @@ struct MetalView: NSViewRepresentable {
         nsView.terrainBrushHardness = terrainPaintConfig.hardness
         nsView.terrainBrushStrength = terrainPaintConfig.strength
         nsView.terrainBrushSpacing = terrainPaintConfig.spacing
+        nsView.terrainBrushMaskPreset = terrainPaintConfig.maskPreset
+        nsView.terrainBrushMaskPath = terrainPaintConfig.maskPath
         nsView.terrainBrushAutoNormalize = terrainPaintConfig.autoNormalize
         context.coordinator.setInputMonitoring(active: isActive)
         if isActive, let window = nsView.window, window.firstResponder !== nsView {
@@ -330,6 +334,8 @@ struct MetalView: NSViewRepresentable {
                                hardness: Float,
                                strength: Float,
                                spacing: Float,
+                               maskPreset: Int,
+                               maskPath: String,
                                autoNormalize: Bool,
                                invert: Bool) {
             guard let metalView = metalView else { return }
@@ -349,6 +355,8 @@ struct MetalView: NSViewRepresentable {
                 hardness: hardness,
                 strength: strength,
                 spacing: spacing,
+                maskPreset: maskPreset,
+                maskPath: maskPath,
                 autoNormalize: autoNormalize,
                 invert: invert
             )
@@ -362,6 +370,8 @@ struct MetalView: NSViewRepresentable {
                                 hardness: Float,
                                 strength: Float,
                                 spacing: Float,
+                                maskPreset: Int,
+                                maskPath: String,
                                 autoNormalize: Bool,
                                 invert: Bool) {
             guard let metalView = metalView else { return }
@@ -381,13 +391,47 @@ struct MetalView: NSViewRepresentable {
                 hardness: hardness,
                 strength: strength,
                 spacing: spacing,
+                maskPreset: maskPreset,
+                maskPath: maskPath,
                 autoNormalize: autoNormalize,
                 invert: invert
             )
         }
 
+        func updateTerrainBrushPreview(at point: CGPoint,
+                                       viewSize: CGSize,
+                                       entityUUID: String,
+                                       layer: Int,
+                                       radius: Float,
+                                       hardness: Float,
+                                       maskPreset: Int,
+                                       maskPath: String) {
+            guard let metalView = metalView else { return }
+            let scale = metalView.layer?.contentsScale ?? 2.0
+            let x = Float(point.x * scale)
+            let y = Float(point.y * scale)
+            let width = Float(viewSize.width * scale)
+            let height = Float(viewSize.height * scale)
+            bridge?.updateTerrainBrushPreview(
+                entity: entityUUID,
+                x: x,
+                y: y,
+                screenWidth: width,
+                screenHeight: height,
+                layer: layer,
+                radius: radius,
+                hardness: hardness,
+                maskPreset: maskPreset,
+                maskPath: maskPath
+            )
+        }
+
         func endTerrainPaint() {
             bridge?.endTerrainPaint()
+        }
+
+        func clearTerrainBrushPreview() {
+            bridge?.clearTerrainBrushPreview()
         }
 
         func setInputMonitoring(active: Bool) {
@@ -492,6 +536,7 @@ class MetalDisplayView: NSView {
         didSet {
             if oldValue && !terrainPaintEnabled {
                 coordinator?.endTerrainPaint()
+                coordinator?.clearTerrainBrushPreview()
             }
         }
     }
@@ -499,6 +544,7 @@ class MetalDisplayView: NSView {
         didSet {
             if oldValue != terrainPaintTargetUUID {
                 coordinator?.endTerrainPaint()
+                coordinator?.clearTerrainBrushPreview()
             }
         }
     }
@@ -507,6 +553,8 @@ class MetalDisplayView: NSView {
     var terrainBrushHardness: Float = 0.65
     var terrainBrushStrength: Float = 0.35
     var terrainBrushSpacing: Float = 0.25
+    var terrainBrushMaskPreset: Int = 0
+    var terrainBrushMaskPath: String = ""
     var terrainBrushAutoNormalize: Bool = true
     private var trackingArea: NSTrackingArea?
     private var isRightMouseDown: Bool = false
@@ -624,6 +672,7 @@ class MetalDisplayView: NSView {
         // Create new tracking area with proper options
         let options: NSTrackingArea.Options = [
             .mouseMoved,
+            .mouseEnteredAndExited,
             .activeAlways,
             .inVisibleRect,
             .enabledDuringMouseDrag
@@ -670,6 +719,8 @@ class MetalDisplayView: NSView {
                 hardness: terrainBrushHardness,
                 strength: terrainBrushStrength,
                 spacing: terrainBrushSpacing,
+                maskPreset: terrainBrushMaskPreset,
+                maskPath: terrainBrushMaskPath,
                 autoNormalize: terrainBrushAutoNormalize,
                 invert: invert
             )
@@ -688,6 +739,16 @@ class MetalDisplayView: NSView {
         if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty && isLeftMouseDown {
             let point = convert(event.locationInWindow, from: nil)
             let invert = event.modifierFlags.contains(.option)
+            coordinator?.updateTerrainBrushPreview(
+                at: point,
+                viewSize: bounds.size,
+                entityUUID: terrainPaintTargetUUID,
+                layer: terrainPaintLayer,
+                radius: terrainBrushRadius,
+                hardness: terrainBrushHardness,
+                maskPreset: terrainBrushMaskPreset,
+                maskPath: terrainBrushMaskPath
+            )
             coordinator?.updateTerrainPaint(
                 at: point,
                 viewSize: bounds.size,
@@ -697,6 +758,8 @@ class MetalDisplayView: NSView {
                 hardness: terrainBrushHardness,
                 strength: terrainBrushStrength,
                 spacing: terrainBrushSpacing,
+                maskPreset: terrainBrushMaskPreset,
+                maskPath: terrainBrushMaskPath,
                 autoNormalize: terrainBrushAutoNormalize,
                 invert: invert
             )
@@ -719,6 +782,25 @@ class MetalDisplayView: NSView {
         inputDelegate?.handleMouseButton(0, pressed: false)
         guard allowsPicking else { return }
         coordinator?.handleMouseUpEvent()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard terrainPaintEnabled, !terrainPaintTargetUUID.isEmpty else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        coordinator?.updateTerrainBrushPreview(
+            at: point,
+            viewSize: bounds.size,
+            entityUUID: terrainPaintTargetUUID,
+            layer: terrainPaintLayer,
+            radius: terrainBrushRadius,
+            hardness: terrainBrushHardness,
+            maskPreset: terrainBrushMaskPreset,
+            maskPath: terrainBrushMaskPath
+        )
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        coordinator?.clearTerrainBrushPreview()
     }
     
     override func rightMouseDown(with event: NSEvent) {

@@ -2726,6 +2726,7 @@ struct MaterialInspector: View {
                             editorState.terrainPaintEnabled = enabled
                             if !enabled {
                                 CrescentEngineBridge.shared().endTerrainPaint()
+                                CrescentEngineBridge.shared().clearTerrainBrushPreview()
                             }
                         })) {
                         Text("Terrain Paint Mode")
@@ -2749,9 +2750,62 @@ struct MaterialInspector: View {
                     SliderRow(title: "Brush Strength", value: $editorState.terrainBrushStrength, range: 0.01...1.0, step: 0.01, tint: .orange) { _ in }
                     SliderRow(title: "Brush Spacing", value: $editorState.terrainBrushSpacing, range: 0.05...1.0, step: 0.01, tint: .orange) { _ in }
 
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Brush Mask")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                            .foregroundColor(EditorTheme.textPrimary)
+                        Picker("", selection: $editorState.terrainBrushMaskPreset) {
+                            Text("Soft Round").tag(0)
+                            Text("Hard Round").tag(1)
+                            Text("Noisy Splat").tag(2)
+                            Text("Soft Square").tag(3)
+                            Text("Custom Alpha").tag(4)
+                        }
+                        .pickerStyle(.menu)
+                        .font(EditorTheme.font(size: 11, weight: .regular))
+                    }
+
+                    if editorState.terrainBrushMaskPreset == 4 {
+                        HStack(spacing: 8) {
+                            Text(editorState.terrainBrushMaskPath.isEmpty
+                                 ? "No custom mask selected"
+                                 : URL(fileURLWithPath: editorState.terrainBrushMaskPath).lastPathComponent)
+                                .font(EditorTheme.font(size: 10, weight: .regular))
+                                .foregroundColor(EditorTheme.textMuted)
+                                .lineLimit(1)
+                            Spacer()
+                            Button("Load") {
+                                openTerrainBrushMaskPanel()
+                            }
+                            .buttonStyle(.bordered)
+                            .font(EditorTheme.font(size: 10, weight: .semibold))
+                            Button("Clear") {
+                                editorState.terrainBrushMaskPath = ""
+                            }
+                            .buttonStyle(.bordered)
+                            .font(EditorTheme.font(size: 10, weight: .semibold))
+                        }
+                    }
+
                     Toggle(isOn: $editorState.terrainBrushAutoNormalize) {
                         Text("Weight Normalize (Unreal Style)")
                             .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Undo Paint") {
+                            _ = CrescentEngineBridge.shared().undoTerrainPaint(entity: entityUUID)
+                            refreshMaterial()
+                        }
+                        .buttonStyle(.bordered)
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
+
+                        Button("Redo Paint") {
+                            _ = CrescentEngineBridge.shared().redoTerrainPaint(entity: entityUUID)
+                            refreshMaterial()
+                        }
+                        .buttonStyle(.bordered)
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
                     }
 
                     Text("Viewport: left-drag paints, Option erases.")
@@ -2899,6 +2953,7 @@ struct MaterialInspector: View {
         if !isEnginePlane && editorState.terrainPaintEnabled {
             editorState.terrainPaintEnabled = false
             CrescentEngineBridge.shared().endTerrainPaint()
+            CrescentEngineBridge.shared().clearTerrainBrushPreview()
         }
         
         if let tilingVals = info["tiling"] as? [NSNumber], tilingVals.count >= 2 {
@@ -3032,6 +3087,47 @@ struct MaterialInspector: View {
 
     private func handleTextureDrop(_ url: URL, slot: TextureSlot) {
         applyTextureURL(url, slot: slot)
+    }
+
+    private func openTerrainBrushMaskPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Terrain Brush Mask"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        if panel.runModal() != .OK || panel.urls.isEmpty {
+            return
+        }
+
+        var resolvedURL = panel.urls[0]
+        let accessed = resolvedURL.startAccessingSecurityScopedResource()
+        if accessed {
+            resolvedURL = resolvedURL.standardizedFileURL
+        }
+        defer {
+            if accessed {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let ext = resolvedURL.pathExtension.lowercased()
+        if !textureExtensions.contains(ext) {
+            return
+        }
+
+        var path = resolvedURL.path
+        if !FileManager.default.fileExists(atPath: path) {
+            return
+        }
+
+        let imported = CrescentEngineBridge.shared().importAsset(path: path, type: "texture")
+        if !imported.isEmpty {
+            path = imported
+        }
+
+        editorState.terrainBrushMaskPreset = 4
+        editorState.terrainBrushMaskPath = path
     }
 
     private func applyTextureURL(_ url: URL, slot: TextureSlot) {

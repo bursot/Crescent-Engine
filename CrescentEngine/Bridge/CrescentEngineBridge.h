@@ -77,8 +77,10 @@ NS_ASSUME_NONNULL_BEGIN
                            hardness:(float)hardness
                            strength:(float)strength
                             spacing:(float)spacing
+                          maskPreset:(NSInteger)maskPreset
+                            maskPath:(NSString * _Nullable)maskPath
                       autoNormalize:(BOOL)autoNormalize
-                             invert:(BOOL)invert NS_SWIFT_NAME(beginTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:autoNormalize:invert:));
+                             invert:(BOOL)invert NS_SWIFT_NAME(beginTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:maskPreset:maskPath:autoNormalize:invert:));
 - (void)updateTerrainPaintForEntity:(NSString *)uuid
                                    x:(float)x
                                    y:(float)y
@@ -89,9 +91,24 @@ NS_ASSUME_NONNULL_BEGIN
                             hardness:(float)hardness
                             strength:(float)strength
                              spacing:(float)spacing
+                           maskPreset:(NSInteger)maskPreset
+                             maskPath:(NSString * _Nullable)maskPath
                        autoNormalize:(BOOL)autoNormalize
-                              invert:(BOOL)invert NS_SWIFT_NAME(updateTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:autoNormalize:invert:));
+                              invert:(BOOL)invert NS_SWIFT_NAME(updateTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:maskPreset:maskPath:autoNormalize:invert:));
 - (void)endTerrainPaint NS_SWIFT_NAME(endTerrainPaint());
+- (void)updateTerrainBrushPreviewForEntity:(NSString *)uuid
+                                         x:(float)x
+                                         y:(float)y
+                               screenWidth:(float)width
+                              screenHeight:(float)height
+                                     layer:(NSInteger)layer
+                                    radius:(float)radius
+                                  hardness:(float)hardness
+                                 maskPreset:(NSInteger)maskPreset
+                                   maskPath:(NSString * _Nullable)maskPath NS_SWIFT_NAME(updateTerrainBrushPreview(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:maskPreset:maskPath:));
+- (void)clearTerrainBrushPreview NS_SWIFT_NAME(clearTerrainBrushPreview());
+- (BOOL)undoTerrainPaintForEntity:(NSString *)uuid NS_SWIFT_NAME(undoTerrainPaint(entity:));
+- (BOOL)redoTerrainPaintForEntity:(NSString *)uuid NS_SWIFT_NAME(redoTerrainPaint(entity:));
 
 // Gizmo controls
 - (void)setGizmoMode:(int)mode; // 0=Translate, 1=Rotate, 2=Scale

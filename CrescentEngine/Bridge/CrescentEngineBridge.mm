@@ -48,6 +48,7 @@
 #include <filesystem>
 #include <unordered_map>
 #include <vector>
+#include <cstring>
 
 using namespace Crescent;
 static const void* kEngineQueueKey = &kEngineQueueKey;
@@ -607,9 +608,45 @@ struct TerrainBrushParams {
     float hardness = 0.7f;
     float strength = 0.5f;
     float spacing = 0.25f;
+    int maskPreset = 0;
+    std::string maskPath;
     bool autoNormalize = true;
     bool invert = false;
 };
+
+struct TerrainPaintHistoryState {
+    std::string texturePath;
+    int width = 0;
+    int height = 0;
+    std::vector<std::vector<unsigned char>> undoStack;
+    std::vector<std::vector<unsigned char>> redoStack;
+};
+
+struct TerrainBrushMaskImage {
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> alpha;
+    bool valid = false;
+};
+
+struct TerrainBrushMaskSampler {
+    int preset = 0;
+    bool squareDomain = false;
+    const TerrainBrushMaskImage* customImage = nullptr;
+};
+
+struct TerrainBrushPreviewState {
+    std::string entityUUID;
+    std::shared_ptr<Texture2D> texture;
+    int layer = -1;
+    float hardness = -1.0f;
+    int maskPreset = -1;
+    std::string maskPath;
+};
+
+static constexpr int kTerrainBrushMaskPresetCustom = 4;
+static constexpr size_t kTerrainPaintUndoLimit = 24;
+static constexpr int kTerrainBrushPreviewTextureSize = 128;
 
 static bool ResolveTerrainPaintTarget(const std::string& entityUUID, TerrainPaintTarget& outTarget) {
     MaterialBinding binding = GetMaterialBindingForEntityUUID(entityUUID);
@@ -657,6 +694,31 @@ static bool LoadRGBA8Image(const std::string& path,
     return true;
 }
 
+static bool LoadMaskAlphaImage(const std::string& path,
+                               TerrainBrushMaskImage& outImage) {
+    outImage = TerrainBrushMaskImage{};
+    if (path.empty()) {
+        return false;
+    }
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_set_flip_vertically_on_load(0);
+    stbi_uc* raw = stbi_load(path.c_str(), &width, &height, &channels, STBI_grey);
+    if (!raw || width <= 0 || height <= 0) {
+        if (raw) {
+            stbi_image_free(raw);
+        }
+        return false;
+    }
+    outImage.width = width;
+    outImage.height = height;
+    outImage.alpha.assign(raw, raw + static_cast<size_t>(width) * static_cast<size_t>(height));
+    outImage.valid = true;
+    stbi_image_free(raw);
+    return true;
+}
+
 static bool SaveRGBA8Image(const std::string& path,
                            const std::vector<unsigned char>& pixels,
                            int width,
@@ -692,6 +754,200 @@ static std::string BuildTerrainControlTexturePath(Entity* entity) {
     std::filesystem::path path = std::filesystem::path(base) / "Generated" / "TerrainControl";
     path /= safeName + "_" + uuidStr + "_control.png";
     return path.lexically_normal().string();
+}
+
+static float SmoothStep(float edge0, float edge1, float x) {
+    if (edge0 == edge1) {
+        return x < edge0 ? 0.0f : 1.0f;
+    }
+    float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float HashNoise2D(int x, int y) {
+    uint32_t h = 2166136261u;
+    h ^= static_cast<uint32_t>(x) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= static_cast<uint32_t>(y) + 0x85ebca6bu + (h << 6) + (h >> 2);
+    h *= 16777619u;
+    return static_cast<float>(h & 0x00ffffffu) / 16777215.0f;
+}
+
+static float SampleMaskImageBilinear(const TerrainBrushMaskImage& image,
+                                     float u,
+                                     float v) {
+    if (!image.valid || image.width <= 0 || image.height <= 0 || image.alpha.empty()) {
+        return 1.0f;
+    }
+    float x = std::clamp(u, 0.0f, 1.0f) * float(std::max(image.width - 1, 0));
+    float y = std::clamp(v, 0.0f, 1.0f) * float(std::max(image.height - 1, 0));
+    int x0 = std::clamp(static_cast<int>(std::floor(x)), 0, image.width - 1);
+    int y0 = std::clamp(static_cast<int>(std::floor(y)), 0, image.height - 1);
+    int x1 = std::min(x0 + 1, image.width - 1);
+    int y1 = std::min(y0 + 1, image.height - 1);
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+
+    auto sample = [&](int px, int py) -> float {
+        size_t index = static_cast<size_t>(py) * static_cast<size_t>(image.width) + static_cast<size_t>(px);
+        if (index >= image.alpha.size()) {
+            return 0.0f;
+        }
+        return image.alpha[index] / 255.0f;
+    };
+
+    float s00 = sample(x0, y0);
+    float s10 = sample(x1, y0);
+    float s01 = sample(x0, y1);
+    float s11 = sample(x1, y1);
+    float sx0 = s00 + (s10 - s00) * tx;
+    float sx1 = s01 + (s11 - s01) * tx;
+    return std::clamp(sx0 + (sx1 - sx0) * ty, 0.0f, 1.0f);
+}
+
+static float SampleTerrainBrushPreset(int preset,
+                                      float brushU,
+                                      float brushV,
+                                      float nx,
+                                      float ny,
+                                      float hardness) {
+    const float radial = std::sqrt(nx * nx + ny * ny);
+    const float square = std::max(std::abs(nx), std::abs(ny));
+
+    switch (preset) {
+        case 1: // hard round
+            return radial <= 1.0f ? 1.0f : 0.0f;
+        case 2: { // noisy/splat round
+            if (radial > 1.0f) {
+                return 0.0f;
+            }
+            float base = 1.0f - SmoothStep(hardness, 1.0f, radial);
+            int ix = static_cast<int>(brushU * 63.0f);
+            int iy = static_cast<int>(brushV * 63.0f);
+            float n = HashNoise2D(ix, iy);
+            return std::clamp(base * (0.65f + 0.35f * n), 0.0f, 1.0f);
+        }
+        case 3: { // soft square
+            if (square > 1.0f) {
+                return 0.0f;
+            }
+            return 1.0f - SmoothStep(hardness, 1.0f, square);
+        }
+        case 0:
+        default: // soft round
+            if (radial > 1.0f) {
+                return 0.0f;
+            }
+            return 1.0f - SmoothStep(hardness, 1.0f, radial);
+    }
+}
+
+static void ConfigureTerrainBrushMaskSampler(TerrainBrushMaskSampler& sampler,
+                                             const TerrainBrushParams& brush,
+                                             std::unordered_map<std::string, TerrainBrushMaskImage>& cache) {
+    sampler = TerrainBrushMaskSampler{};
+    sampler.preset = std::clamp(brush.maskPreset, 0, kTerrainBrushMaskPresetCustom);
+    sampler.squareDomain = (sampler.preset == 3);
+
+    if (sampler.preset != kTerrainBrushMaskPresetCustom || brush.maskPath.empty()) {
+        return;
+    }
+
+    std::filesystem::path rawPath(brush.maskPath);
+    std::string normalizedPath = rawPath.lexically_normal().string();
+    if (normalizedPath.empty()) {
+        return;
+    }
+
+    auto it = cache.find(normalizedPath);
+    if (it == cache.end()) {
+        TerrainBrushMaskImage loaded;
+        if (!LoadMaskAlphaImage(normalizedPath, loaded)) {
+            cache[normalizedPath] = TerrainBrushMaskImage{};
+            return;
+        }
+        it = cache.emplace(normalizedPath, std::move(loaded)).first;
+    }
+    if (!it->second.valid) {
+        return;
+    }
+    sampler.customImage = &it->second;
+    sampler.squareDomain = true;
+}
+
+static float SampleTerrainBrushMask(const TerrainBrushMaskSampler& sampler,
+                                    float brushU,
+                                    float brushV,
+                                    float nx,
+                                    float ny,
+                                    float hardness) {
+    if (sampler.customImage) {
+        return SampleMaskImageBilinear(*sampler.customImage, brushU, brushV);
+    }
+    return SampleTerrainBrushPreset(sampler.preset, brushU, brushV, nx, ny, hardness);
+}
+
+static bool SnapshotEquals(const std::vector<unsigned char>& a,
+                           const std::vector<unsigned char>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    if (a.empty()) {
+        return true;
+    }
+    return std::memcmp(a.data(), b.data(), a.size()) == 0;
+}
+
+static void EnsureTerrainHistoryCompatible(TerrainPaintHistoryState& history,
+                                           const TerrainPaintStrokeState& state) {
+    if (history.texturePath == state.texturePath &&
+        history.width == state.width &&
+        history.height == state.height) {
+        return;
+    }
+    history.texturePath = state.texturePath;
+    history.width = state.width;
+    history.height = state.height;
+    history.undoStack.clear();
+    history.redoStack.clear();
+}
+
+static void PushTerrainUndoSnapshot(TerrainPaintHistoryState& history,
+                                    const std::vector<unsigned char>& pixels) {
+    if (pixels.empty()) {
+        return;
+    }
+    if (!history.undoStack.empty() && SnapshotEquals(history.undoStack.back(), pixels)) {
+        history.redoStack.clear();
+        return;
+    }
+    history.undoStack.push_back(pixels);
+    if (history.undoStack.size() > kTerrainPaintUndoLimit) {
+        history.undoStack.erase(history.undoStack.begin());
+    }
+    history.redoStack.clear();
+}
+
+static void PushTerrainRedoSnapshot(TerrainPaintHistoryState& history,
+                                    const std::vector<unsigned char>& pixels) {
+    if (pixels.empty()) {
+        return;
+    }
+    if (!history.redoStack.empty() && SnapshotEquals(history.redoStack.back(), pixels)) {
+        return;
+    }
+    history.redoStack.push_back(pixels);
+    if (history.redoStack.size() > kTerrainPaintUndoLimit) {
+        history.redoStack.erase(history.redoStack.begin());
+    }
+}
+
+static Math::Vector3 TerrainLayerPreviewColor(int layer) {
+    switch (std::clamp(layer, 0, 2)) {
+        case 1: return Math::Vector3(0.32f, 0.85f, 0.45f);
+        case 2: return Math::Vector3(0.28f, 0.62f, 0.95f);
+        case 0:
+        default: return Math::Vector3(0.96f, 0.62f, 0.25f);
+    }
 }
 
 static bool EnsureTerrainControlPaintData(TerrainPaintStrokeState& state,
@@ -734,13 +990,21 @@ static bool EnsureTerrainControlPaintData(TerrainPaintStrokeState& state,
     }
 
     auto* loader = renderer->getTextureLoader();
-    std::shared_ptr<Texture2D> texture = loader->loadTexture(texturePath, false, true);
-    if (!texture) {
-        texture = loader->createTextureFromRGBA8(texturePath, pixels.data(), width, height, false, true);
-    }
+    std::string runtimeKey = "builtin://terrain/control_runtime/"
+        + target.binding.entity->getUUID().toString();
+    std::shared_ptr<Texture2D> texture = loader->createTextureFromRGBA8(
+        runtimeKey,
+        pixels.data(),
+        width,
+        height,
+        false,
+        true
+    );
     if (!texture) {
         return false;
     }
+    texture->setPath(texturePath);
+    loader->updateTextureFromRGBA8(texture, pixels.data(), width, height, true);
 
     target.material->setTerrainControlTexture(texture);
     target.material->setTerrainEnabled(true);
@@ -802,6 +1066,75 @@ static bool ScreenToPlaneUV(const TerrainPaintTarget& target,
     return true;
 }
 
+static bool ResolveTerrainPaintTargetAtCursor(const std::string& preferredEntityUUID,
+                                              float screenX,
+                                              float screenY,
+                                              float screenWidth,
+                                              float screenHeight,
+                                              TerrainPaintTarget& outTarget,
+                                              std::string& outEntityUUID,
+                                              float& outU,
+                                              float& outV) {
+    if (!preferredEntityUUID.empty()) {
+        TerrainPaintTarget preferredTarget;
+        float u = 0.0f;
+        float v = 0.0f;
+        if (ResolveTerrainPaintTarget(preferredEntityUUID, preferredTarget) &&
+            ScreenToPlaneUV(preferredTarget, screenX, screenY, screenWidth, screenHeight, u, v)) {
+            outTarget = std::move(preferredTarget);
+            outEntityUUID = preferredEntityUUID;
+            outU = u;
+            outV = v;
+            return true;
+        }
+    }
+
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    Camera* camera = Camera::getMainCamera();
+    if (!scene || !camera || screenWidth <= 1.0f || screenHeight <= 1.0f) {
+        return false;
+    }
+
+    Ray ray = SelectionSystem::screenPointToRay(
+        Math::Vector2(screenX, screenY),
+        Math::Vector2(screenWidth, screenHeight),
+        camera
+    );
+
+    std::vector<Entity*> entities;
+    const auto& allEntities = scene->getAllEntities();
+    entities.reserve(allEntities.size());
+    for (const auto& entry : allEntities) {
+        if (entry) {
+            entities.push_back(entry.get());
+        }
+    }
+    RaycastHit hit = SelectionSystem::raycastAll(ray, entities);
+    if (!hit.hit || !hit.entity) {
+        return false;
+    }
+
+    auto* primitive = hit.entity->getComponent<PrimitiveMesh>();
+    if (!primitive || primitive->getType() != PrimitiveType::Plane) {
+        return false;
+    }
+
+    std::string fallbackUUID = hit.entity->getUUID().toString();
+    TerrainPaintTarget fallbackTarget;
+    float u = 0.0f;
+    float v = 0.0f;
+    if (!ResolveTerrainPaintTarget(fallbackUUID, fallbackTarget) ||
+        !ScreenToPlaneUV(fallbackTarget, screenX, screenY, screenWidth, screenHeight, u, v)) {
+        return false;
+    }
+
+    outTarget = std::move(fallbackTarget);
+    outEntityUUID = fallbackUUID;
+    outU = u;
+    outV = v;
+    return true;
+}
+
 static float BrushFalloff(float distance01, float hardness) {
     if (distance01 >= 1.0f) {
         return 0.0f;
@@ -820,7 +1153,8 @@ static void ApplyBrushSample(TerrainPaintStrokeState& state,
                              const TerrainPaintTarget& target,
                              float u,
                              float v,
-                             const TerrainBrushParams& brush) {
+                             const TerrainBrushParams& brush,
+                             const TerrainBrushMaskSampler& maskSampler) {
     if (state.width <= 0 || state.height <= 0 || state.pixels.empty() || !target.binding.entity || !target.mesh) {
         return;
     }
@@ -854,11 +1188,27 @@ static void ApplyBrushSample(TerrainPaintStrokeState& state,
         float ny = (float(py) - cy) / ry;
         for (int px = minX; px <= maxX; ++px) {
             float nx = (float(px) - cx) / rx;
-            float d = std::sqrt(nx * nx + ny * ny);
+            if (std::max(std::abs(nx), std::abs(ny)) > 1.0f) {
+                continue;
+            }
+            float d = maskSampler.squareDomain
+                ? std::max(std::abs(nx), std::abs(ny))
+                : std::sqrt(nx * nx + ny * ny);
             if (d > 1.0f) {
                 continue;
             }
-            float weight = BrushFalloff(d, brush.hardness);
+            float mask = SampleTerrainBrushMask(
+                maskSampler,
+                std::clamp(nx * 0.5f + 0.5f, 0.0f, 1.0f),
+                std::clamp(ny * 0.5f + 0.5f, 0.0f, 1.0f),
+                nx,
+                ny,
+                brush.hardness
+            );
+            if (mask <= 1e-6f) {
+                continue;
+            }
+            float weight = BrushFalloff(d, brush.hardness) * mask;
             float strength = signedStrength * weight;
             if (std::abs(strength) < 1e-6f) {
                 continue;
@@ -920,9 +1270,10 @@ static void ApplyTerrainBrushStroke(TerrainPaintStrokeState& state,
                                     float u,
                                     float v,
                                     const TerrainBrushParams& brush,
+                                    const TerrainBrushMaskSampler& maskSampler,
                                     bool beginStroke) {
     if (beginStroke || !state.hasLastUV) {
-        ApplyBrushSample(state, target, u, v, brush);
+        ApplyBrushSample(state, target, u, v, brush, maskSampler);
         state.lastU = u;
         state.lastV = v;
         state.hasLastUV = true;
@@ -950,7 +1301,7 @@ static void ApplyTerrainBrushStroke(TerrainPaintStrokeState& state,
         float t = static_cast<float>(i) / static_cast<float>(steps);
         float sampleU = state.lastU + (u - state.lastU) * t;
         float sampleV = state.lastV + (v - state.lastV) * t;
-        ApplyBrushSample(state, target, sampleU, sampleV, brush);
+        ApplyBrushSample(state, target, sampleU, sampleV, brush, maskSampler);
     }
     state.lastU = u;
     state.lastV = v;
@@ -967,6 +1318,110 @@ static void CommitTerrainPaintState(TerrainPaintStrokeState& state) {
         state.dirty = false;
     }
     state.hasLastUV = false;
+}
+
+static Math::Vector3 TerrainUVToWorldPoint(const TerrainPaintTarget& target,
+                                           float u,
+                                           float v) {
+    if (!target.binding.entity || !target.mesh) {
+        return Math::Vector3::Zero;
+    }
+    Math::Vector3 minB = target.mesh->getBoundsMin();
+    Math::Vector3 maxB = target.mesh->getBoundsMax();
+    float localX = minB.x + std::clamp(u, 0.0f, 1.0f) * (maxB.x - minB.x);
+    float localZ = minB.z + std::clamp(v, 0.0f, 1.0f) * (maxB.z - minB.z);
+    float localY = (minB.y + maxB.y) * 0.5f;
+    Math::Vector3 localPoint(localX, localY, localZ);
+    return target.binding.entity->getTransform()->getWorldMatrix().transformPoint(localPoint);
+}
+
+static std::shared_ptr<Texture2D> BuildTerrainBrushPreviewTexture(Renderer* renderer,
+                                                                  const TerrainBrushParams& brush,
+                                                                  const TerrainBrushMaskSampler& maskSampler) {
+    if (!renderer || !renderer->getTextureLoader()) {
+        return nullptr;
+    }
+
+    const int size = kTerrainBrushPreviewTextureSize;
+    std::vector<unsigned char> pixels(static_cast<size_t>(size) * static_cast<size_t>(size) * 4ull, 0u);
+    Math::Vector3 layerColor = TerrainLayerPreviewColor(brush.layer);
+
+    for (int y = 0; y < size; ++y) {
+        float v = float(y) / float(std::max(size - 1, 1));
+        float ny = v * 2.0f - 1.0f;
+        for (int x = 0; x < size; ++x) {
+            float u = float(x) / float(std::max(size - 1, 1));
+            float nx = u * 2.0f - 1.0f;
+            float radial = std::sqrt(nx * nx + ny * ny);
+            float square = std::max(std::abs(nx), std::abs(ny));
+            float d = maskSampler.squareDomain ? square : radial;
+            if (d > 1.0f) {
+                continue;
+            }
+
+            float mask = SampleTerrainBrushMask(maskSampler, u, v, nx, ny, brush.hardness);
+            if (mask <= 0.001f) {
+                continue;
+            }
+
+            float body = BrushFalloff(d, brush.hardness) * 0.22f * mask;
+            float outerRing = SmoothStep(0.86f, 0.95f, d) * (1.0f - SmoothStep(0.95f, 1.02f, d));
+            float hardRing = SmoothStep(brush.hardness - 0.025f, brush.hardness + 0.025f, d)
+                * (1.0f - SmoothStep(brush.hardness + 0.025f, brush.hardness + 0.055f, d));
+            float alpha = std::clamp(std::max(body, std::max(outerRing, hardRing * 0.6f)), 0.0f, 1.0f);
+            if (alpha <= 0.001f) {
+                continue;
+            }
+
+            size_t index = (static_cast<size_t>(y) * static_cast<size_t>(size) + static_cast<size_t>(x)) * 4ull;
+            pixels[index + 0] = static_cast<unsigned char>(std::clamp(layerColor.x, 0.0f, 1.0f) * 255.0f + 0.5f);
+            pixels[index + 1] = static_cast<unsigned char>(std::clamp(layerColor.y, 0.0f, 1.0f) * 255.0f + 0.5f);
+            pixels[index + 2] = static_cast<unsigned char>(std::clamp(layerColor.z, 0.0f, 1.0f) * 255.0f + 0.5f);
+            pixels[index + 3] = static_cast<unsigned char>(alpha * 255.0f + 0.5f);
+        }
+    }
+
+    std::string key = "builtin://terrain/brush_preview/"
+        + std::to_string(std::clamp(brush.layer, 0, 2)) + "_"
+        + std::to_string(static_cast<int>(std::round(std::clamp(brush.hardness, 0.0f, 1.0f) * 1000.0f))) + "_"
+        + std::to_string(std::clamp(brush.maskPreset, 0, kTerrainBrushMaskPresetCustom)) + "_"
+        + std::to_string(std::hash<std::string>{}(brush.maskPath));
+
+    return renderer->getTextureLoader()->createTextureFromRGBA8(
+        key,
+        pixels.data(),
+        size,
+        size,
+        true,
+        false
+    );
+}
+
+static Entity* EnsureTerrainBrushPreviewEntity(Scene* scene,
+                                               TerrainBrushPreviewState& previewState) {
+    if (!scene) {
+        previewState.entityUUID.clear();
+        return nullptr;
+    }
+
+    Entity* previewEntity = nullptr;
+    if (!previewState.entityUUID.empty()) {
+        previewEntity = SceneCommands::getEntityByUUID(scene, previewState.entityUUID);
+    }
+    if (previewEntity) {
+        return previewEntity;
+    }
+
+    previewEntity = scene->createEntity("Terrain Brush Preview");
+    if (!previewEntity) {
+        previewState.entityUUID.clear();
+        return nullptr;
+    }
+    previewEntity->setEditorOnly(true);
+    previewEntity->setActive(true);
+    previewEntity->addComponent<Decal>();
+    previewState.entityUUID = previewEntity->getUUID().toString();
+    return previewEntity;
 }
 
 static SkinnedMeshRenderer* GetSkinnedByUUID(const std::string& entityUUID) {
@@ -1173,6 +1628,9 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     float _pendingMouseDragH;
     bool _hasPendingMouseDrag;
     TerrainPaintStrokeState _terrainPaintState;
+    std::unordered_map<std::string, TerrainPaintHistoryState> _terrainPaintHistory;
+    std::unordered_map<std::string, TerrainBrushMaskImage> _terrainMaskCache;
+    TerrainBrushPreviewState _terrainBrushPreview;
 }
 
 + (instancetype)shared {
@@ -1948,6 +2406,16 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (void)clearTerrainBrushPreviewInternal {
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    if (!_terrainBrushPreview.entityUUID.empty() && scene) {
+        if (Entity* entity = SceneCommands::getEntityByUUID(scene, _terrainBrushPreview.entityUUID)) {
+            scene->destroyEntity(entity);
+        }
+    }
+    _terrainBrushPreview = TerrainBrushPreviewState{};
+}
+
 - (void)beginTerrainPaintForEntity:(NSString *)uuid
                                   x:(float)x
                                   y:(float)y
@@ -1958,35 +2426,34 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
                            hardness:(float)hardness
                            strength:(float)strength
                             spacing:(float)spacing
+                         maskPreset:(NSInteger)maskPreset
+                           maskPath:(NSString * _Nullable)maskPath
                       autoNormalize:(BOOL)autoNormalize
                              invert:(BOOL)invert {
     [self performAsync:^{
-        if (!_engine || !uuid || uuid.length == 0) {
+        if (!_engine || !uuid) {
             return;
         }
         if (!SceneManager::getInstance().isSceneView() || SceneManager::getInstance().isPlaying()) {
             return;
         }
-        std::string entityUUID = [uuid UTF8String];
+        std::string requestedEntityUUID = [uuid UTF8String];
+        TerrainPaintTarget target;
+        std::string entityUUID;
+        float u = 0.0f;
+        float v = 0.0f;
+        if (!ResolveTerrainPaintTargetAtCursor(requestedEntityUUID, x, y, width, height, target, entityUUID, u, v)) {
+            return;
+        }
+
         if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
             CommitTerrainPaintState(_terrainPaintState);
             _terrainPaintState.active = false;
+            _terrainPaintState.hasLastUV = false;
         }
 
-        TerrainPaintTarget target;
-        if (!ResolveTerrainPaintTarget(entityUUID, target)) {
-            return;
-        }
         Renderer* renderer = _engine->getRenderer();
         if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
-            return;
-        }
-        _terrainPaintState.active = true;
-        _terrainPaintState.entityUUID = entityUUID;
-
-        float u = 0.0f;
-        float v = 0.0f;
-        if (!ScreenToPlaneUV(target, x, y, width, height, u, v)) {
             return;
         }
 
@@ -1996,10 +2463,25 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         brush.hardness = std::clamp(hardness, 0.0f, 1.0f);
         brush.strength = std::clamp(strength, 0.0f, 1.0f);
         brush.spacing = std::clamp(spacing, 0.05f, 1.0f);
+        brush.maskPreset = static_cast<int>(maskPreset);
+        if (maskPath) {
+            brush.maskPath = [maskPath UTF8String];
+        }
         brush.autoNormalize = autoNormalize;
         brush.invert = invert;
 
-        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, true);
+        TerrainBrushMaskSampler maskSampler;
+        ConfigureTerrainBrushMaskSampler(maskSampler, brush, _terrainMaskCache);
+
+        auto& history = _terrainPaintHistory[entityUUID];
+        EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+        PushTerrainUndoSnapshot(history, _terrainPaintState.pixels);
+
+        _terrainPaintState.active = true;
+        _terrainPaintState.entityUUID = entityUUID;
+        _terrainPaintState.hasLastUV = false;
+
+        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, true);
         if (renderer && renderer->getTextureLoader()) {
             renderer->getTextureLoader()->updateTextureFromRGBA8(
                 target.material->getTerrainControlTexture(),
@@ -2022,39 +2504,37 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
                             hardness:(float)hardness
                             strength:(float)strength
                              spacing:(float)spacing
+                          maskPreset:(NSInteger)maskPreset
+                            maskPath:(NSString * _Nullable)maskPath
                        autoNormalize:(BOOL)autoNormalize
                               invert:(BOOL)invert {
     [self performAsync:^{
-        if (!_engine || !uuid || uuid.length == 0) {
+        if (!_engine || !uuid) {
             return;
         }
         if (!SceneManager::getInstance().isSceneView() || SceneManager::getInstance().isPlaying()) {
             return;
         }
-        std::string entityUUID = [uuid UTF8String];
+        std::string requestedEntityUUID = [uuid UTF8String];
+        TerrainPaintTarget target;
+        std::string entityUUID;
+        float u = 0.0f;
+        float v = 0.0f;
+        if (!ResolveTerrainPaintTargetAtCursor(requestedEntityUUID, x, y, width, height, target, entityUUID, u, v)) {
+            return;
+        }
+
         bool beginStroke = false;
         if (!_terrainPaintState.active || _terrainPaintState.entityUUID != entityUUID) {
             if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
                 CommitTerrainPaintState(_terrainPaintState);
+                _terrainPaintState.active = false;
             }
-            _terrainPaintState.active = true;
-            _terrainPaintState.entityUUID = entityUUID;
-            _terrainPaintState.hasLastUV = false;
             beginStroke = true;
         }
 
-        TerrainPaintTarget target;
-        if (!ResolveTerrainPaintTarget(entityUUID, target)) {
-            return;
-        }
         Renderer* renderer = _engine->getRenderer();
         if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
-            return;
-        }
-
-        float u = 0.0f;
-        float v = 0.0f;
-        if (!ScreenToPlaneUV(target, x, y, width, height, u, v)) {
             return;
         }
 
@@ -2064,10 +2544,29 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         brush.hardness = std::clamp(hardness, 0.0f, 1.0f);
         brush.strength = std::clamp(strength, 0.0f, 1.0f);
         brush.spacing = std::clamp(spacing, 0.05f, 1.0f);
+        brush.maskPreset = static_cast<int>(maskPreset);
+        if (maskPath) {
+            brush.maskPath = [maskPath UTF8String];
+        }
         brush.autoNormalize = autoNormalize;
         brush.invert = invert;
 
-        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, beginStroke);
+        TerrainBrushMaskSampler maskSampler;
+        ConfigureTerrainBrushMaskSampler(maskSampler, brush, _terrainMaskCache);
+
+        if (beginStroke) {
+            auto& history = _terrainPaintHistory[entityUUID];
+            EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+            PushTerrainUndoSnapshot(history, _terrainPaintState.pixels);
+        }
+
+        _terrainPaintState.active = true;
+        _terrainPaintState.entityUUID = entityUUID;
+        if (beginStroke) {
+            _terrainPaintState.hasLastUV = false;
+        }
+
+        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, beginStroke);
         if (renderer && renderer->getTextureLoader()) {
             renderer->getTextureLoader()->updateTextureFromRGBA8(
                 target.material->getTerrainControlTexture(),
@@ -2088,6 +2587,246 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         CommitTerrainPaintState(_terrainPaintState);
         _terrainPaintState.active = false;
         _terrainPaintState.hasLastUV = false;
+    }];
+}
+
+- (void)updateTerrainBrushPreviewForEntity:(NSString *)uuid
+                                         x:(float)x
+                                         y:(float)y
+                               screenWidth:(float)width
+                              screenHeight:(float)height
+                                     layer:(NSInteger)layer
+                                    radius:(float)radius
+                                  hardness:(float)hardness
+                                 maskPreset:(NSInteger)maskPreset
+                                   maskPath:(NSString * _Nullable)maskPath {
+    [self performAsync:^{
+        if (!_engine || !uuid) {
+            [self clearTerrainBrushPreviewInternal];
+            return;
+        }
+        if (!SceneManager::getInstance().isSceneView() || SceneManager::getInstance().isPlaying()) {
+            [self clearTerrainBrushPreviewInternal];
+            return;
+        }
+
+        std::string requestedEntityUUID = [uuid UTF8String];
+        TerrainPaintTarget target;
+        float u = 0.0f;
+        float v = 0.0f;
+        std::string entityUUID;
+        if (!ResolveTerrainPaintTargetAtCursor(requestedEntityUUID, x, y, width, height, target, entityUUID, u, v)) {
+            [self clearTerrainBrushPreviewInternal];
+            return;
+        }
+
+        Renderer* renderer = _engine->getRenderer();
+        if (!renderer || !renderer->getTextureLoader()) {
+            [self clearTerrainBrushPreviewInternal];
+            return;
+        }
+
+        TerrainBrushParams brush;
+        brush.layer = static_cast<int>(layer);
+        brush.radius = std::max(0.05f, radius);
+        brush.hardness = std::clamp(hardness, 0.0f, 1.0f);
+        brush.maskPreset = static_cast<int>(maskPreset);
+        if (maskPath) {
+            brush.maskPath = [maskPath UTF8String];
+        }
+
+        TerrainBrushMaskSampler sampler;
+        ConfigureTerrainBrushMaskSampler(sampler, brush, _terrainMaskCache);
+
+        if (!_terrainBrushPreview.texture ||
+            _terrainBrushPreview.layer != brush.layer ||
+            std::abs(_terrainBrushPreview.hardness - brush.hardness) > 0.0001f ||
+            _terrainBrushPreview.maskPreset != brush.maskPreset ||
+            _terrainBrushPreview.maskPath != brush.maskPath) {
+            _terrainBrushPreview.texture = BuildTerrainBrushPreviewTexture(renderer, brush, sampler);
+            _terrainBrushPreview.layer = brush.layer;
+            _terrainBrushPreview.hardness = brush.hardness;
+            _terrainBrushPreview.maskPreset = brush.maskPreset;
+            _terrainBrushPreview.maskPath = brush.maskPath;
+        }
+
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        Entity* previewEntity = EnsureTerrainBrushPreviewEntity(scene, _terrainBrushPreview);
+        if (!previewEntity) {
+            return;
+        }
+        Decal* decal = previewEntity->getComponent<Decal>();
+        if (!decal) {
+            decal = previewEntity->addComponent<Decal>();
+        }
+        if (!decal) {
+            return;
+        }
+
+        decal->setAlbedoTexture(_terrainBrushPreview.texture);
+        decal->setNormalTexture(nullptr);
+        decal->setORMTexture(nullptr);
+        decal->setMaskTexture(nullptr);
+        Math::Vector3 previewColor = TerrainLayerPreviewColor(brush.layer);
+        decal->setTint(Math::Vector4(previewColor.x, previewColor.y, previewColor.z, 1.0f));
+        decal->setOpacity(0.95f);
+        decal->setEdgeSoftness(0.02f);
+        decal->setTiling(Math::Vector2(1.0f, 1.0f));
+        decal->setOffset(Math::Vector2(0.0f, 0.0f));
+
+        Transform* targetTransform = target.binding.entity ? target.binding.entity->getTransform() : nullptr;
+        Transform* previewTransform = previewEntity->getTransform();
+        if (!targetTransform || !previewTransform) {
+            return;
+        }
+
+        Math::Vector3 normal = targetTransform->up();
+        if (normal.lengthSquared() < 1e-6f) {
+            normal = Math::Vector3::Up;
+        } else {
+            normal = normal.normalized();
+        }
+
+        Math::Vector3 hitWorld = TerrainUVToWorldPoint(target, u, v);
+        float decalThickness = 0.12f;
+        float diameter = std::max(brush.radius * 2.0f, 0.05f);
+        previewTransform->setPosition(hitWorld + normal * 0.03f);
+        Math::Quaternion align = targetTransform->getRotation()
+            * Math::Quaternion::FromEulerAngles(Math::Vector3(-90.0f * Math::DEG_TO_RAD, 0.0f, 0.0f));
+        previewTransform->setRotation(align);
+        previewTransform->setLocalScale(Math::Vector3(diameter, diameter, decalThickness));
+    }];
+}
+
+- (void)clearTerrainBrushPreview {
+    [self performAsync:^{
+        [self clearTerrainBrushPreviewInternal];
+    }];
+}
+
+- (BOOL)undoTerrainPaintForEntity:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        if (!_engine || !uuid || uuid.length == 0) {
+            return NO;
+        }
+        if (SceneManager::getInstance().isPlaying()) {
+            return NO;
+        }
+        std::string entityUUID = [uuid UTF8String];
+
+        if (_terrainPaintState.active && _terrainPaintState.entityUUID == entityUUID) {
+            CommitTerrainPaintState(_terrainPaintState);
+            _terrainPaintState.active = false;
+            _terrainPaintState.hasLastUV = false;
+        }
+
+        TerrainPaintTarget target;
+        if (!ResolveTerrainPaintTarget(entityUUID, target)) {
+            return NO;
+        }
+        Renderer* renderer = _engine->getRenderer();
+        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+            return NO;
+        }
+
+        auto it = _terrainPaintHistory.find(entityUUID);
+        if (it == _terrainPaintHistory.end()) {
+            return NO;
+        }
+        TerrainPaintHistoryState& history = it->second;
+        EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+        if (history.undoStack.empty()) {
+            return NO;
+        }
+
+        PushTerrainRedoSnapshot(history, _terrainPaintState.pixels);
+        std::vector<unsigned char> snapshot = std::move(history.undoStack.back());
+        history.undoStack.pop_back();
+        if (snapshot.size() != _terrainPaintState.pixels.size()) {
+            return NO;
+        }
+
+        _terrainPaintState.pixels = std::move(snapshot);
+        _terrainPaintState.dirty = true;
+
+        if (renderer && renderer->getTextureLoader()) {
+            renderer->getTextureLoader()->updateTextureFromRGBA8(
+                target.material->getTerrainControlTexture(),
+                _terrainPaintState.pixels.data(),
+                _terrainPaintState.width,
+                _terrainPaintState.height,
+                true
+            );
+        }
+        CommitTerrainPaintState(_terrainPaintState);
+        return YES;
+    }];
+}
+
+- (BOOL)redoTerrainPaintForEntity:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        if (!_engine || !uuid || uuid.length == 0) {
+            return NO;
+        }
+        if (SceneManager::getInstance().isPlaying()) {
+            return NO;
+        }
+        std::string entityUUID = [uuid UTF8String];
+
+        if (_terrainPaintState.active && _terrainPaintState.entityUUID == entityUUID) {
+            CommitTerrainPaintState(_terrainPaintState);
+            _terrainPaintState.active = false;
+            _terrainPaintState.hasLastUV = false;
+        }
+
+        TerrainPaintTarget target;
+        if (!ResolveTerrainPaintTarget(entityUUID, target)) {
+            return NO;
+        }
+        Renderer* renderer = _engine->getRenderer();
+        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+            return NO;
+        }
+
+        auto it = _terrainPaintHistory.find(entityUUID);
+        if (it == _terrainPaintHistory.end()) {
+            return NO;
+        }
+        TerrainPaintHistoryState& history = it->second;
+        EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+        if (history.redoStack.empty()) {
+            return NO;
+        }
+
+        if (!history.undoStack.empty() && SnapshotEquals(history.undoStack.back(), _terrainPaintState.pixels)) {
+            // no-op, keep current top
+        } else {
+            history.undoStack.push_back(_terrainPaintState.pixels);
+            if (history.undoStack.size() > kTerrainPaintUndoLimit) {
+                history.undoStack.erase(history.undoStack.begin());
+            }
+        }
+
+        std::vector<unsigned char> snapshot = std::move(history.redoStack.back());
+        history.redoStack.pop_back();
+        if (snapshot.size() != _terrainPaintState.pixels.size()) {
+            return NO;
+        }
+
+        _terrainPaintState.pixels = std::move(snapshot);
+        _terrainPaintState.dirty = true;
+
+        if (renderer && renderer->getTextureLoader()) {
+            renderer->getTextureLoader()->updateTextureFromRGBA8(
+                target.material->getTerrainControlTexture(),
+                _terrainPaintState.pixels.data(),
+                _terrainPaintState.width,
+                _terrainPaintState.height,
+                true
+            );
+        }
+        CommitTerrainPaintState(_terrainPaintState);
+        return YES;
     }];
 }
 
@@ -3018,6 +3757,12 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (BOOL)saveSceneAtPath:(NSString *)path {
     return [self performSyncBool:^BOOL {
+        if (_terrainPaintState.active) {
+            CommitTerrainPaintState(_terrainPaintState);
+            _terrainPaintState.active = false;
+            _terrainPaintState.hasLastUV = false;
+        }
+        [self clearTerrainBrushPreviewInternal];
         Scene* scene = SceneManager::getInstance().getActiveScene();
         if (!scene || !path) {
             return NO;
@@ -3029,6 +3774,12 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (BOOL)loadSceneAtPath:(NSString *)path {
     return [self performSyncBool:^BOOL {
+        if (_terrainPaintState.active) {
+            CommitTerrainPaintState(_terrainPaintState);
+            _terrainPaintState.active = false;
+            _terrainPaintState.hasLastUV = false;
+        }
+        [self clearTerrainBrushPreviewInternal];
         Scene* scene = SceneManager::getInstance().getActiveScene();
         if (!scene || !path) {
             return NO;
@@ -3040,12 +3791,19 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (void)enterPlayMode {
     [self performAsync:^{
+        if (_terrainPaintState.active) {
+            CommitTerrainPaintState(_terrainPaintState);
+            _terrainPaintState.active = false;
+            _terrainPaintState.hasLastUV = false;
+        }
+        [self clearTerrainBrushPreviewInternal];
         SceneManager::getInstance().enterPlayMode();
     }];
 }
 
 - (void)exitPlayMode {
     [self performAsync:^{
+        [self clearTerrainBrushPreviewInternal];
         SceneManager::getInstance().exitPlayMode();
     }];
 }
