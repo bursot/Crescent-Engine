@@ -843,6 +843,14 @@ std::shared_ptr<Texture2D> LoadTexturePath(TextureLoader* loader,
     return loader->loadTexture(path, srgb, true, normalMap);
 }
 
+std::shared_ptr<Texture2D> LoadTerrainControlTexturePath(TextureLoader* loader,
+                                                         const std::string& path) {
+    if (!loader || path.empty()) {
+        return nullptr;
+    }
+    return loader->loadTextureUncompressed(path, false, false);
+}
+
 std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* loader) {
     auto material = Material::CreateDefault();
     if (!j.is_object()) {
@@ -921,6 +929,16 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
             }
             return LoadTexturePath(loader, resolved, srgb, normalMap);
         };
+        auto loadTerrainControl = [&](const char* key) -> std::shared_ptr<Texture2D> {
+            if (!t.contains(key)) {
+                return nullptr;
+            }
+            std::string resolved = ResolveTextureEntryPath(t[key]);
+            if (resolved.empty()) {
+                return nullptr;
+            }
+            return LoadTerrainControlTexturePath(loader, resolved);
+        };
         if (auto tex = load("albedo", true, true)) material->setAlbedoTexture(tex);
         if (auto tex = load("normal", false, true)) material->setNormalTexture(tex);
         if (auto tex = load("metallic", false, false)) material->setMetallicTexture(tex);
@@ -930,7 +948,7 @@ std::shared_ptr<Material> DeserializeMaterial(const json& j, TextureLoader* load
         if (auto tex = load("orm", false, false)) material->setORMTexture(tex);
         if (auto tex = load("height", false, false)) material->setHeightTexture(tex);
         if (auto tex = load("opacity", false, false)) material->setOpacityTexture(tex);
-        if (auto tex = load("terrainControl", false, false)) material->setTerrainControlTexture(tex);
+        if (auto tex = loadTerrainControl("terrainControl")) material->setTerrainControlTexture(tex);
         if (auto tex = load("terrainLayer0", true, false)) material->setTerrainLayer0Texture(tex);
         if (auto tex = load("terrainLayer1", true, false)) material->setTerrainLayer1Texture(tex);
         if (auto tex = load("terrainLayer2", true, false)) material->setTerrainLayer2Texture(tex);

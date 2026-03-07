@@ -712,6 +712,19 @@ class EditorState: ObservableObject {
         return attrs?[.modificationDate] as? Date
     }
 
+    private func shouldAutoReimportAsset(at path: String, type: AssetInfo.AssetType) -> Bool {
+        guard type == .texture else {
+            return true
+        }
+
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        let generatedMarker = "/Generated/TerrainControl/"
+        if normalizedPath.contains(generatedMarker) && normalizedPath.hasSuffix("_control.png") {
+            return false
+        }
+        return true
+    }
+
     private func pollAssetChanges() {
         if !autoReimportAssets || isPlaying {
             return
@@ -724,6 +737,12 @@ class EditorState: ObservableObject {
             case .model, .texture, .hdri:
                 break
             default:
+                continue
+            }
+            if !shouldAutoReimportAsset(at: asset.path, type: asset.type) {
+                if let date = modificationDate(for: asset.path) {
+                    assetModDates[asset.path] = date
+                }
                 continue
             }
             guard let date = modificationDate(for: asset.path) else {

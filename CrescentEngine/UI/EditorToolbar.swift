@@ -119,6 +119,8 @@ struct EditorToolbar: View {
                     .popover(isPresented: $showCameraPopover) {
                         CameraSettingsPopover(cameraSpeed: $cameraSpeed)
                             .padding(14)
+                            .background(Color.clear)
+                            .presentationBackground(.clear)
                     }
 
                     Button {
@@ -245,9 +247,19 @@ struct CameraSettingsPopover: View {
                             cameraSpeed = Float(preset)
                             CrescentEngineBridge.shared().setCameraMoveSpeed(cameraSpeed)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .tint(Int(cameraSpeed) == preset ? EditorTheme.textAccent : .secondary)
+                        .buttonStyle(.plain)
+                        .font(EditorTheme.mono(size: 10))
+                        .foregroundColor(Int(cameraSpeed.rounded()) == preset ? EditorTheme.textPrimary : EditorTheme.textMuted)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Int(cameraSpeed.rounded()) == preset ? EditorTheme.textAccent.opacity(0.22) : EditorTheme.surfaceMuted.opacity(0.92))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Int(cameraSpeed.rounded()) == preset ? EditorTheme.textAccent.opacity(0.5) : EditorTheme.panelStroke, lineWidth: 1)
+                        )
                     }
                 }
             }
@@ -258,6 +270,7 @@ struct CameraSettingsPopover: View {
         }
         .frame(width: 200)
         .editorPanel(cornerRadius: 18)
+        .compositingGroup()
     }
 }
 

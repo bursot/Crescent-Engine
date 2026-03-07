@@ -531,6 +531,10 @@ class MetalDisplayView: NSView {
     private var trackingArea: NSTrackingArea?
     private var isRightMouseDown: Bool = false
     private var isLeftMouseDown: Bool = false
+    private var lastTerrainPreviewDispatchTime: CFTimeInterval = 0
+    private var lastTerrainPaintDispatchTime: CFTimeInterval = 0
+    private let terrainPreviewDispatchInterval: CFTimeInterval = 1.0 / 90.0
+    private let terrainPaintDispatchInterval: CFTimeInterval = 1.0 / 120.0
     
     override var acceptsFirstResponder: Bool { return true }
     
@@ -671,6 +675,22 @@ class MetalDisplayView: NSView {
     override func keyUp(with event: NSEvent) {
         inputDelegate?.handleKeyUp(event.keyCode)
     }
+
+    private func shouldDispatchTerrainPreview(now: CFTimeInterval, force: Bool = false) -> Bool {
+        if force || (now - lastTerrainPreviewDispatchTime) >= terrainPreviewDispatchInterval {
+            lastTerrainPreviewDispatchTime = now
+            return true
+        }
+        return false
+    }
+
+    private func shouldDispatchTerrainPaint(now: CFTimeInterval, force: Bool = false) -> Bool {
+        if force || (now - lastTerrainPaintDispatchTime) >= terrainPaintDispatchInterval {
+            lastTerrainPaintDispatchTime = now
+            return true
+        }
+        return false
+    }
     
     // MARK: - Mouse Input (Unity/Unreal style)
     
@@ -685,8 +705,11 @@ class MetalDisplayView: NSView {
         isLeftMouseDown = true
         let point = convert(event.locationInWindow, from: nil)
         let invert = event.modifierFlags.contains(.option)
+        let now = CACurrentMediaTime()
 
         if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty {
+            lastTerrainPaintDispatchTime = now
+            lastTerrainPreviewDispatchTime = now
             coordinator?.beginTerrainPaint(
                 at: point,
                 viewSize: bounds.size,
@@ -716,30 +739,35 @@ class MetalDisplayView: NSView {
         if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty && isLeftMouseDown {
             let point = convert(event.locationInWindow, from: nil)
             let invert = event.modifierFlags.contains(.option)
-            coordinator?.updateTerrainBrushPreview(
-                at: point,
-                viewSize: bounds.size,
-                entityUUID: terrainPaintTargetUUID,
-                layer: terrainPaintLayer,
-                radius: terrainBrushRadius,
-                hardness: terrainBrushHardness,
-                maskPreset: terrainBrushMaskPreset,
-                maskPath: terrainBrushMaskPath
-            )
-            coordinator?.updateTerrainPaint(
-                at: point,
-                viewSize: bounds.size,
-                entityUUID: terrainPaintTargetUUID,
-                layer: terrainPaintLayer,
-                radius: terrainBrushRadius,
-                hardness: terrainBrushHardness,
-                strength: terrainBrushStrength,
-                spacing: terrainBrushSpacing,
-                maskPreset: terrainBrushMaskPreset,
-                maskPath: terrainBrushMaskPath,
-                autoNormalize: terrainBrushAutoNormalize,
-                invert: invert
-            )
+            let now = CACurrentMediaTime()
+            if shouldDispatchTerrainPreview(now: now) {
+                coordinator?.updateTerrainBrushPreview(
+                    at: point,
+                    viewSize: bounds.size,
+                    entityUUID: terrainPaintTargetUUID,
+                    layer: terrainPaintLayer,
+                    radius: terrainBrushRadius,
+                    hardness: terrainBrushHardness,
+                    maskPreset: terrainBrushMaskPreset,
+                    maskPath: terrainBrushMaskPath
+                )
+            }
+            if shouldDispatchTerrainPaint(now: now) {
+                coordinator?.updateTerrainPaint(
+                    at: point,
+                    viewSize: bounds.size,
+                    entityUUID: terrainPaintTargetUUID,
+                    layer: terrainPaintLayer,
+                    radius: terrainBrushRadius,
+                    hardness: terrainBrushHardness,
+                    strength: terrainBrushStrength,
+                    spacing: terrainBrushSpacing,
+                    maskPreset: terrainBrushMaskPreset,
+                    maskPath: terrainBrushMaskPath,
+                    autoNormalize: terrainBrushAutoNormalize,
+                    invert: invert
+                )
+            }
             return
         }
         guard allowsPicking else { return }
@@ -752,6 +780,8 @@ class MetalDisplayView: NSView {
     
     override func mouseUp(with event: NSEvent) {
         isLeftMouseDown = false
+        lastTerrainPaintDispatchTime = 0
+        lastTerrainPreviewDispatchTime = 0
         if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty {
             coordinator?.endTerrainPaint()
             return
@@ -763,6 +793,8 @@ class MetalDisplayView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         guard terrainPaintEnabled, !terrainPaintTargetUUID.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        guard shouldDispatchTerrainPreview(now: now) else { return }
         let point = convert(event.locationInWindow, from: nil)
         coordinator?.updateTerrainBrushPreview(
             at: point,
@@ -777,6 +809,7 @@ class MetalDisplayView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        lastTerrainPreviewDispatchTime = 0
         coordinator?.clearTerrainBrushPreview()
     }
     

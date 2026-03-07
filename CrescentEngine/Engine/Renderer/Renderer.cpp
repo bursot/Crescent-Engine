@@ -3002,6 +3002,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     bool bloomEnabled = post.enabled && post.bloom;
     bool toneMappingEnabled = post.enabled && post.toneMapping;
     bool colorGradingEnabled = post.enabled && post.colorGrading;
+    bool vignetteEnabled = post.enabled && post.vignette && post.vignetteIntensity > 0.0001f;
+    bool filmGrainEnabled = post.enabled && post.filmGrain && post.filmGrainIntensity > 0.0001f;
     bool taaEnabled = allowTemporal && post.enabled && post.taa;
     bool ssrEnabled = post.enabled && post.ssr;
     bool motionBlurEnabled = allowTemporal && post.enabled && post.motionBlur;
@@ -3012,6 +3014,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         m_fogHistoryInitialized = false;
     }
     bool useOffscreen = bloomEnabled || toneMappingEnabled || colorGradingEnabled
+        || vignetteEnabled || filmGrainEnabled
         || taaEnabled || ssrEnabled || motionBlurEnabled || dofEnabled || fogEnabled
         || std::abs(renderScale - 1.0f) > 0.001f;
     bool hdrPost = bloomEnabled || toneMappingEnabled || colorGradingEnabled;
@@ -3234,7 +3237,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
             Math::Vector3 center = mr->getBoundsCenter();
             float dist = (center - camPos).length();
-            bool active = dist >= proxy->getLodStart();
+            float activationDistance = proxy->getLodEnd() > proxy->getLodStart() + 0.01f
+                ? proxy->getLodEnd()
+                : proxy->getLodStart();
+            bool active = dist >= activationDistance;
             if (!active) {
                 continue;
             }
@@ -3429,20 +3435,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                         batch.instances.push_back(data);
                     };
 
-                    if (billboardRangeValid) {
-                        Math::Vector3 worldCenter = world.transformPoint(meshCenter);
-                        float dist = (worldCenter - cameraPos).length();
-                        if (dist <= billboardStart) {
-                            addShadowInstance(mesh.get(), mesh.get());
-                        } else if (dist >= billboardEnd) {
-                            addShadowInstance(billboardMesh.get(), mesh.get());
-                        } else {
-                            addShadowInstance(mesh.get(), mesh.get());
-                            addShadowInstance(billboardMesh.get(), mesh.get());
-                        }
-                    } else {
-                        addShadowInstance(mesh.get(), mesh.get());
-                    }
+                    addShadowInstance(mesh.get(), mesh.get());
                 }
                 auto addVisibleInstance = [&](Mesh* drawMesh, Mesh* sourceMesh) {
                     InstancedBatchKey key{};
@@ -3586,32 +3579,22 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 batch.instances.push_back(data);
             };
 
-            if (billboardRangeValid) {
-                float dist = (worldCenter - cameraPos).length();
-                if (dist <= billboardStart) {
-                    addVisibleInstance(mesh.get(), mesh.get());
-                    if (mr->getCastShadows()) {
-                        addShadowInstance(mesh.get(), mesh.get());
-                    }
-                } else if (dist >= billboardEnd) {
-                    addVisibleInstance(billboardMesh.get(), mesh.get());
-                    if (mr->getCastShadows()) {
-                        addShadowInstance(billboardMesh.get(), mesh.get());
+                if (billboardRangeValid) {
+                    float dist = (worldCenter - cameraPos).length();
+                    if (dist <= billboardStart) {
+                        addVisibleInstance(mesh.get(), mesh.get());
+                    } else if (dist >= billboardEnd) {
+                        addVisibleInstance(billboardMesh.get(), mesh.get());
+                    } else {
+                        addVisibleInstance(mesh.get(), mesh.get());
+                        addVisibleInstance(billboardMesh.get(), mesh.get());
                     }
                 } else {
                     addVisibleInstance(mesh.get(), mesh.get());
-                    addVisibleInstance(billboardMesh.get(), mesh.get());
-                    if (mr->getCastShadows()) {
-                        addShadowInstance(mesh.get(), mesh.get());
-                        addShadowInstance(billboardMesh.get(), mesh.get());
-                    }
                 }
-            } else {
-                addVisibleInstance(mesh.get(), mesh.get());
                 if (mr->getCastShadows()) {
                     addShadowInstance(mesh.get(), mesh.get());
                 }
-            }
 
             gpuCulledStatics.insert(entity);
             gpuCulledStaticIds.insert(entity->getUUID().toString());
@@ -4839,8 +4822,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
         SSAOBlurParamsGPU blurParams{};
         blurParams.texelSize = ssaoParams.texelSize;
-        blurParams.depthSharpness = 48.0f;
-        blurParams.normalSharpness = 32.0f;
+        blurParams.depthSharpness = 72.0f;
+        blurParams.normalSharpness = 48.0f;
 
         MTL::RenderPassDescriptor* blurPass = MTL::RenderPassDescriptor::alloc()->init();
         blurPass->colorAttachments()->object(0)->setTexture(m_ssaoBlurTexture);
@@ -5925,7 +5908,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             m_taaHistoryValid ? 1.0f : 0.0f
         );
         float useVelocity = runVelocity ? 1.0f : 0.0f;
-        taaParams.params1 = Math::Vector4(sharpness, useVelocity, 0.01f, 0.2f);
+        taaParams.params1 = Math::Vector4(sharpness, useVelocity, 0.04f, 0.55f);
 
         MTL::RenderPassDescriptor* taaPass = MTL::RenderPassDescriptor::alloc()->init();
         taaPass->colorAttachments()->object(0)->setTexture(m_taaCurrentTexture);
@@ -6070,7 +6053,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         );
         float heightEnabled = fog.heightFog ? 1.0f : 0.0f;
         float anisotropy = std::max(0.0f, std::min(0.9f, fog.volumetricAnisotropy));
-        fogParams.misc = Math::Vector4(heightEnabled, anisotropy, historyValid, 0.0f);
+        float temporalPhase = std::fmod(static_cast<float>(m_frameIndex) * 0.61803398875f, 1.0f);
+        fogParams.misc = Math::Vector4(heightEnabled, anisotropy, historyValid, temporalPhase);
 
         int shadowIndex = -1;
         int cascadeCount = 0;

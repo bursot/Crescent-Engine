@@ -45,6 +45,7 @@
 #include <fstream>
 #include <string>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <unordered_map>
 #include <vector>
@@ -177,7 +178,8 @@ static std::string SerializeTexturePath(const std::shared_ptr<Texture2D>& tex, A
 
 static std::shared_ptr<Texture2D> LoadMaterialTexture(const std::string& storedPath,
                                                       bool srgb,
-                                                      Renderer* renderer) {
+                                                      Renderer* renderer,
+                                                      bool editable = false) {
     if (storedPath.empty() || !renderer || !renderer->getTextureLoader()) {
         return nullptr;
     }
@@ -187,6 +189,9 @@ static std::shared_ptr<Texture2D> LoadMaterialTexture(const std::string& storedP
     std::error_code ec;
     if (!std::filesystem::exists(resolved, ec)) {
         return nullptr;
+    }
+    if (editable) {
+        return renderer->getTextureLoader()->loadTextureUncompressed(resolved, srgb, false);
     }
     return renderer->getTextureLoader()->loadTexture(resolved, srgb, true);
 }
@@ -291,11 +296,11 @@ static bool ApplyMaterialJson(const nlohmann::json& j,
 
     if (renderer && j.contains("textures") && j["textures"].is_object()) {
         const auto& t = j["textures"];
-        auto load = [&](const char* key, bool srgb) -> std::shared_ptr<Texture2D> {
+        auto load = [&](const char* key, bool srgb, bool editable = false) -> std::shared_ptr<Texture2D> {
             if (!t.contains(key) || !t[key].is_string()) {
                 return nullptr;
             }
-            return LoadMaterialTexture(t[key].get<std::string>(), srgb, renderer);
+            return LoadMaterialTexture(t[key].get<std::string>(), srgb, renderer, editable);
         };
         material->setAlbedoTexture(load("albedo", true));
         material->setNormalTexture(load("normal", false));
@@ -305,7 +310,7 @@ static bool ApplyMaterialJson(const nlohmann::json& j,
         material->setEmissionTexture(load("emission", true));
         material->setORMTexture(load("orm", false));
         material->setHeightTexture(load("height", false));
-        material->setTerrainControlTexture(load("terrainControl", false));
+        material->setTerrainControlTexture(load("terrainControl", false, true));
         material->setTerrainLayer0Texture(load("terrainLayer0", true));
         material->setTerrainLayer1Texture(load("terrainLayer1", true));
         material->setTerrainLayer2Texture(load("terrainLayer2", true));
@@ -586,6 +591,7 @@ static void ApplyMaterialTexture(const std::shared_ptr<Material>& material,
 struct TerrainPaintStrokeState {
     bool active = false;
     bool dirty = false;
+    bool uploadPending = false;
     std::string entityUUID;
     std::string texturePath;
     int width = 0;
@@ -594,6 +600,7 @@ struct TerrainPaintStrokeState {
     float lastU = 0.0f;
     float lastV = 0.0f;
     bool hasLastUV = false;
+    double lastUploadTimeSeconds = 0.0;
 };
 
 struct TerrainPaintTarget {
@@ -647,6 +654,7 @@ struct TerrainBrushPreviewState {
 static constexpr int kTerrainBrushMaskPresetCustom = 4;
 static constexpr size_t kTerrainPaintUndoLimit = 24;
 static constexpr int kTerrainBrushPreviewTextureSize = 128;
+static constexpr double kTerrainPaintUploadIntervalSeconds = 1.0 / 90.0;
 
 static bool ResolveTerrainPaintTarget(const std::string& entityUUID, TerrainPaintTarget& outTarget) {
     MaterialBinding binding = GetMaterialBindingForEntityUUID(entityUUID);
@@ -733,6 +741,11 @@ static bool SaveRGBA8Image(const std::string& path,
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
     int ok = stbi_write_png(path.c_str(), width, height, 4, pixels.data(), width * 4);
     return ok != 0;
+}
+
+static double TerrainPaintNowSeconds() {
+    using Clock = std::chrono::steady_clock;
+    return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
 }
 
 static std::string BuildTerrainControlTexturePath(Entity* entity) {
@@ -967,10 +980,19 @@ static bool EnsureTerrainControlPaintData(TerrainPaintStrokeState& state,
         texturePath = BuildTerrainControlTexturePath(target.binding.entity);
     }
 
+    auto hasEditableRuntimeTexture = [&]() -> bool {
+        auto current = target.material->getTerrainControlTexture();
+        if (!current) {
+            return false;
+        }
+        return current->isEditableRGBA8();
+    };
+
     if (state.entityUUID == target.binding.entity->getUUID().toString() &&
         state.texturePath == texturePath &&
         state.width > 0 && state.height > 0 &&
-        state.pixels.size() >= static_cast<size_t>(state.width) * static_cast<size_t>(state.height) * 4ull) {
+        state.pixels.size() >= static_cast<size_t>(state.width) * static_cast<size_t>(state.height) * 4ull &&
+        hasEditableRuntimeTexture()) {
         return true;
     }
 
@@ -1004,7 +1026,9 @@ static bool EnsureTerrainControlPaintData(TerrainPaintStrokeState& state,
         return false;
     }
     texture->setPath(texturePath);
-    loader->updateTextureFromRGBA8(texture, pixels.data(), width, height, true);
+    if (!loader->updateTextureFromRGBA8(texture, pixels.data(), width, height, true)) {
+        return false;
+    }
 
     target.material->setTerrainControlTexture(texture);
     target.material->setTerrainEnabled(true);
@@ -1261,6 +1285,7 @@ static void ApplyBrushSample(TerrainPaintStrokeState& state,
             state.pixels[index + 2] = static_cast<unsigned char>(std::clamp(channels[2], 0.0f, 1.0f) * 255.0f + 0.5f);
             state.pixels[index + 3] = 255;
             state.dirty = true;
+            state.uploadPending = true;
         }
     }
 }
@@ -1318,6 +1343,40 @@ static void CommitTerrainPaintState(TerrainPaintStrokeState& state) {
         state.dirty = false;
     }
     state.hasLastUV = false;
+}
+
+static void UploadTerrainPaintTextureIfNeeded(TerrainPaintStrokeState& state,
+                                              const TerrainPaintTarget& target,
+                                              Renderer* renderer,
+                                              bool force) {
+    if (!renderer || !renderer->getTextureLoader()) {
+        return;
+    }
+    if (state.width <= 0 || state.height <= 0 || state.pixels.empty()) {
+        return;
+    }
+    auto controlTexture = target.material ? target.material->getTerrainControlTexture() : nullptr;
+    if (!controlTexture) {
+        return;
+    }
+    if (!force && !state.uploadPending) {
+        return;
+    }
+
+    double now = TerrainPaintNowSeconds();
+    if (!force && (now - state.lastUploadTimeSeconds) < kTerrainPaintUploadIntervalSeconds) {
+        return;
+    }
+
+    renderer->getTextureLoader()->updateTextureFromRGBA8(
+        controlTexture,
+        state.pixels.data(),
+        state.width,
+        state.height,
+        true
+    );
+    state.lastUploadTimeSeconds = now;
+    state.uploadPending = false;
 }
 
 static Math::Vector3 TerrainUVToWorldPoint(const TerrainPaintTarget& target,
@@ -2447,6 +2506,12 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         }
 
         if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
+            if (Renderer* renderer = _engine->getRenderer()) {
+                TerrainPaintTarget previousTarget;
+                if (ResolveTerrainPaintTarget(_terrainPaintState.entityUUID, previousTarget)) {
+                    UploadTerrainPaintTextureIfNeeded(_terrainPaintState, previousTarget, renderer, true);
+                }
+            }
             CommitTerrainPaintState(_terrainPaintState);
             _terrainPaintState.active = false;
             _terrainPaintState.hasLastUV = false;
@@ -2482,15 +2547,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         _terrainPaintState.hasLastUV = false;
 
         ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, true);
-        if (renderer && renderer->getTextureLoader()) {
-            renderer->getTextureLoader()->updateTextureFromRGBA8(
-                target.material->getTerrainControlTexture(),
-                _terrainPaintState.pixels.data(),
-                _terrainPaintState.width,
-                _terrainPaintState.height,
-                true
-            );
-        }
+        UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, renderer, true);
     }];
 }
 
@@ -2527,6 +2584,12 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         bool beginStroke = false;
         if (!_terrainPaintState.active || _terrainPaintState.entityUUID != entityUUID) {
             if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
+                if (Renderer* previousRenderer = _engine->getRenderer()) {
+                    TerrainPaintTarget previousTarget;
+                    if (ResolveTerrainPaintTarget(_terrainPaintState.entityUUID, previousTarget)) {
+                        UploadTerrainPaintTextureIfNeeded(_terrainPaintState, previousTarget, previousRenderer, true);
+                    }
+                }
                 CommitTerrainPaintState(_terrainPaintState);
                 _terrainPaintState.active = false;
             }
@@ -2567,15 +2630,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         }
 
         ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, beginStroke);
-        if (renderer && renderer->getTextureLoader()) {
-            renderer->getTextureLoader()->updateTextureFromRGBA8(
-                target.material->getTerrainControlTexture(),
-                _terrainPaintState.pixels.data(),
-                _terrainPaintState.width,
-                _terrainPaintState.height,
-                true
-            );
-        }
+        UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, renderer, beginStroke);
     }];
 }
 
@@ -2583,6 +2638,12 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     [self performAsync:^{
         if (!_terrainPaintState.active) {
             return;
+        }
+        if (_engine && !_terrainPaintState.entityUUID.empty()) {
+            TerrainPaintTarget target;
+            if (ResolveTerrainPaintTarget(_terrainPaintState.entityUUID, target)) {
+                UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, _engine->getRenderer(), true);
+            }
         }
         CommitTerrainPaintState(_terrainPaintState);
         _terrainPaintState.active = false;
@@ -2867,30 +2928,30 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (float)getCameraMoveSpeed {
     return [self performSyncFloat:^float {
-        Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
-        if (!scene) return 5.0f;
-        
-        Crescent::Entity* cameraEntity = scene->findEntityByName("Main Camera");
+        Crescent::Camera* camera = Crescent::SceneManager::getInstance().getSceneCamera();
+        if (!camera) return 5.0f;
+
+        Crescent::Entity* cameraEntity = camera->getEntity();
         if (!cameraEntity) return 5.0f;
-        
+
         Crescent::CameraController* controller = cameraEntity->getComponent<Crescent::CameraController>();
         if (!controller) return 5.0f;
-        
+
         return controller->getMoveSpeed();
     }];
 }
 
 - (void)setCameraMoveSpeed:(float)speed {
     [self performAsync:^{
-        Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
-        if (!scene) return;
-        
-        Crescent::Entity* cameraEntity = scene->findEntityByName("Main Camera");
+        Crescent::Camera* camera = Crescent::SceneManager::getInstance().getSceneCamera();
+        if (!camera) return;
+
+        Crescent::Entity* cameraEntity = camera->getEntity();
         if (!cameraEntity) return;
-        
+
         Crescent::CameraController* controller = cameraEntity->getComponent<Crescent::CameraController>();
         if (!controller) return;
-        
+
         controller->setMoveSpeed(speed);
     }];
 }

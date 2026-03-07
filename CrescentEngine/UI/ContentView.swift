@@ -66,25 +66,27 @@ struct ContentView: View {
                                 .layoutPriority(1)
                                 .padding(.leading, metrics.showsHierarchy ? metrics.contentSpacing : 0)
                                 .padding(.trailing, metrics.showsInspector ? metrics.contentSpacing : 0)
-                                .overlay(alignment: .bottom) {
+                                .zIndex(1)
+
+                            DockPanel(editorState: editorState)
+                                .frame(height: dockHeight)
+                                .padding(.top, metrics.contentSpacing)
+                                .padding(.leading, metrics.showsHierarchy ? metrics.contentSpacing : 0)
+                                .padding(.trailing, metrics.showsInspector ? metrics.contentSpacing : 0)
+                                .overlay(alignment: .top) {
                                     if !editorState.dockCollapsed {
                                         PanelResizeHandle(axis: .horizontal, currentValue: dockHeight) { startValue, delta in
                                             dockHeightOverride = clamped(
                                                 startValue - delta,
                                                 min: 260,
-                                                max: max(340, min(geometry.size.height * 0.58, 620))
+                                                max: resolvedDockMaxHeight(metrics: metrics, size: geometry.size)
                                             )
                                         }
-                                        .offset(y: metrics.contentSpacing * 0.5)
+                                        .offset(y: -(metrics.contentSpacing + 6))
+                                        .zIndex(3)
                                     }
                                 }
-
-                            DockPanel(editorState: editorState)
-                                .frame(height: dockHeight)
-                                .clipped()
-                                .padding(.top, metrics.contentSpacing)
-                                .padding(.leading, metrics.showsHierarchy ? metrics.contentSpacing : 0)
-                                .padding(.trailing, metrics.showsInspector ? metrics.contentSpacing : 0)
+                                .zIndex(2)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -180,8 +182,15 @@ struct ContentView: View {
         if editorState.dockCollapsed {
             return 64
         }
-        let maxHeight = max(340, min(size.height * 0.58, 620))
+        let maxHeight = resolvedDockMaxHeight(metrics: metrics, size: size)
         return clamped(dockHeightOverride ?? metrics.dockHeight, min: 260, max: maxHeight)
+    }
+
+    private func resolvedDockMaxHeight(metrics: EditorLayoutMetrics, size: CGSize) -> CGFloat {
+        let viewportReserve = max(190, metrics.viewportMinHeight)
+        let chromeReserve = 132 + (metrics.windowInset * 2) + (metrics.contentInset * 2)
+        let availableHeight = size.height - viewportReserve - chromeReserve
+        return max(300, min(availableHeight, min(size.height * 0.56, 620)))
     }
 }
 
@@ -854,8 +863,8 @@ private struct EditorLayoutMetrics {
         let sideFraction = fullWidth > 1500 ? 0.19 : 0.21
         hierarchyWidth = showsHierarchy ? clamped(fullWidth * (compactWidth ? 0.18 : sideFraction), min: 220, max: 320) : 0
         inspectorWidth = showsInspector ? clamped(fullWidth * (compactWidth ? 0.2 : sideFraction), min: 260, max: 360) : 0
-        dockHeight = clamped(size.height * (compactWidth ? 0.34 : 0.38), min: 300, max: 440)
-        viewportMinHeight = clamped(size.height * (compactWidth ? 0.33 : 0.35), min: 250, max: 420)
+        dockHeight = clamped(size.height * (compactWidth ? 0.33 : 0.37), min: 280, max: 440)
+        viewportMinHeight = clamped(size.height * (compactWidth ? 0.28 : 0.31), min: 210, max: 360)
     }
 }
 

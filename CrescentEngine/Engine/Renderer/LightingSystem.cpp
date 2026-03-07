@@ -470,8 +470,11 @@ void LightingSystem::allocateShadows() {
         );
         float texelWorld = slice.texelWorldSize;
         float normalizedTexel = texelWorld / std::max(0.1f, slice.depthSpan);
-        float bias = std::max(cascadeBias, normalizedTexel * biasScale);
-        float normalBias = std::max(cascadeNormalBias, normalizedTexel * normalBiasScale);
+        // Directional cascades are much more sensitive to self-shadow shimmer than
+        // local lights because a tiny camera move affects a large receiver area.
+        // Keep a stronger floor so dense scenes do not break into acne/flicker.
+        float bias = std::max(cascadeBias, std::max(normalizedTexel * biasScale, 0.0012f));
+        float normalBias = std::max(cascadeNormalBias, std::max(normalizedTexel * normalBiasScale, 0.0025f));
         gpuShadow.params = Math::Vector4(bias, normalBias, cascadePenumbra, static_cast<float>(i)); // bias/normalBias/penumbra/cascadeId
         gpuShadow.depthRange = Math::Vector4(slice.splitNear, slice.splitFar, texelWorld, static_cast<float>(slice.atlas.layer));
 

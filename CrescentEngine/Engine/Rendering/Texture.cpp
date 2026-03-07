@@ -227,6 +227,11 @@ uint32_t ComputeMipLevels(uint32_t width, uint32_t height) {
     return levels;
 }
 
+bool IsEditableRGBA8PixelFormat(MTL::PixelFormat format) {
+    return format == MTL::PixelFormatRGBA8Unorm
+        || format == MTL::PixelFormatRGBA8Unorm_sRGB;
+}
+
 uint64_t ComputeRGBA8MipChainBytes(uint32_t width, uint32_t height) {
     uint64_t total = 0;
     uint32_t levels = ComputeMipLevels(width, height);
@@ -416,6 +421,13 @@ Texture2D::~Texture2D() {
     }
 }
 
+bool Texture2D::isEditableRGBA8() const {
+    if (!m_Texture) {
+        return false;
+    }
+    return IsEditableRGBA8PixelFormat(m_Texture->pixelFormat());
+}
+
 void Texture2D::setHandle(MTL::Texture* texture) {
     if (m_Texture == texture) {
         return;
@@ -440,7 +452,93 @@ void TextureLoader::invalidateTexture(const std::string& path) {
     if (path.empty()) {
         return;
     }
-    m_Cache.erase(path);
+    for (auto it = m_Cache.begin(); it != m_Cache.end();) {
+        const std::string& key = it->first;
+        bool matches = key == path;
+        if (!matches && key.size() > path.size() && key.compare(0, path.size(), path) == 0 && key[path.size()] == '#') {
+            matches = true;
+        }
+        if (matches) {
+            it = m_Cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::shared_ptr<Texture2D> TextureLoader::loadTextureUncompressed(const std::string& path,
+                                                                  bool srgb,
+                                                                  bool flipVertical) {
+    if (!m_Device) {
+        std::cerr << "[TextureLoader] Invalid Metal device, cannot load texture\n";
+        return nullptr;
+    }
+
+    std::string cacheKey = path
+        + (srgb ? "#raw_srgb" : "#raw_linear")
+        + (flipVertical ? "#flip" : "#noflip");
+    if (auto it = m_Cache.find(cacheKey); it != m_Cache.end()) {
+        if (auto cached = it->second.lock()) {
+            return cached;
+        }
+    }
+
+    if (isEXRFile(path)) {
+        return loadEXRTexture(path, flipVertical);
+    }
+
+    if (stbi_is_hdr(path.c_str())) {
+        return loadHDRTexture(path, flipVertical);
+    }
+
+    int width = 0, height = 0, channels = 0;
+    stbi_set_flip_vertically_on_load(flipVertical ? 1 : 0);
+    stbi_uc* data = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+
+    if (!data) {
+        std::cerr << "[TextureLoader] Failed to load texture: " << path
+                  << " reason: " << stbi_failure_reason() << std::endl;
+        return nullptr;
+    }
+
+    MTL::PixelFormat format = srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm;
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setTextureType(MTL::TextureType2D);
+    desc->setWidth(static_cast<NS::UInteger>(width));
+    desc->setHeight(static_cast<NS::UInteger>(height));
+    desc->setPixelFormat(format);
+    desc->setUsage(MTL::TextureUsageShaderRead);
+    desc->setStorageMode(MTL::StorageModeShared);
+    uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+    desc->setMipmapLevelCount(static_cast<NS::UInteger>(mipLevels));
+
+    MTL::Texture* texture = m_Device->newTexture(desc);
+    desc->release();
+
+    if (!texture) {
+        std::cerr << "[TextureLoader] Failed to create Metal texture for: " << path << std::endl;
+        stbi_image_free(data);
+        return nullptr;
+    }
+
+    MTL::Region region = MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height));
+    texture->replaceRegion(region, 0, data, static_cast<NS::UInteger>(width * 4));
+    stbi_image_free(data);
+
+    generateMipmaps(texture);
+    LogTextureMemory("RGBA8", static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                     ComputeMipLevels(static_cast<uint32_t>(width), static_cast<uint32_t>(height)),
+                     ComputeRGBA8MipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height)));
+
+    auto tex = std::make_shared<Texture2D>();
+    tex->setHandle(texture);
+    tex->setDimensions(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+    tex->setColorSpace(srgb ? Texture2D::ColorSpace::SRGB : Texture2D::ColorSpace::Linear);
+    tex->setPath(path);
+
+    m_Cache[cacheKey] = tex;
+    return tex;
 }
 
 std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, bool srgb, bool flipVertical, bool normalMap) {
@@ -499,63 +597,10 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
         }
     }
 
-    if (isEXRFile(path)) {
-        return loadEXRTexture(path, flipVertical);
+    auto tex = loadTextureUncompressed(path, srgb, flipVertical);
+    if (tex) {
+        m_Cache[path] = tex;
     }
-
-    // HDR branch
-    if (stbi_is_hdr(path.c_str())) {
-        return loadHDRTexture(path, flipVertical);
-    }
-    
-    int width = 0, height = 0, channels = 0;
-    stbi_set_flip_vertically_on_load(flipVertical ? 1 : 0);
-    stbi_uc* data = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
-    
-    if (!data) {
-        std::cerr << "[TextureLoader] Failed to load texture: " << path 
-                  << " reason: " << stbi_failure_reason() << std::endl;
-        return nullptr;
-    }
-    
-    MTL::PixelFormat format = srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm;
-    
-    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
-    desc->setTextureType(MTL::TextureType2D);
-    desc->setWidth(static_cast<NS::UInteger>(width));
-    desc->setHeight(static_cast<NS::UInteger>(height));
-    desc->setPixelFormat(format);
-    desc->setUsage(MTL::TextureUsageShaderRead);
-    desc->setStorageMode(MTL::StorageModeShared);
-    uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
-    desc->setMipmapLevelCount(static_cast<NS::UInteger>(mipLevels));
-    
-    MTL::Texture* texture = m_Device->newTexture(desc);
-    desc->release();
-    
-    if (!texture) {
-        std::cerr << "[TextureLoader] Failed to create Metal texture for: " << path << std::endl;
-        stbi_image_free(data);
-        return nullptr;
-    }
-    
-    MTL::Region region = MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height));
-    texture->replaceRegion(region, 0, data, static_cast<NS::UInteger>(width * 4));
-    stbi_image_free(data);
-
-    // Generate mipmaps for smoother environment blur + texture sampling
-    generateMipmaps(texture);
-    LogTextureMemory("RGBA8", static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-                     ComputeMipLevels(static_cast<uint32_t>(width), static_cast<uint32_t>(height)),
-                     ComputeRGBA8MipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height)));
-    
-    auto tex = std::make_shared<Texture2D>();
-    tex->setHandle(texture); // Texture owns the Metal resource
-    tex->setDimensions(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
-    tex->setColorSpace(srgb ? Texture2D::ColorSpace::SRGB : Texture2D::ColorSpace::Linear);
-    tex->setPath(path);
-    
-    m_Cache[path] = tex;
     return tex;
 }
 
@@ -715,6 +760,11 @@ bool TextureLoader::updateTextureFromRGBA8(const std::shared_ptr<Texture2D>& tex
     }
 
     MTL::Texture* handle = texture->getHandle();
+    if (!IsEditableRGBA8PixelFormat(handle->pixelFormat())) {
+        std::cerr << "[TextureLoader] Refusing RGBA8 update for non-editable texture format: "
+                  << static_cast<int>(handle->pixelFormat()) << " path=" << texture->getPath() << std::endl;
+        return false;
+    }
     MTL::Region region = MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height));
     handle->replaceRegion(region, 0, uploadData, static_cast<NS::UInteger>(width * 4));
     generateMipmaps(handle);

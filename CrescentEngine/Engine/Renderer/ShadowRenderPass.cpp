@@ -523,7 +523,10 @@ void ShadowRenderPass::execute(MTL::CommandBuffer* cmdBuffer,
             }
             Math::Vector3 center = mr->getBoundsCenter();
             float dist = (center - m_cameraPosition).length();
-            if (dist < proxy->getLodStart()) {
+            float activationDistance = proxy->getLodEnd() > proxy->getLodStart() + 0.01f
+                ? proxy->getLodEnd()
+                : proxy->getLodStart();
+            if (dist < activationDistance) {
                 continue;
             }
             std::string proxyId = entity->getUUID().toString();

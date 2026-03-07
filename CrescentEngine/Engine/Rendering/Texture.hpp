@@ -32,6 +32,7 @@ public:
     uint32_t getWidth() const { return m_Width; }
     uint32_t getHeight() const { return m_Height; }
     bool isSRGB() const { return m_ColorSpace == ColorSpace::SRGB; }
+    bool isEditableRGBA8() const;
     
     void setDimensions(uint32_t width, uint32_t height) { m_Width = width; m_Height = height; }
     void setColorSpace(ColorSpace space) { m_ColorSpace = space; }
@@ -53,6 +54,7 @@ public:
     ~TextureLoader();
     
     std::shared_ptr<Texture2D> loadTexture(const std::string& path, bool srgb = true, bool flipVertical = true, bool normalMap = false);
+    std::shared_ptr<Texture2D> loadTextureUncompressed(const std::string& path, bool srgb = true, bool flipVertical = true);
     std::shared_ptr<Texture2D> loadTextureFromMemory(const unsigned char* data, size_t size, bool srgb, bool flipVertical, const std::string& cacheKey, bool normalMap = false);
     std::shared_ptr<Texture2D> createTextureFromRGBA8(const std::string& cacheKey, const unsigned char* rgba, int width, int height, bool srgb, bool flipVertical, bool normalMap = false);
     bool updateTextureFromRGBA8(const std::shared_ptr<Texture2D>& texture,

@@ -107,15 +107,17 @@ static ModelCacheEntry BuildModelCache(const std::string& path, const SceneComma
 
 static bool ReplaceMaterialTexture(Material* material,
                                    const std::string& path,
-                                   const std::shared_ptr<Texture2D>& replacement) {
+                                   const std::shared_ptr<Texture2D>& replacement,
+                                   const std::shared_ptr<Texture2D>& terrainControlReplacement = nullptr) {
     if (!material || path.empty() || !replacement) {
         return false;
     }
     bool updated = false;
     auto swapIfMatch = [&](const std::shared_ptr<Texture2D>& current,
-                           const std::function<void(std::shared_ptr<Texture2D>)>& setter) {
+                           const std::function<void(std::shared_ptr<Texture2D>)>& setter,
+                           const std::shared_ptr<Texture2D>& slotReplacement = nullptr) {
         if (current && current->getPath() == path) {
-            setter(replacement);
+            setter(slotReplacement ? slotReplacement : replacement);
             updated = true;
         }
     };
@@ -129,7 +131,7 @@ static bool ReplaceMaterialTexture(Material* material,
     swapIfMatch(material->getORMTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setORMTexture(tex); });
     swapIfMatch(material->getHeightTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setHeightTexture(tex); });
     swapIfMatch(material->getOpacityTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setOpacityTexture(tex); });
-    swapIfMatch(material->getTerrainControlTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainControlTexture(tex); });
+    swapIfMatch(material->getTerrainControlTexture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainControlTexture(tex); }, terrainControlReplacement);
     swapIfMatch(material->getTerrainLayer0Texture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer0Texture(tex); });
     swapIfMatch(material->getTerrainLayer1Texture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer1Texture(tex); });
     swapIfMatch(material->getTerrainLayer2Texture(), [&](std::shared_ptr<Texture2D> tex) { material->setTerrainLayer2Texture(tex); });
@@ -1644,6 +1646,38 @@ bool SceneCommands::reimportTextureAsset(Scene* scene, const std::string& guid) 
         return false;
     }
 
+    bool usesAsTerrainControl = false;
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity) {
+            continue;
+        }
+
+        auto scanMaterials = [&](auto* rendererComp) {
+            if (!rendererComp) {
+                return;
+            }
+            for (const auto& material : rendererComp->getMaterials()) {
+                if (material && material->getTerrainControlTexture() &&
+                    material->getTerrainControlTexture()->getPath() == path) {
+                    usesAsTerrainControl = true;
+                    return;
+                }
+            }
+        };
+
+        scanMaterials(entity->getComponent<MeshRenderer>());
+        if (!usesAsTerrainControl) {
+            scanMaterials(entity->getComponent<SkinnedMeshRenderer>());
+        }
+        if (!usesAsTerrainControl) {
+            scanMaterials(entity->getComponent<InstancedMeshRenderer>());
+        }
+        if (usesAsTerrainControl) {
+            break;
+        }
+    }
+
     loader->invalidateTexture(path);
     bool srgb = record.textureSettings.srgb;
     if (record.textureSettings.normalMap) {
@@ -1652,6 +1686,14 @@ bool SceneCommands::reimportTextureAsset(Scene* scene, const std::string& guid) 
     auto texture = loader->loadTexture(path, srgb, record.textureSettings.flipY, record.textureSettings.normalMap);
     if (!texture) {
         return false;
+    }
+
+    std::shared_ptr<Texture2D> terrainControlTexture;
+    if (usesAsTerrainControl) {
+        terrainControlTexture = loader->loadTextureUncompressed(path, false, false);
+        if (!terrainControlTexture) {
+            return false;
+        }
     }
 
     bool updated = false;
@@ -1663,13 +1705,19 @@ bool SceneCommands::reimportTextureAsset(Scene* scene, const std::string& guid) 
 
         if (auto* rendererComp = entity->getComponent<MeshRenderer>()) {
             for (const auto& material : rendererComp->getMaterials()) {
-                updated |= ReplaceMaterialTexture(material.get(), path, texture);
+                updated |= ReplaceMaterialTexture(material.get(), path, texture, terrainControlTexture);
             }
         }
 
         if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
             for (const auto& material : skinned->getMaterials()) {
-                updated |= ReplaceMaterialTexture(material.get(), path, texture);
+                updated |= ReplaceMaterialTexture(material.get(), path, texture, terrainControlTexture);
+            }
+        }
+
+        if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            for (const auto& material : instanced->getMaterials()) {
+                updated |= ReplaceMaterialTexture(material.get(), path, texture, terrainControlTexture);
             }
         }
     }
