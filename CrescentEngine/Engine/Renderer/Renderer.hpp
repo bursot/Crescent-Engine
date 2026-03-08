@@ -281,6 +281,7 @@ private:
         Math::Vector3 prevFogCameraForward = Math::Vector3(0.0f, 0.0f, -1.0f);
         Math::Vector3 prevFogSunDir = Math::Vector3(0.0f, -1.0f, 0.0f);
         float prevFogSunIntensity = 0.0f;
+        Math::Matrix4x4 prevFogViewMatrix;
         MTL::Texture* postColorTexture = nullptr;
         MTL::Texture* decalAlbedoTexture = nullptr;
         MTL::Texture* decalNormalTexture = nullptr;
@@ -456,6 +457,7 @@ private:
     bool m_outputHDR;
     Math::Matrix4x4 m_prevViewProjection;
     Math::Matrix4x4 m_prevViewProjectionNoJitter;
+    Math::Matrix4x4 m_prevFogViewMatrix;
     bool m_taaHistoryValid;
     bool m_motionHistoryValid;
     uint32_t m_taaFrameIndex;

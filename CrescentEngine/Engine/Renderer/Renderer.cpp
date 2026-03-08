@@ -266,6 +266,8 @@ struct FogParamsGPU {
     Math::Vector4 volumeParams;    // near, far, sliceCount, historyWeight
     Math::Vector4 misc;            // heightFogEnabled, anisotropy, historyValid, padding
     Math::Vector4 shadowParams;    // shadowIndex, cascadeCount, enabled, strength
+    Math::Matrix4x4 prevViewProjection;
+    Math::Matrix4x4 prevViewMatrix;
 };
 
 struct VelocityUniformsGPU {
@@ -544,6 +546,7 @@ Renderer::Renderer()
     , m_outputHDR(false)
     , m_prevViewProjection()
     , m_prevViewProjectionNoJitter()
+    , m_prevFogViewMatrix()
     , m_taaHistoryValid(false)
     , m_motionHistoryValid(false)
     , m_taaFrameIndex(0)
@@ -2026,6 +2029,7 @@ void Renderer::storeRenderTargetState(RenderTargetState& state) {
     state.prevFogCameraForward = m_prevFogCameraForward;
     state.prevFogSunDir = m_prevFogSunDir;
     state.prevFogSunIntensity = m_prevFogSunIntensity;
+    state.prevFogViewMatrix = m_prevFogViewMatrix;
     state.postColorTexture = m_postColorTexture;
     state.decalAlbedoTexture = m_decalAlbedoTexture;
     state.decalNormalTexture = m_decalNormalTexture;
@@ -2073,6 +2077,7 @@ void Renderer::loadRenderTargetState(const RenderTargetState& state) {
     m_prevFogCameraForward = state.prevFogCameraForward;
     m_prevFogSunDir = state.prevFogSunDir;
     m_prevFogSunIntensity = state.prevFogSunIntensity;
+    m_prevFogViewMatrix = state.prevFogViewMatrix;
     m_postColorTexture = state.postColorTexture;
     m_decalAlbedoTexture = state.decalAlbedoTexture;
     m_decalNormalTexture = state.decalNormalTexture;
@@ -2209,6 +2214,7 @@ void Renderer::releaseRenderTargetState(RenderTargetState& state) {
     state.prevFogCameraForward = Math::Vector3(0.0f, 0.0f, -1.0f);
     state.prevFogSunDir = Math::Vector3(0.0f, -1.0f, 0.0f);
     state.prevFogSunIntensity = 0.0f;
+    state.prevFogViewMatrix = Math::Matrix4x4();
 }
 
 void Renderer::invalidateRenderTargetState(RenderTargetState& state, uint32_t msaaSamples) {
@@ -2223,6 +2229,11 @@ void Renderer::invalidateRenderTargetState(RenderTargetState& state, uint32_t ms
     state.fogVolumeWidth = 0;
     state.fogVolumeHeight = 0;
     state.fogVolumeDepth = 0;
+    state.prevFogCameraPos = Math::Vector3(0.0f);
+    state.prevFogCameraForward = Math::Vector3(0.0f, 0.0f, -1.0f);
+    state.prevFogSunDir = Math::Vector3(0.0f, -1.0f, 0.0f);
+    state.prevFogSunIntensity = 0.0f;
+    state.prevFogViewMatrix = Math::Matrix4x4();
     state.hzbMipCount = 0;
 }
 
@@ -5894,88 +5905,6 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         sceneColorForPost = m_postColorTexture;
     }
 
-    bool useTAA = taaEnabled && runPrepass && m_taaPipelineState && m_depthTexture
-        && m_taaHistoryTexture && m_taaCurrentTexture && sceneColorForPost;
-    if (useTAA) {
-        TAAParamsGPU taaParams{};
-        taaParams.prevViewProjection = m_prevViewProjection;
-        float sharpness = std::max(0.0f, std::min(1.0f, post.taaSharpness));
-        float feedback = 0.2f - 0.15f * sharpness;
-        taaParams.params0 = Math::Vector4(
-            1.0f / static_cast<float>(renderWidth),
-            1.0f / static_cast<float>(renderHeight),
-            feedback,
-            m_taaHistoryValid ? 1.0f : 0.0f
-        );
-        float useVelocity = runVelocity ? 1.0f : 0.0f;
-        taaParams.params1 = Math::Vector4(sharpness, useVelocity, 0.04f, 0.55f);
-
-        MTL::RenderPassDescriptor* taaPass = MTL::RenderPassDescriptor::alloc()->init();
-        taaPass->colorAttachments()->object(0)->setTexture(m_taaCurrentTexture);
-        taaPass->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
-        taaPass->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
-        taaPass->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(0.0, 0.0, 0.0, 1.0));
-
-        MTL::RenderCommandEncoder* taaEncoder = commandBuffer->renderCommandEncoder(taaPass);
-        taaEncoder->setRenderPipelineState(m_taaPipelineState);
-        taaEncoder->setViewport(viewport);
-        taaEncoder->setFragmentBuffer(m_cameraUniformBuffer, 0, 0);
-        taaEncoder->setFragmentBytes(&taaParams, sizeof(TAAParamsGPU), 1);
-        taaEncoder->setFragmentTexture(sceneColorForPost, 0);
-        taaEncoder->setFragmentTexture(m_taaHistoryTexture, 1);
-        taaEncoder->setFragmentTexture(m_depthTexture, 2);
-        taaEncoder->setFragmentTexture(m_velocityTexture, 3);
-        taaEncoder->setFragmentTexture(m_normalTexture, 4);
-        if (m_linearClampSampler) {
-            taaEncoder->setFragmentSamplerState(m_linearClampSampler, 0);
-        }
-        taaEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
-        taaEncoder->endEncoding();
-        taaPass->release();
-
-        std::swap(m_taaHistoryTexture, m_taaCurrentTexture);
-        sceneColorForPost = m_taaHistoryTexture;
-        m_taaHistoryValid = true;
-    }
-
-    bool useMotionBlur = motionBlurEnabled && m_motionHistoryValid
-        && m_motionBlurPipelineState && m_motionBlurTexture && m_velocityTexture && sceneColorForPost && m_depthTexture;
-    if (useMotionBlur) {
-        MotionBlurParamsGPU blurParams{};
-        blurParams.prevViewProjection = m_prevViewProjectionNoJitter;
-        blurParams.currViewProjection = viewProjectionNoJitter;
-        float strength = std::max(0.0f, std::min(1.0f, post.motionBlurStrength));
-        blurParams.params0 = Math::Vector4(
-            1.0f / static_cast<float>(renderWidth),
-            1.0f / static_cast<float>(renderHeight),
-            strength,
-            0.0f
-        );
-
-        MTL::RenderPassDescriptor* blurPass = MTL::RenderPassDescriptor::alloc()->init();
-        blurPass->colorAttachments()->object(0)->setTexture(m_motionBlurTexture);
-        blurPass->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
-        blurPass->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
-        blurPass->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(0.0, 0.0, 0.0, 1.0));
-
-        MTL::RenderCommandEncoder* blurEncoder = commandBuffer->renderCommandEncoder(blurPass);
-        blurEncoder->setRenderPipelineState(m_motionBlurPipelineState);
-        blurEncoder->setViewport(viewport);
-        blurEncoder->setFragmentBuffer(m_cameraUniformBuffer, 0, 0);
-        blurEncoder->setFragmentBytes(&blurParams, sizeof(MotionBlurParamsGPU), 1);
-        blurEncoder->setFragmentTexture(sceneColorForPost, 0);
-        blurEncoder->setFragmentTexture(m_depthTexture, 1);
-        blurEncoder->setFragmentTexture(m_velocityTexture, 2);
-        if (m_linearClampSampler) {
-            blurEncoder->setFragmentSamplerState(m_linearClampSampler, 0);
-        }
-        blurEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
-        blurEncoder->endEncoding();
-        blurPass->release();
-
-        sceneColorForPost = m_motionBlurTexture;
-    }
-
     FogParamsGPU fogParams{};
     if (fogEnabled) {
         fogParams.fogColorDensity = Math::Vector4(
@@ -6007,6 +5936,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         float sliceCount = (m_fogVolumeDepth > 0) ? static_cast<float>(m_fogVolumeDepth) : 64.0f;
         float historyWeight = std::max(0.0f, std::min(0.98f, fog.volumetricHistoryWeight));
         float historyValid = m_fogVolumeHistoryValid ? 1.0f : 0.0f;
+        fogParams.prevViewProjection = m_prevViewProjectionNoJitter;
+        fogParams.prevViewMatrix = m_prevFogViewMatrix;
         if (camera->getEntity()) {
             Transform* camTransform = camera->getEntity()->getTransform();
             Math::Vector3 camPos = camTransform->getPosition();
@@ -6019,6 +5950,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 m_prevFogCameraForward = camForward;
                 m_prevFogSunDir = sunDirNorm;
                 m_prevFogSunIntensity = sunIntensity;
+                m_prevFogViewMatrix = viewMatrix;
                 m_fogVolumeHistoryValid = false;
             }
 
@@ -6043,6 +5975,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             m_prevFogCameraForward = camForward;
             m_prevFogSunDir = sunDirNorm;
             m_prevFogSunIntensity = sunIntensity;
+            m_prevFogViewMatrix = viewMatrix;
         }
 
         fogParams.volumeParams = Math::Vector4(
@@ -6135,6 +6068,88 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         sceneColorForPost = m_fogTexture;
         m_fogVolumeHistoryValid = true;
         std::swap(m_fogVolumeTexture, m_fogVolumeHistoryTexture);
+    }
+
+    bool useTAA = taaEnabled && runPrepass && m_taaPipelineState && m_depthTexture
+        && m_taaHistoryTexture && m_taaCurrentTexture && sceneColorForPost;
+    if (useTAA) {
+        TAAParamsGPU taaParams{};
+        taaParams.prevViewProjection = m_prevViewProjection;
+        float sharpness = std::max(0.0f, std::min(1.0f, post.taaSharpness));
+        float feedback = 0.2f - 0.15f * sharpness;
+        taaParams.params0 = Math::Vector4(
+            1.0f / static_cast<float>(renderWidth),
+            1.0f / static_cast<float>(renderHeight),
+            feedback,
+            m_taaHistoryValid ? 1.0f : 0.0f
+        );
+        float useVelocity = runVelocity ? 1.0f : 0.0f;
+        taaParams.params1 = Math::Vector4(sharpness, useVelocity, 0.04f, 0.55f);
+
+        MTL::RenderPassDescriptor* taaPass = MTL::RenderPassDescriptor::alloc()->init();
+        taaPass->colorAttachments()->object(0)->setTexture(m_taaCurrentTexture);
+        taaPass->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
+        taaPass->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+        taaPass->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(0.0, 0.0, 0.0, 1.0));
+
+        MTL::RenderCommandEncoder* taaEncoder = commandBuffer->renderCommandEncoder(taaPass);
+        taaEncoder->setRenderPipelineState(m_taaPipelineState);
+        taaEncoder->setViewport(viewport);
+        taaEncoder->setFragmentBuffer(m_cameraUniformBuffer, 0, 0);
+        taaEncoder->setFragmentBytes(&taaParams, sizeof(TAAParamsGPU), 1);
+        taaEncoder->setFragmentTexture(sceneColorForPost, 0);
+        taaEncoder->setFragmentTexture(m_taaHistoryTexture, 1);
+        taaEncoder->setFragmentTexture(m_depthTexture, 2);
+        taaEncoder->setFragmentTexture(m_velocityTexture, 3);
+        taaEncoder->setFragmentTexture(m_normalTexture, 4);
+        if (m_linearClampSampler) {
+            taaEncoder->setFragmentSamplerState(m_linearClampSampler, 0);
+        }
+        taaEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        taaEncoder->endEncoding();
+        taaPass->release();
+
+        std::swap(m_taaHistoryTexture, m_taaCurrentTexture);
+        sceneColorForPost = m_taaHistoryTexture;
+        m_taaHistoryValid = true;
+    }
+
+    bool useMotionBlur = motionBlurEnabled && m_motionHistoryValid
+        && m_motionBlurPipelineState && m_motionBlurTexture && m_velocityTexture && sceneColorForPost && m_depthTexture;
+    if (useMotionBlur) {
+        MotionBlurParamsGPU blurParams{};
+        blurParams.prevViewProjection = m_prevViewProjectionNoJitter;
+        blurParams.currViewProjection = viewProjectionNoJitter;
+        float strength = std::max(0.0f, std::min(1.0f, post.motionBlurStrength));
+        blurParams.params0 = Math::Vector4(
+            1.0f / static_cast<float>(renderWidth),
+            1.0f / static_cast<float>(renderHeight),
+            strength,
+            0.0f
+        );
+
+        MTL::RenderPassDescriptor* blurPass = MTL::RenderPassDescriptor::alloc()->init();
+        blurPass->colorAttachments()->object(0)->setTexture(m_motionBlurTexture);
+        blurPass->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
+        blurPass->colorAttachments()->object(0)->setStoreAction(MTL::StoreActionStore);
+        blurPass->colorAttachments()->object(0)->setClearColor(MTL::ClearColor::Make(0.0, 0.0, 0.0, 1.0));
+
+        MTL::RenderCommandEncoder* blurEncoder = commandBuffer->renderCommandEncoder(blurPass);
+        blurEncoder->setRenderPipelineState(m_motionBlurPipelineState);
+        blurEncoder->setViewport(viewport);
+        blurEncoder->setFragmentBuffer(m_cameraUniformBuffer, 0, 0);
+        blurEncoder->setFragmentBytes(&blurParams, sizeof(MotionBlurParamsGPU), 1);
+        blurEncoder->setFragmentTexture(sceneColorForPost, 0);
+        blurEncoder->setFragmentTexture(m_depthTexture, 1);
+        blurEncoder->setFragmentTexture(m_velocityTexture, 2);
+        if (m_linearClampSampler) {
+            blurEncoder->setFragmentSamplerState(m_linearClampSampler, 0);
+        }
+        blurEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        blurEncoder->endEncoding();
+        blurPass->release();
+
+        sceneColorForPost = m_motionBlurTexture;
     }
 
     bool useDOF = dofEnabled && runPrepass && m_dofPipelineState && m_dofTexture && sceneColorForPost && m_depthTexture;

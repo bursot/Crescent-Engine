@@ -147,6 +147,8 @@ struct FogParams {
     float4 volumeParams;    // near, far, sliceCount, padding
     float4 misc;            // heightFogEnabled, anisotropy, padding, padding
     float4 shadowParams;    // shadowIndex, cascadeCount, enabled, strength
+    float4x4 prevViewProjection;
+    float4x4 prevViewMatrix;
 };
 
 struct VelocityUniforms {
@@ -186,6 +188,29 @@ inline float computeFade(float dist, float start, float end) {
         return 0.0;
     }
     return saturate((dist - start) / span);
+}
+
+inline float integrateHeightFog(float baseDensity,
+                                float fogHeight,
+                                float heightFalloff,
+                                float rayOriginY,
+                                float rayDirY,
+                                float startDist,
+                                float endDist) {
+    float segmentLength = max(endDist - startDist, 0.0);
+    if (segmentLength <= 0.0001 || baseDensity <= 0.0) {
+        return 0.0;
+    }
+
+    float originTerm = exp(clamp(-heightFalloff * (rayOriginY - fogHeight), -32.0, 32.0));
+    float k = heightFalloff * rayDirY;
+    if (abs(k) < 0.0001) {
+        return baseDensity * originTerm * segmentLength;
+    }
+
+    float startTerm = exp(clamp(-k * startDist, -32.0, 32.0));
+    float endTerm = exp(clamp(-k * endDist, -32.0, 32.0));
+    return baseDensity * originTerm * (startTerm - endTerm) / k;
 }
 
 inline float2 impostorAtlasUV(float2 baseUV,
@@ -1993,7 +2018,7 @@ fragment float4 dof_fragment(
 
 kernel void fog_volume_build(
     texture3d<float, access::write> volumeTex [[texture(0)]],
-    texture3d<float, access::read> historyTex [[texture(1)]],
+    texture3d<float, access::sample> historyTex [[texture(1)]],
     depth2d<float> shadowAtlas [[texture(2)]],
     constant CameraUniforms& camera [[buffer(0)]],
     constant FogParams& params [[buffer(1)]],
@@ -2008,19 +2033,18 @@ kernel void fog_volume_build(
         return;
     }
 
-    float temporalPhase = params.misc.w;
     float2 uv = (float2(tid.x, tid.y) + 0.5) / float2(width, height);
-    float sliceJitter = hash21(float2(float(tid.x) * 0.73 + temporalPhase * 19.0,
-                                      float(tid.y) * 1.17 + float(tid.z) * 0.31)) - 0.5;
-    float slice = clamp((float(tid.z) + 0.5 + sliceJitter * 0.85) / float(depth), 0.0, 1.0);
+    float slice = clamp((float(tid.z) + 0.5) / float(depth), 0.0, 1.0);
 
     float nearPlane = max(params.volumeParams.x, 0.001);
     float farPlane = max(params.volumeParams.y, nearPlane + 0.001);
     float viewDepth = nearPlane * pow(farPlane / nearPlane, slice);
 
-    float2 ndc = uv * 2.0 - 1.0;
+    // Match the same UV->NDC convention used by depth reconstruction so the
+    // froxel volume lines up with world space instead of a screen-space overlay.
+    float2 ndc = uvToNdc(uv);
     float4 clip = float4(ndc, 1.0, 1.0);
-    float4 view = camera.projectionMatrixInverse * clip;
+    float4 view = camera.projectionMatrixNoJitterInverse * clip;
     float3 viewDir = normalize(view.xyz / max(view.w, 0.0001));
     float3 viewPos = viewDir * viewDepth;
     float3 worldPos = (camera.viewMatrixInverse * float4(viewPos, 1.0)).xyz;
@@ -2041,7 +2065,7 @@ kernel void fog_volume_build(
     float extinction = baseDensity * heightFactor * distanceMask;
     float albedo = 0.9;
     float scatterStrength = max(params.sunColor.w, 0.0);
-    float3 baseScattering = params.fogColorDensity.rgb * extinction * albedo * (0.35 + scatterStrength * 0.65);
+    float3 baseScattering = params.fogColorDensity.rgb * extinction * albedo * 0.08;
     float3 sunScattering = float3(0.0);
 
     float sunIntensity = clamp(params.sunDirIntensity.w, 0.0, 10.0);
@@ -2110,7 +2134,23 @@ kernel void fog_volume_build(
     float4 current = float4(scattering, extinction);
     float historyWeight = clamp(params.volumeParams.w, 0.0, 0.98);
     if (params.misc.z > 0.5 && historyWeight > 0.0) {
-        float4 previous = historyTex.read(tid);
+        float logDepth = log(farPlane / nearPlane);
+        float4 previous = current;
+        bool hasHistorySample = false;
+        float4 prevClip = params.prevViewProjection * float4(worldPos, 1.0);
+        float3 prevViewPos = (params.prevViewMatrix * float4(worldPos, 1.0)).xyz;
+        if (prevClip.w > 0.0001 && prevViewPos.z < -nearPlane && logDepth > 0.0001) {
+            float2 prevNdc = prevClip.xy / prevClip.w;
+            float2 prevUv = float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5);
+            float prevDistance = length(prevViewPos);
+            float prevSlice = log(max(prevDistance, nearPlane) / nearPlane) / logDepth;
+            if (all(prevUv >= float2(0.0)) && all(prevUv <= float2(1.0)) && prevSlice >= 0.0 && prevSlice <= 1.0) {
+                previous = historyTex.sample(shadowSampler, float3(prevUv, prevSlice));
+                hasHistorySample = true;
+            }
+        }
+
+        if (hasHistorySample) {
         float4 lowClamp = current * float4(0.65, 0.65, 0.65, 0.7);
         float4 highClamp = current * float4(1.35, 1.35, 1.35, 1.3) + float4(0.002);
         previous = clamp(previous, lowClamp, highClamp);
@@ -2122,6 +2162,7 @@ kernel void fog_volume_build(
         float historyConfidence = (1.0 - smoothstep(0.08, 0.45, lumDelta))
             * (1.0 - smoothstep(0.05, 0.3, extDelta));
         current = mix(current, previous, historyWeight * historyConfidence);
+        }
     }
     volumeTex.write(current, tid);
 }
@@ -2148,6 +2189,13 @@ fragment float4 fog_fragment(
         return float4(current, 1.0);
     }
 
+    float2 ndc = uvToNdc(in.uv);
+    float4 clipFar = float4(ndc, 1.0, 1.0);
+    float4 viewFar = camera.projectionMatrixNoJitterInverse * clipFar;
+    float3 viewDir = normalize(viewFar.xyz / max(viewFar.w, 0.0001));
+    float3 worldDir = normalize((camera.viewMatrixInverse * float4(viewDir, 0.0)).xyz);
+    float3 cameraPos = camera.cameraPositionTime.xyz;
+
     float distance = min(endDist, farPlane);
     if (depth < 1.0) {
         float3 viewPos = reconstructViewPosition(in.uv, depth, camera);
@@ -2160,10 +2208,27 @@ fragment float4 fog_fragment(
         return float4(current, 1.0);
     }
 
+    float density = clamp(params.fogColorDensity.w, 0.0, 1.0) * 0.12;
+    float opticalDepth = density * (segmentEnd - segmentStart);
+    if (params.misc.x > 0.5) {
+        opticalDepth = integrateHeightFog(
+            density,
+            params.distanceParams.z,
+            max(params.distanceParams.w, 0.0001),
+            cameraPos.y,
+            worldDir.y,
+            segmentStart,
+            segmentEnd
+        );
+    }
+    opticalDepth = max(opticalDepth, 0.0);
+    float analyticTransmittance = exp(-opticalDepth);
+    float analyticFogAmount = 1.0 - analyticTransmittance;
+    float3 analyticFog = params.fogColorDensity.rgb * analyticFogAmount;
+
     float travel = segmentEnd - segmentStart;
-    int steps = int(clamp(sliceCount * 0.75, 24.0, 96.0));
+    int steps = int(clamp(sliceCount * 0.6, 16.0, 64.0));
     float stepLength = travel / max(float(steps), 1.0);
-    float pixelJitter = hash21(floor(in.uv * float2(sceneTex.get_width(), sceneTex.get_height())) + params.misc.w * 31.0) - 0.5;
 
     float3 accum = float3(0.0);
     float transmittance = 1.0;
@@ -2171,7 +2236,7 @@ fragment float4 fog_fragment(
         if (i >= steps) {
             break;
         }
-        float dist = segmentStart + (float(i) + 0.5 + pixelJitter * 0.85) * stepLength;
+        float dist = segmentStart + (float(i) + 0.5) * stepLength;
         dist = max(dist, nearPlane);
         float slice = log(dist / nearPlane) / logDepth;
         float w = clamp(slice, 0.0, 1.0);
@@ -2186,7 +2251,7 @@ fragment float4 fog_fragment(
         transmittance *= att;
     }
 
-    float3 color = current * transmittance + accum;
+    float3 color = current * analyticTransmittance + analyticFog + accum;
     return float4(color, 1.0);
 }
 
