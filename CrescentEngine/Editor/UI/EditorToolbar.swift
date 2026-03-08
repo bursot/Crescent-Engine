@@ -144,6 +144,21 @@ struct EditorToolbar: View {
 
                 ToolbarCluster {
                     Button(action: {
+                        editorState.buildGame()
+                    }) {
+                        ToolbarPillLabel(
+                            title: editorState.isBuildingGame ? "Building" : "Build Game",
+                            value: editorState.isBuildingGame ? "..." : "Debug",
+                            systemImage: editorState.isBuildingGame ? "shippingbox.circle.fill" : "shippingbox.fill",
+                            accent: editorState.isBuildingGame ? EditorTheme.warning : EditorTheme.textAccent
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!editorState.hasProject || editorState.isBuildingGame)
+                    .opacity(editorState.hasProject && !editorState.isBuildingGame ? 1 : 0.55)
+                    .help("Build the current project as a standalone game app")
+
+                    Button(action: {
                         editorState.togglePlay()
                     }) {
                         ToolbarIconButtonLabel(

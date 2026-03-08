@@ -4170,6 +4170,9 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         return @{
             @"defaultRenderProfile": [NSString stringWithUTF8String:settings.defaultRenderProfile.c_str()],
             @"buildTarget": [NSString stringWithUTF8String:settings.buildTarget.c_str()],
+            @"productName": [NSString stringWithUTF8String:settings.productName.c_str()],
+            @"bundleIdentifier": [NSString stringWithUTF8String:settings.bundleIdentifier.c_str()],
+            @"startupScene": [NSString stringWithUTF8String:settings.startupScene.c_str()],
             @"assetPaths": assetPaths,
             @"renderProfiles": renderProfiles,
             @"qualityPresets": qualityPresets,
@@ -4205,6 +4208,15 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         }
         if (settings[@"buildTarget"]) {
             updated.buildTarget = [settings[@"buildTarget"] UTF8String];
+        }
+        if (settings[@"productName"]) {
+            updated.productName = [settings[@"productName"] UTF8String];
+        }
+        if (settings[@"bundleIdentifier"]) {
+            updated.bundleIdentifier = [settings[@"bundleIdentifier"] UTF8String];
+        }
+        if (settings[@"startupScene"]) {
+            updated.startupScene = [settings[@"startupScene"] UTF8String];
         }
         if (settings[@"assetPaths"] && [settings[@"assetPaths"] isKindOfClass:[NSArray class]]) {
             updated.assetPaths.clear();

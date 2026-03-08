@@ -177,21 +177,14 @@ enum ViewMode: Int, CaseIterable {
     }
 }
 
-struct TerrainPaintConfig: Equatable {
-    var enabled: Bool = false
-    var targetEntityUUID: String = ""
-    var layer: Int = 0
-    var radius: Float = 1.5
-    var hardness: Float = 0.65
-    var strength: Float = 0.35
-    var spacing: Float = 0.25
-    var maskPreset: Int = 0
-    var maskPath: String = ""
-    var autoNormalize: Bool = true
-}
-
 // Editor state - Observable object to manage editor state
 class EditorState: ObservableObject {
+    private static let repositoryRootURL: URL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+
     @Published var selectedEntityUUIDs: Set<String> = []  // Swift manages multi-selection
     @Published var primarySelectionUUID: String? = nil
     @Published var entityList: [EntityInfo] = []
@@ -221,6 +214,8 @@ class EditorState: ObservableObject {
     @Published var projectScenesURL: URL?
     @Published var hasProject: Bool = false
     @Published var settingsWindowRequested: Bool = false
+    @Published var isBuildingGame: Bool = false
+    @Published var lastBuiltAppURL: URL?
     @Published var terrainPaintEnabled: Bool = false
     @Published var terrainPaintLayer: Int = 0
     @Published var terrainBrushRadius: Float = 1.5
@@ -242,7 +237,6 @@ class EditorState: ObservableObject {
     private var keyDownMonitor: Any?
     private var keyUpMonitor: Any?
     private var flagsChangedMonitor: Any?
-
     var terrainPaintConfig: TerrainPaintConfig {
         TerrainPaintConfig(
             enabled: terrainPaintEnabled && !isPlaying && viewMode == .scene,
@@ -259,7 +253,6 @@ class EditorState: ObservableObject {
     }
     
     init() {
-        // Add initial welcome messages
         addLog(.info, "Crescent Engine Editor Started")
         addLog(.info, "Initializing Metal Renderer...")
         
@@ -901,6 +894,87 @@ class EditorState: ObservableObject {
         }
         if accessed {
             resolvedURL.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    func buildGame(configuration: String = "Debug") {
+        guard !isBuildingGame else { return }
+        guard hasProject, let projectRootURL else {
+            addLog(.error, "Open a project before building a game.")
+            return
+        }
+
+        let projectFileURL = projectRootURL.appendingPathComponent("Project.cproj")
+        guard FileManager.default.fileExists(atPath: projectFileURL.path) else {
+            addLog(.error, "Project.cproj is missing in the project root.")
+            return
+        }
+
+        let scriptURL = Self.repositoryRootURL.appendingPathComponent("scripts/build_game.py")
+        guard FileManager.default.fileExists(atPath: scriptURL.path) else {
+            addLog(.error, "Build script is missing: \(scriptURL.path)")
+            return
+        }
+
+        if sceneURL != nil {
+            saveScene()
+        }
+
+        isBuildingGame = true
+        showConsole = true
+        addLog(.info, "Building game (\(configuration))...")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", scriptURL.path, projectFileURL.path, "--configuration", configuration]
+        process.currentDirectoryURL = Self.repositoryRootURL
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outputData = NSMutableData()
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty {
+                    outputData.append(data)
+                }
+            }
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                DispatchQueue.main.async {
+                    self.isBuildingGame = false
+                    self.addLog(.error, "Failed to start build: \(error.localizedDescription)")
+                }
+                return
+            }
+
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            let output = String(data: outputData as Data, encoding: .utf8) ?? ""
+            let lines = output.split(whereSeparator: \.isNewline).map(String.init)
+            let packagedPrefix = "Packaged app: "
+            let packagedPath = lines.last(where: { $0.hasPrefix(packagedPrefix) }).map {
+                String($0.dropFirst(packagedPrefix.count))
+            }
+
+            DispatchQueue.main.async {
+                self.isBuildingGame = false
+                if process.terminationStatus == 0, let packagedPath {
+                    let appURL = URL(fileURLWithPath: packagedPath)
+                    self.lastBuiltAppURL = appURL
+                    self.addLog(.info, "Build completed: \(appURL.lastPathComponent)")
+                    NSWorkspace.shared.activateFileViewerSelecting([appURL])
+                } else {
+                    let tail = lines.suffix(12).joined(separator: "\n")
+                    let detail = tail.isEmpty ? "Unknown error" : tail
+                    self.addLog(.error, "Build failed:\n\(detail)")
+                }
+            }
         }
     }
 

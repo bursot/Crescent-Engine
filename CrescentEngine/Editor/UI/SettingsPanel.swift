@@ -76,6 +76,9 @@ struct InputBindingItem: Identifiable, Hashable {
 final class ProjectSettingsViewModel: ObservableObject {
     @Published var defaultRenderProfile: String = "High"
     @Published var buildTarget: String = "macOS"
+    @Published var productName: String = ""
+    @Published var bundleIdentifier: String = ""
+    @Published var startupScene: String = ""
     @Published var assetPaths: [String] = []
     @Published var renderProfiles: [RenderProfileItem] = []
     @Published var qualityPresets: [QualityPresetItem] = []
@@ -94,6 +97,9 @@ final class ProjectSettingsViewModel: ObservableObject {
         let dict = CrescentEngineBridge.shared().getProjectSettings() as? [String: Any] ?? [:]
         defaultRenderProfile = dict["defaultRenderProfile"] as? String ?? defaultRenderProfile
         buildTarget = dict["buildTarget"] as? String ?? buildTarget
+        productName = dict["productName"] as? String ?? productName
+        bundleIdentifier = dict["bundleIdentifier"] as? String ?? bundleIdentifier
+        startupScene = dict["startupScene"] as? String ?? startupScene
         assetPaths = dict["assetPaths"] as? [String] ?? assetPaths
         if assetPaths.isEmpty {
             assetPaths = ["Assets"]
@@ -145,6 +151,9 @@ final class ProjectSettingsViewModel: ObservableObject {
         let info: [String: Any] = [
             "defaultRenderProfile": defaultRenderProfile,
             "buildTarget": buildTarget,
+            "productName": productName,
+            "bundleIdentifier": bundleIdentifier,
+            "startupScene": startupScene,
             "assetPaths": assetPaths,
             "renderProfiles": renderProfiles.map { ["name": $0.name, "quality": $0.quality.toDictionary()] },
             "qualityPresets": qualityPresets.map { ["name": $0.name, "quality": $0.quality.toDictionary()] },
@@ -282,6 +291,25 @@ final class ProjectSettingsViewModel: ObservableObject {
             InputBindingItem(action: "MoveDown", key: "Q", mouseButton: "", scale: 1.0, invert: false),
             InputBindingItem(action: "Jump", key: "Space", mouseButton: "", scale: 1.0, invert: false)
         ]
+    }
+
+    func useCurrentSceneAsStartup() {
+        guard let editorState,
+              let sceneURL = editorState.sceneURL,
+              let projectRootURL = editorState.projectRootURL else {
+            return
+        }
+        let rootPath = projectRootURL.standardizedFileURL.path
+        let scenePath = sceneURL.standardizedFileURL.path
+        guard scenePath.hasPrefix(rootPath) else {
+            return
+        }
+        var relative = String(scenePath.dropFirst(rootPath.count))
+        if relative.hasPrefix("/") {
+            relative.removeFirst()
+        }
+        startupScene = relative
+        apply()
     }
 }
 
@@ -676,6 +704,41 @@ private struct ProjectSettingsPanel: View {
                 .frame(width: 160)
                 .onChange(of: viewModel.buildTarget) { _ in
                     viewModel.apply()
+                }
+            }
+
+            SettingsRow(title: "Product Name") {
+                TextField("MyGame", text: $viewModel.productName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .onChange(of: viewModel.productName) { _ in
+                        viewModel.apply()
+                    }
+            }
+
+            SettingsRow(title: "Bundle Identifier") {
+                TextField("com.studio.mygame", text: $viewModel.bundleIdentifier)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+                    .onChange(of: viewModel.bundleIdentifier) { _ in
+                        viewModel.apply()
+                    }
+            }
+
+            SettingsRow(title: "Startup Scene") {
+                HStack(spacing: 8) {
+                    TextField("Scenes/Main.cscene", text: $viewModel.startupScene)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 260)
+                        .onChange(of: viewModel.startupScene) { _ in
+                            viewModel.apply()
+                        }
+
+                    Button("Use Current") {
+                        viewModel.useCurrentSceneAsStartup()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
             }
             

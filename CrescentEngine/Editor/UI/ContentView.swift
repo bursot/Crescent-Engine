@@ -57,7 +57,6 @@ struct ContentView: View {
                                         .offset(x: metrics.contentSpacing * 0.5)
                                     }
                                 }
-
                         }
 
                         VStack(spacing: 0) {
@@ -136,7 +135,6 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 640)
-        .environment(\.colorScheme, .dark)
         .onAppear {
             EditorTheme.isDark = true
             editorState.showHierarchy = true
@@ -152,6 +150,7 @@ struct ContentView: View {
         .onChange(of: editorState.showConsole) { _ in
             syncDockSelection()
         }
+        .environment(\.colorScheme, .dark)
     }
     
     private func syncDockSelection() {

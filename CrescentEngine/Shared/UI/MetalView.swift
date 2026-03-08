@@ -22,19 +22,22 @@ struct MetalView: NSViewRepresentable {
     let isActive: Bool
     let drivesLoop: Bool
     let terrainPaintConfig: TerrainPaintConfig
+    let onEngineReady: (() -> Void)?
 
     init(viewKind: RenderViewKind,
          isActive: Bool,
          drivesLoop: Bool = false,
-         terrainPaintConfig: TerrainPaintConfig = TerrainPaintConfig()) {
+         terrainPaintConfig: TerrainPaintConfig = TerrainPaintConfig(),
+         onEngineReady: (() -> Void)? = nil) {
         self.viewKind = viewKind
         self.isActive = isActive
         self.drivesLoop = drivesLoop
         self.terrainPaintConfig = terrainPaintConfig
+        self.onEngineReady = onEngineReady
     }
     
     func makeCoordinator() -> Coordinator {
-        Coordinator(viewKind: viewKind, drivesLoop: drivesLoop)
+        Coordinator(viewKind: viewKind, drivesLoop: drivesLoop, onEngineReady: onEngineReady)
     }
     
     func makeNSView(context: Context) -> MetalDisplayView {
@@ -87,7 +90,7 @@ struct MetalView: NSViewRepresentable {
     class Coordinator: NSObject, InputDelegate {
         static var engineInitialized = false
 
-        var bridge: CrescentEngineBridge?
+        var bridge: AppBridgeType?
         var metalView: MetalDisplayView?
         private var displayLink: Any? // Can be CVDisplayLink or CADisplayLink
         private weak var lastAppliedMetalLayer: CAMetalLayer?
@@ -98,13 +101,15 @@ struct MetalView: NSViewRepresentable {
         private var isEngineInitialized = false
         private let viewKind: RenderViewKind
         private let drivesLoop: Bool
+        private let onEngineReady: (() -> Void)?
         private var keyDownMonitor: Any?
         private var keyUpMonitor: Any?
         private var flagsChangedMonitor: Any?
 
-        init(viewKind: RenderViewKind, drivesLoop: Bool) {
+        init(viewKind: RenderViewKind, drivesLoop: Bool, onEngineReady: (() -> Void)?) {
             self.viewKind = viewKind
             self.drivesLoop = drivesLoop
+            self.onEngineReady = onEngineReady
         }
         
         func initializeEngine() {
@@ -121,7 +126,7 @@ struct MetalView: NSViewRepresentable {
             }
             
             // Initialize engine
-            let bridge = CrescentEngineBridge.shared()
+            let bridge = AppBridge.shared()
             if !Coordinator.engineInitialized {
                 Coordinator.engineInitialized = bridge.initialize()
             }
@@ -141,6 +146,9 @@ struct MetalView: NSViewRepresentable {
                 self.isEngineInitialized = Coordinator.engineInitialized
 
                 handleResize(metalView.bounds.size)
+                DispatchQueue.main.async {
+                    self.onEngineReady?()
+                }
                 
                 // Setup display link
                 if drivesLoop {
@@ -272,6 +280,7 @@ struct MetalView: NSViewRepresentable {
             bridge?.handleMouseButton(Int32(button), pressed: pressed)
         }
         
+        #if EDITOR_APP
         func handleMouseClick(at point: CGPoint, viewSize: CGSize, additive: Bool) {
             guard let metalView = metalView else { return }
             let scale = metalView.layer?.contentsScale ?? 2.0
@@ -405,6 +414,7 @@ struct MetalView: NSViewRepresentable {
         func clearTerrainBrushPreview() {
             bridge?.clearTerrainBrushPreview()
         }
+        #endif
 
         func setInputMonitoring(active: Bool) {
             if active {
@@ -506,18 +516,22 @@ class MetalDisplayView: NSView {
     var allowsCameraControl: Bool = true
     var terrainPaintEnabled: Bool = false {
         didSet {
+            #if EDITOR_APP
             if oldValue && !terrainPaintEnabled {
                 coordinator?.endTerrainPaint()
                 coordinator?.clearTerrainBrushPreview()
             }
+            #endif
         }
     }
     var terrainPaintTargetUUID: String = "" {
         didSet {
+            #if EDITOR_APP
             if oldValue != terrainPaintTargetUUID {
                 coordinator?.endTerrainPaint()
                 coordinator?.clearTerrainBrushPreview()
             }
+            #endif
         }
     }
     var terrainPaintLayer: Int = 0
@@ -676,6 +690,7 @@ class MetalDisplayView: NSView {
         inputDelegate?.handleKeyUp(event.keyCode)
     }
 
+    #if EDITOR_APP
     private func shouldDispatchTerrainPreview(now: CFTimeInterval, force: Bool = false) -> Bool {
         if force || (now - lastTerrainPreviewDispatchTime) >= terrainPreviewDispatchInterval {
             lastTerrainPreviewDispatchTime = now
@@ -691,6 +706,7 @@ class MetalDisplayView: NSView {
         }
         return false
     }
+    #endif
     
     // MARK: - Mouse Input (Unity/Unreal style)
     
@@ -704,6 +720,7 @@ class MetalDisplayView: NSView {
         window?.makeFirstResponder(self)
         isLeftMouseDown = true
         let point = convert(event.locationInWindow, from: nil)
+        #if EDITOR_APP
         let invert = event.modifierFlags.contains(.option)
         let now = CACurrentMediaTime()
 
@@ -726,16 +743,20 @@ class MetalDisplayView: NSView {
             )
             return
         }
+        #endif
 
         inputDelegate?.handleMouseButton(0, pressed: true)
+        #if EDITOR_APP
         guard allowsPicking else { return }
         
         // Get click position
         let additive = event.modifierFlags.contains(.command)
         coordinator?.handleMouseClick(at: point, viewSize: bounds.size, additive: additive)
+        #endif
     }
     
     override func mouseDragged(with event: NSEvent) {
+        #if EDITOR_APP
         if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty && isLeftMouseDown {
             let point = convert(event.locationInWindow, from: nil)
             let invert = event.modifierFlags.contains(.option)
@@ -776,21 +797,27 @@ class MetalDisplayView: NSView {
             let point = convert(event.locationInWindow, from: nil)
             coordinator?.handleMouseDrag(at: point, viewSize: bounds.size)
         }
+        #endif
     }
     
     override func mouseUp(with event: NSEvent) {
         isLeftMouseDown = false
+        #if EDITOR_APP
         lastTerrainPaintDispatchTime = 0
         lastTerrainPreviewDispatchTime = 0
         if terrainPaintEnabled && !terrainPaintTargetUUID.isEmpty {
             coordinator?.endTerrainPaint()
             return
         }
+        #endif
         inputDelegate?.handleMouseButton(0, pressed: false)
+        #if EDITOR_APP
         guard allowsPicking else { return }
         coordinator?.handleMouseUpEvent()
+        #endif
     }
 
+    #if EDITOR_APP
     override func mouseMoved(with event: NSEvent) {
         guard terrainPaintEnabled, !terrainPaintTargetUUID.isEmpty else { return }
         let now = CACurrentMediaTime()
@@ -812,6 +839,7 @@ class MetalDisplayView: NSView {
         lastTerrainPreviewDispatchTime = 0
         coordinator?.clearTerrainBrushPreview()
     }
+    #endif
     
     override func rightMouseDown(with event: NSEvent) {
         guard inputDelegate != nil else { return }

@@ -9,6 +9,9 @@ namespace Crescent {
 struct ProjectSettings {
     std::string defaultRenderProfile = "High";
     std::string buildTarget = "macOS";
+    std::string productName;
+    std::string bundleIdentifier;
+    std::string startupScene;
     std::vector<std::string> assetPaths = {"Assets"};
     
     struct RenderProfile {

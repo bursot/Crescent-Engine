@@ -1,10 +1,15 @@
 import SwiftUI
 
+#if EDITOR_APP
 @main
 struct CrescentEngineApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openWindow) private var openWindow
-    @StateObject private var editorState = EditorState()
+    @StateObject private var editorState: EditorState
+
+    init() {
+        _editorState = StateObject(wrappedValue: EditorState())
+    }
     
     var body: some Scene {
         WindowGroup {
@@ -12,35 +17,13 @@ struct CrescentEngineApp: App {
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             if newPhase == .background {
-                // Shutdown engine when app goes to background
                 CrescentEngineBridge.shared().shutdown()
             }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         .defaultSize(width: 1280, height: 800)
-        
-        WindowGroup("Settings", id: "settings") {
-            SettingsWindow(editorState: editorState)
-        }
-        .defaultSize(width: 620, height: 720)
-
-        WindowGroup("Skeleton", id: "skeleton") {
-            SkeletonWindow(editorState: editorState)
-        }
-        .defaultSize(width: 820, height: 640)
-
-        WindowGroup("Animation Sequence", id: "animSequence") {
-            AnimationSequenceWindow(editorState: editorState)
-        }
-        .defaultSize(width: 900, height: 660)
-
-        WindowGroup("Anim Graph", id: "animGraph") {
-            AnimGraphWindow(editorState: editorState)
-        }
-        .defaultSize(width: 980, height: 740)
         .commands {
-            // File menu
             CommandGroup(replacing: .newItem) {
                 Button("New Scene") {
                     // TODO: Create new scene
@@ -65,7 +48,6 @@ struct CrescentEngineApp: App {
                 .keyboardShortcut("s", modifiers: [.command, .shift])
             }
             
-            // Edit menu additions
             CommandGroup(after: .pasteboard) {
                 Divider()
                 
@@ -80,7 +62,6 @@ struct CrescentEngineApp: App {
                 .keyboardShortcut(.delete, modifiers: [])
             }
             
-            // GameObject menu
             CommandMenu("GameObject") {
                 Menu("3D Object") {
                     Button("Cube") {
@@ -131,7 +112,14 @@ struct CrescentEngineApp: App {
                 }
             }
 
-            // Window menu additions
+            CommandMenu("Build") {
+                Button("Build Game") {
+                    editorState.buildGame()
+                }
+                .keyboardShortcut("b", modifiers: [.command])
+                .disabled(!editorState.hasProject || editorState.isBuildingGame)
+            }
+
             CommandGroup(after: .windowArrangement) {
                 Divider()
 
@@ -173,5 +161,26 @@ struct CrescentEngineApp: App {
                 .keyboardShortcut("4", modifiers: [.command])
             }
         }
+        
+        WindowGroup("Settings", id: "settings") {
+            SettingsWindow(editorState: editorState)
+        }
+        .defaultSize(width: 620, height: 720)
+
+        WindowGroup("Skeleton", id: "skeleton") {
+            SkeletonWindow(editorState: editorState)
+        }
+        .defaultSize(width: 820, height: 640)
+
+        WindowGroup("Animation Sequence", id: "animSequence") {
+            AnimationSequenceWindow(editorState: editorState)
+        }
+        .defaultSize(width: 900, height: 660)
+
+        WindowGroup("Anim Graph", id: "animGraph") {
+            AnimGraphWindow(editorState: editorState)
+        }
+        .defaultSize(width: 980, height: 740)
     }
 }
+#endif

@@ -26,6 +26,30 @@ std::string ProjectFileName() {
     return "Project.cproj";
 }
 
+std::string SanitizeIdentifierComponent(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+    for (char c : value) {
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            result.push_back(c);
+        } else if (c >= 'A' && c <= 'Z') {
+            result.push_back(static_cast<char>(c - 'A' + 'a'));
+        } else if (c == '_' || c == '-') {
+            result.push_back('.');
+        }
+    }
+    while (!result.empty() && result.front() == '.') {
+        result.erase(result.begin());
+    }
+    while (!result.empty() && result.back() == '.') {
+        result.pop_back();
+    }
+    if (result.empty()) {
+        result = "game";
+    }
+    return result;
+}
+
 SceneQualitySettings MakeQuality(int shadowQuality,
                                  int shadowResolution,
                                  int msaaSamples,
@@ -124,6 +148,9 @@ std::shared_ptr<Project> Project::Create(const std::string& rootPath, const std:
     project->m_ProjectFilePath = JoinPath(root, ProjectFileName());
     project->m_Settings.defaultRenderProfile = "High";
     project->m_Settings.buildTarget = "macOS";
+    project->m_Settings.productName = project->m_Name;
+    project->m_Settings.bundleIdentifier = "com.crescentengine." + SanitizeIdentifierComponent(project->m_Name);
+    project->m_Settings.startupScene.clear();
     project->m_Settings.assetPaths = {"Assets"};
     project->m_Settings.renderProfiles = DefaultRenderProfiles();
     project->m_Settings.qualityPresets = DefaultQualityPresets();
@@ -166,6 +193,12 @@ std::shared_ptr<Project> Project::Load(const std::string& projectFilePath) {
     project->m_ProjectFilePath = NormalizePath(projectFilePath);
     project->m_Settings.defaultRenderProfile = data.value("defaultRenderProfile", std::string("High"));
     project->m_Settings.buildTarget = data.value("buildTarget", std::string("macOS"));
+    project->m_Settings.productName = data.value("productName", project->m_Name);
+    project->m_Settings.bundleIdentifier = data.value(
+        "bundleIdentifier",
+        std::string("com.crescentengine.") + SanitizeIdentifierComponent(project->m_Name)
+    );
+    project->m_Settings.startupScene = data.value("startupScene", std::string());
     if (data.contains("assetPaths") && data["assetPaths"].is_array()) {
         project->m_Settings.assetPaths.clear();
         for (const auto& entry : data["assetPaths"]) {
@@ -265,6 +298,12 @@ bool Project::save() const {
         {"settings", "Settings"},
         {"defaultRenderProfile", m_Settings.defaultRenderProfile},
         {"buildTarget", m_Settings.buildTarget},
+        {"productName", m_Settings.productName.empty() ? m_Name : m_Settings.productName},
+        {"bundleIdentifier",
+            m_Settings.bundleIdentifier.empty()
+                ? (std::string("com.crescentengine.") + SanitizeIdentifierComponent(m_Name))
+                : m_Settings.bundleIdentifier},
+        {"startupScene", m_Settings.startupScene},
         {"assetPaths", m_Settings.assetPaths}
     };
     if (!m_Settings.renderProfiles.empty()) {

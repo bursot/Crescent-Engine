@@ -28,6 +28,7 @@
 		625BE1732EE9D194008AFE51 /* CrescentEngineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CrescentEngineTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		625BE17D2EE9D194008AFE51 /* CrescentEngineUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CrescentEngineUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		62636FF52EF8467900E4197B /* SimpleAssimpViewX.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = SimpleAssimpViewX.xcodeproj; sourceTree = "<group>"; };
+		63B100000000000000000001 /* CrescentPlayer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CrescentPlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
@@ -83,6 +84,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		63B100000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -102,6 +110,7 @@
 				625BE1662EE9D193008AFE51 /* CrescentEngine.app */,
 				625BE1732EE9D194008AFE51 /* CrescentEngineTests.xctest */,
 				625BE17D2EE9D194008AFE51 /* CrescentEngineUITests.xctest */,
+				63B100000000000000000001 /* CrescentPlayer.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -185,6 +194,29 @@
 			productReference = 625BE17D2EE9D194008AFE51 /* CrescentEngineUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		63B100000000000000000006 /* CrescentPlayer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 63B100000000000000000007 /* Build configuration list for PBXNativeTarget "CrescentPlayer" */;
+			buildPhases = (
+				63B100000000000000000003 /* Sources */,
+				63B100000000000000000002 /* Frameworks */,
+				63B100000000000000000004 /* Resources */,
+				63B100000000000000000005 /* Copy BasisU */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				625BE1682EE9D193008AFE51 /* CrescentEngine */,
+			);
+			name = CrescentPlayer;
+			packageProductDependencies = (
+			);
+			productName = CrescentPlayer;
+			productReference = 63B100000000000000000001 /* CrescentPlayer.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -205,6 +237,9 @@
 					625BE17C2EE9D194008AFE51 = {
 						CreatedOnToolsVersion = 26.1.1;
 						TestTargetID = 625BE1652EE9D193008AFE51;
+					};
+					63B100000000000000000006 = {
+						CreatedOnToolsVersion = 26.1.1;
 					};
 				};
 			};
@@ -232,6 +267,7 @@
 				625BE1652EE9D193008AFE51 /* CrescentEngine */,
 				625BE1722EE9D194008AFE51 /* CrescentEngineTests */,
 				625BE17C2EE9D194008AFE51 /* CrescentEngineUITests */,
+				63B100000000000000000006 /* CrescentPlayer */,
 			);
 		};
 /* End PBXProject section */
@@ -258,10 +294,33 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		63B100000000000000000004 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		62F0B5D82F9A1A1200C0FFEE /* Copy BasisU */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(PROJECT_DIR)/ThirdParty/basisu/basisu",
+			);
+			name = "Copy BasisU";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/basisu",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nBASISU_SRC=\"${PROJECT_DIR}/ThirdParty/basisu/basisu\"\nBASISU_DST_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nBASISU_DST=\"${BASISU_DST_DIR}/basisu\"\nif [ -f \"$BASISU_SRC\" ]; then\n  mkdir -p \"$BASISU_DST_DIR\"\n  /bin/cp -f \"$BASISU_SRC\" \"$BASISU_DST\"\n  /bin/chmod +x \"$BASISU_DST\"\nelse\n  echo \"[Copy BasisU] source not found: $BASISU_SRC\"\nfi\n";
+		};
+		63B100000000000000000005 /* Copy BasisU */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -295,6 +354,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		625BE1792EE9D194008AFE51 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		63B100000000000000000003 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -466,6 +532,10 @@
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readwrite;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"Runtime/*",
+					"Runtime/**/*",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/metal-cpp/**",
@@ -493,10 +563,11 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "EDITOR_APP $(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/CrescentEngine/CrescentEngine-Bridging-Header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/CrescentEngine/Editor/Editor-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -524,6 +595,10 @@
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readwrite;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"Runtime/*",
+					"Runtime/**/*",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/metal-cpp/**",
@@ -551,10 +626,11 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "EDITOR_APP $(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/CrescentEngine/CrescentEngine-Bridging-Header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/CrescentEngine/Editor/Editor-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -636,6 +712,132 @@
 			};
 			name = Release;
 		};
+		63B100000000000000000008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"Editor/*",
+					"Editor/**/*",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(PROJECT_DIR)/metal-cpp/**",
+					"$(PROJECT_DIR)/ThirdParty/assimp/include",
+					"$(PROJECT_DIR)/ThirdParty/JoltPhysics",
+				);
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/ThirdParty/assimp-build-debug/lib",
+					"$(PROJECT_DIR)/ThirdParty/jolt-build-debug",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lassimp",
+					"-lJolt",
+					"-lz",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.BSoftware.CrescentPlayer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "PLAYER_APP $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/CrescentEngine/Runtime/Runtime-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		63B100000000000000000009 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"Editor/*",
+					"Editor/**/*",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(PROJECT_DIR)/metal-cpp/**",
+					"$(PROJECT_DIR)/ThirdParty/assimp/include",
+					"$(PROJECT_DIR)/ThirdParty/JoltPhysics",
+				);
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/ThirdParty/assimp-build-release/lib",
+					"$(PROJECT_DIR)/ThirdParty/jolt-build-release",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lassimp",
+					"-lJolt",
+					"-lz",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.BSoftware.CrescentPlayer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "PLAYER_APP $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(PROJECT_DIR)/CrescentEngine/Runtime/Runtime-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -671,6 +873,15 @@
 			buildConfigurations = (
 				625BE18E2EE9D194008AFE51 /* Debug */,
 				625BE18F2EE9D194008AFE51 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		63B100000000000000000007 /* Build configuration list for PBXNativeTarget "CrescentPlayer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				63B100000000000000000008 /* Debug */,
+				63B100000000000000000009 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
