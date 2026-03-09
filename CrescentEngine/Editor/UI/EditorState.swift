@@ -237,6 +237,18 @@ class EditorState: ObservableObject {
     private var keyDownMonitor: Any?
     private var keyUpMonitor: Any?
     private var flagsChangedMonitor: Any?
+    
+    private static func logTypeForBuildLine(_ line: String) -> ConsoleLog.LogType {
+        let lower = line.lowercased()
+        if lower.contains("error") || lower.contains("failed") || lower.contains("traceback") {
+            return .error
+        }
+        if lower.contains("warning") {
+            return .warning
+        }
+        return .info
+    }
+
     var terrainPaintConfig: TerrainPaintConfig {
         TerrainPaintConfig(
             enabled: terrainPaintEnabled && !isPlaying && viewMode == .scene,
@@ -897,6 +909,52 @@ class EditorState: ObservableObject {
         }
     }
 
+    private func currentSceneRelativePathForBuild() -> String? {
+        guard let sceneURL, let projectRootURL else {
+            return nil
+        }
+        let rootPath = projectRootURL.standardizedFileURL.path
+        let scenePath = sceneURL.standardizedFileURL.path
+        guard scenePath.hasPrefix(rootPath) else {
+            return nil
+        }
+
+        var relative = String(scenePath.dropFirst(rootPath.count))
+        if relative.hasPrefix("/") {
+            relative.removeFirst()
+        }
+        return relative.isEmpty ? nil : relative
+    }
+
+    @discardableResult
+    private func updateBuildStartupScene(projectFileURL: URL, relativeScenePath: String) -> Bool {
+        do {
+            let data = try Data(contentsOf: projectFileURL)
+            guard var project = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                addLog(.warning, "Build will use existing startup scene because Project.cproj could not be parsed.")
+                return false
+            }
+
+            let existing = project["startupScene"] as? String ?? ""
+            if existing == relativeScenePath {
+                return true
+            }
+
+            project["startupScene"] = relativeScenePath
+            let encoded = try JSONSerialization.data(withJSONObject: project, options: [.prettyPrinted, .sortedKeys])
+            var output = encoded
+            if let newline = "\n".data(using: .utf8) {
+                output.append(newline)
+            }
+            try output.write(to: projectFileURL, options: .atomic)
+            addLog(.info, "Build startup scene: \(relativeScenePath)")
+            return true
+        } catch {
+            addLog(.warning, "Failed to set current scene as startup for build: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     func buildGame(configuration: String = "Debug") {
         guard !isBuildingGame else { return }
         guard hasProject, let projectRootURL else {
@@ -920,13 +978,28 @@ class EditorState: ObservableObject {
             saveScene()
         }
 
+        if let relativeScenePath = currentSceneRelativePathForBuild() {
+            _ = updateBuildStartupScene(projectFileURL: projectFileURL, relativeScenePath: relativeScenePath)
+        } else if sceneURL != nil {
+            addLog(.warning, "Current scene is outside the project root. Build will use the configured startup scene.")
+        }
+
         isBuildingGame = true
+        dockCollapsed = false
+        dockTab = .console
         showConsole = true
-        addLog(.info, "Building game (\(configuration))...")
+        addLog(.info, "Building game (\(configuration), cooked textures)...")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", scriptURL.path, projectFileURL.path, "--configuration", configuration]
+        process.arguments = [
+            "python3",
+            scriptURL.path,
+            projectFileURL.path,
+            "--configuration",
+            configuration,
+            "--encode-textures"
+        ]
         process.currentDirectoryURL = Self.repositoryRootURL
 
         let outputPipe = Pipe()
@@ -935,10 +1008,26 @@ class EditorState: ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async {
             let outputData = NSMutableData()
+            var pendingOutput = ""
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 if !data.isEmpty {
                     outputData.append(data)
+                    if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                        pendingOutput += text.replacingOccurrences(of: "\r\n", with: "\n")
+                            .replacingOccurrences(of: "\r", with: "\n")
+                        let lines = pendingOutput.components(separatedBy: "\n")
+                        pendingOutput = lines.last ?? ""
+                        let completed = lines.dropLast().map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            .filter { !$0.isEmpty }
+                        if !completed.isEmpty {
+                            DispatchQueue.main.async {
+                                for line in completed {
+                                    self.addLog(Self.logTypeForBuildLine(line), line)
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -963,6 +1052,10 @@ class EditorState: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                let trailing = pendingOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trailing.isEmpty {
+                    self.addLog(Self.logTypeForBuildLine(trailing), trailing)
+                }
                 self.isBuildingGame = false
                 if process.terminationStatus == 0, let packagedPath {
                     let appURL = URL(fileURLWithPath: packagedPath)

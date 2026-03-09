@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Darwin
 
 @MainActor
 final class GameRuntimeState: ObservableObject {
@@ -23,6 +24,10 @@ final class GameRuntimeState: ObservableObject {
         }
 
         let gameDataURL = resourceURL.appendingPathComponent("GameData", isDirectory: true)
+        let buildManifestURL = gameDataURL.appendingPathComponent("BuildManifest.json")
+        if FileManager.default.fileExists(atPath: buildManifestURL.path) {
+            setenv("CRESCENT_REQUIRE_COOKED_TEXTURES", "1", 1)
+        }
         let bundledProjectURL = gameDataURL.appendingPathComponent("Project.cproj")
         guard FileManager.default.fileExists(atPath: bundledProjectURL.path) else {
             fail("Bundled project is missing.")

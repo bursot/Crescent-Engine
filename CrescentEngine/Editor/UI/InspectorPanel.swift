@@ -5,7 +5,7 @@ import AppKit
 
 struct InspectorPanel: View {
     @ObservedObject var editorState: EditorState
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -34,52 +34,24 @@ struct InspectorPanel: View {
             if !editorState.inspectorCollapsed {
                 Divider()
                     .overlay(EditorTheme.panelStroke)
-                
+
                 ScrollView {
-                    if let selectedUUID = editorState.primarySelectionUUID,
-                       let selectedEntity = editorState.entityList.first(where: { $0.uuid == selectedUUID }) {
-                        let lightSection = LightInspectorSection(uuid: selectedEntity.uuid)
-                        let animationSection = AnimationInspectorSection(uuid: selectedEntity.uuid)
-                        let decalSection = DecalInspectorSection(uuid: selectedEntity.uuid)
-                        let physicsSection = PhysicsInspectorSection(uuid: selectedEntity.uuid)
-                        let audioSection = AudioInspectorSection(uuid: selectedEntity.uuid)
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            InspectorSummaryCard(
-                                entityUUID: selectedEntity.uuid,
-                                entityName: selectedEntity.name,
-                                selectionCount: editorState.selectedEntityUUIDs.count
-                            ) { newName in
-                                let _ = CrescentEngineBridge.shared().setEntityName(uuid: selectedEntity.uuid, name: newName)
+                    if let context = makeInspectorContext() {
+                        LazyVStack(alignment: .leading, spacing: 14) {
+                            InspectorOverviewCard(context: context) { newName in
+                                let _ = CrescentEngineBridge.shared().setEntityName(uuid: context.entity.uuid, name: newName)
+                                editorState.refreshEntityList()
+                            } onRefresh: {
                                 editorState.refreshEntityList()
                             }
-                            
-                            ComponentSection(title: "Transform", icon: "arrow.up.and.down.and.arrow.left.and.right") {
-                                TransformInspector(selectedUUIDs: editorState.selectedEntityUUIDs)
-                            }
-                            
-                            if lightSection == nil && decalSection == nil {
-                                ComponentSection(title: "Material", icon: "paintpalette.fill") {
-                                    MaterialInspector(entityUUID: selectedEntity.uuid,
-                                                      selectedUUIDs: editorState.selectedEntityUUIDs,
-                                                      editorState: editorState)
-                                }
-                            }
 
-                            if editorState.selectedEntityUUIDs.count > 1 {
-                                ComponentSection(title: "HLOD", icon: "square.stack.3d.up") {
-                                    HLODInspectorSection(uuids: Array(editorState.selectedEntityUUIDs))
-                                }
+                            ForEach(InspectorSectionRegistry.makeSections(for: context)) { entry in
+                                entry.view
                             }
-
-                            if let physicsView = physicsSection { physicsView }
-                            if let audioView = audioSection { audioView }
-                            if let animationView = animationSection { animationView }
-                            if let decalView = decalSection { decalView }
-                            if let lightView = lightSection { lightView }
                         }
                         .padding(10)
                     } else {
-                        InspectorPlaceholder()
+                        InspectorEmptyState()
                             .padding(10)
                     }
                 }
@@ -88,14 +60,35 @@ struct InspectorPanel: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .editorPanel()
     }
+
+    private func makeInspectorContext() -> InspectorPanelContext? {
+        guard let selectedUUID = editorState.primarySelectionUUID,
+              let selectedEntity = editorState.entityList.first(where: { $0.uuid == selectedUUID }) else {
+            return nil
+        }
+
+        let snapshot = InspectorEntitySnapshot.make(
+            for: selectedEntity,
+            selectionCount: editorState.selectedEntityUUIDs.count
+        )
+
+        return InspectorPanelContext(
+            editorState: editorState,
+            entity: selectedEntity,
+            snapshot: snapshot
+        )
+    }
 }
 
 struct ComponentSection<Content: View>: View {
     let title: String
     let icon: String
+    var subtitle: String? = nil
+    var accent: Color = EditorTheme.textAccent
+    var badge: String? = nil
     @ViewBuilder let content: Content
     @State private var isExpanded: Bool = true
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
@@ -103,32 +96,54 @@ struct ComponentSection<Content: View>: View {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: icon)
-                        .font(EditorTheme.font(size: 12))
-                        .foregroundColor(.accentColor)
-                        .frame(width: 16)
-                    
-                    Text(title)
-                        .font(EditorTheme.font(size: 12, weight: .semibold))
-                    
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(accent.opacity(0.16))
+                        Image(systemName: icon)
+                            .font(EditorTheme.font(size: 12, weight: .semibold))
+                            .foregroundColor(accent)
+                    }
+                    .frame(width: 32, height: 32)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(EditorTheme.font(size: 12, weight: .semibold))
+                            .foregroundColor(EditorTheme.textPrimary)
+                        if let subtitle {
+                            Text(subtitle)
+                                .font(EditorTheme.font(size: 10, weight: .medium))
+                                .foregroundColor(EditorTheme.textMuted)
+                        }
+                    }
+
                     Spacer()
-                    
+
+                    if let badge {
+                        Text(badge.uppercased())
+                            .font(EditorTheme.font(size: 9, weight: .semibold))
+                            .foregroundColor(accent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(accent.opacity(0.12))
+                            .clipShape(Capsule(style: .continuous))
+                    }
+
                     Image(systemName: "chevron.right")
                         .font(EditorTheme.font(size: 10, weight: .semibold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .foregroundColor(EditorTheme.textMuted)
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.vertical, 10)
             }
             .buttonStyle(.plain)
-            
+
             if isExpanded {
                 Divider()
                     .overlay(EditorTheme.panelStroke)
                 content
-                    .padding(12)
+                    .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }

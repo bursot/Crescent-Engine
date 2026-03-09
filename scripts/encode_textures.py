@@ -8,6 +8,10 @@ from pathlib import Path
 
 
 LDR_EXTS = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".tif", ".tiff"}
+KTX2_CACHE_VERSION = "v2a"
+EMBEDDED_MARKER = "#embedded:"
+FNV64_OFFSET = 14695981039346656037
+FNV64_PRIME = 1099511628211
 
 
 def find_project_file(root: Path) -> Path:
@@ -38,6 +42,79 @@ def basisu_path_from_script() -> Path:
     return script_dir.parent / "ThirdParty" / "basisu" / "basisu"
 
 
+def embedded_extractor_binary_from_script() -> Path:
+    script_dir = Path(__file__).resolve().parent
+    return script_dir / ".build" / "extract_embedded_textures"
+
+
+def stable_hash(value: str) -> str:
+    hash_value = FNV64_OFFSET
+    for byte in value.encode("utf-8"):
+        hash_value ^= byte
+        hash_value = (hash_value * FNV64_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return f"{hash_value:016x}"
+
+
+def normalize_embedded_key(asset_root: Path, asset_path: Path) -> str:
+    key = asset_path.as_posix()
+    source_path, suffix = key.split(EMBEDDED_MARKER, 1)
+    resolved_source = Path(source_path).resolve()
+    try:
+        normalized_source = resolved_source.relative_to(asset_root.resolve()).as_posix()
+    except ValueError:
+        normalized_source = resolved_source.as_posix()
+    return f"{normalized_source}{EMBEDDED_MARKER}{suffix}"
+
+
+def embedded_cache_output_path(asset_root: Path, cache_dir: Path, asset_path: Path) -> Path:
+    return cache_dir / f"embedded_{stable_hash(normalize_embedded_key(asset_root, asset_path))}_{KTX2_CACHE_VERSION}.ktx2"
+
+
+def embedded_source_output_path(asset_root: Path, embedded_sources_dir: Path, asset_path: Path) -> Path:
+    suffix = asset_path.suffix.lower()
+    source_ext = suffix if suffix in LDR_EXTS else ".png"
+    return embedded_sources_dir / f"embedded_{stable_hash(normalize_embedded_key(asset_root, asset_path))}{source_ext}"
+
+
+def build_embedded_extractor(script_dir: Path) -> Path:
+    binary_path = embedded_extractor_binary_from_script()
+    source_path = script_dir / "extract_embedded_textures.cpp"
+    if binary_path.exists() and binary_path.stat().st_mtime >= source_path.stat().st_mtime:
+        return binary_path
+
+    binary_path.parent.mkdir(parents=True, exist_ok=True)
+    repo_root = script_dir.parent
+    cmd = [
+        "clang++",
+        "-std=c++20",
+        "-O2",
+        "-I",
+        str(repo_root / "ThirdParty" / "assimp" / "include"),
+        str(source_path),
+        str(repo_root / "ThirdParty" / "assimp-build-release" / "lib" / "libassimp.a"),
+        "-lz",
+        "-o",
+        str(binary_path),
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to build embedded extractor:\n{result.stderr}")
+    return binary_path
+
+
+def ensure_embedded_sources(model_path: Path, embedded_sources_dir: Path, script_dir: Path, asset_root: Path) -> None:
+    extractor = build_embedded_extractor(script_dir)
+    embedded_sources_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [str(extractor), str(model_path), str(embedded_sources_dir), str(asset_root)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to extract embedded textures for {model_path}:\n{result.stderr}")
+
+
 def should_encode(asset_path: Path, output_path: Path) -> bool:
     if not output_path.exists():
         return True
@@ -54,11 +131,12 @@ def build_command(basisu: Path,
                   normal_map: bool,
                   flip_y: bool,
                   generate_mips: bool) -> list[str]:
+    use_uastc = normal_map
     cmd = [
         str(basisu),
         "-ktx2",
         "-ktx2_no_zstandard",
-        "-uastc" if normal_map else "-etc1s",
+        "-uastc" if use_uastc else "-etc1s",
         "-srgb" if srgb else "-linear",
     ]
     if flip_y:
@@ -67,9 +145,9 @@ def build_command(basisu: Path,
         cmd.append("-mipmap")
     cmd += [
         "-quality",
-        "50" if normal_map else "80",
+        "128" if use_uastc else "80",
         "-effort",
-        "4",
+        "5" if use_uastc else "4",
         "-file",
         str(asset_path),
         "-output_file",
@@ -95,6 +173,8 @@ def main() -> int:
     assets_dirs, library_dir = resolve_paths(project_file, data)
     cache_dir = library_dir / "ImportCache"
     cache_dir.mkdir(parents=True, exist_ok=True)
+    embedded_sources_dir = cache_dir / "EmbeddedSources"
+    script_dir = Path(__file__).resolve().parent
 
     basisu = Path(args.basisu) if args.basisu else basisu_path_from_script()
     if not basisu.exists():
@@ -103,6 +183,7 @@ def main() -> int:
 
     encoded = 0
     skipped = 0
+    extracted_models: set[Path] = set()
 
     for assets_dir in assets_dirs:
         if not assets_dir.exists():
@@ -118,20 +199,39 @@ def main() -> int:
             if not guid:
                 continue
             asset_path = meta_path.with_suffix("")
-            if asset_path.suffix.lower() not in LDR_EXTS:
-                continue
             import_settings = (meta.get("import") or {}).get("texture") or {}
             srgb = bool(import_settings.get("srgb", True))
             normal_map = bool(import_settings.get("normalMap", False))
             flip_y = bool(import_settings.get("flipY", False))
             generate_mips = bool(import_settings.get("generateMipmaps", True))
 
-            output_path = cache_dir / f"{guid}.ktx2"
-            if not should_encode(asset_path, output_path):
-                skipped += 1
-                continue
+            source_path = asset_path
+            if EMBEDDED_MARKER in asset_path.as_posix():
+                output_path = embedded_cache_output_path(assets_dir, cache_dir, asset_path)
+                model_source = Path(asset_path.as_posix().split(EMBEDDED_MARKER, 1)[0])
+                if not model_source.exists():
+                    continue
+                if not should_encode(model_source, output_path):
+                    skipped += 1
+                    continue
+                if model_source not in extracted_models:
+                    ensure_embedded_sources(model_source, embedded_sources_dir, script_dir, assets_dir)
+                    extracted_models.add(model_source)
+                source_path = embedded_source_output_path(assets_dir, embedded_sources_dir, asset_path)
+                if not source_path.exists():
+                    print(f"Missing extracted embedded source: {source_path}", file=sys.stderr)
+                    continue
+            else:
+                if asset_path.suffix.lower() not in LDR_EXTS:
+                    continue
+                if not asset_path.exists():
+                    continue
+                output_path = cache_dir / f"{guid}_{KTX2_CACHE_VERSION}.ktx2"
+                if not should_encode(asset_path, output_path):
+                    skipped += 1
+                    continue
 
-            cmd = build_command(basisu, asset_path, output_path, srgb, normal_map, flip_y, generate_mips)
+            cmd = build_command(basisu, source_path, output_path, srgb, normal_map, flip_y, generate_mips)
             result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             if result.returncode != 0:
                 print(f"Failed: {asset_path}\n{result.stderr}", file=sys.stderr)

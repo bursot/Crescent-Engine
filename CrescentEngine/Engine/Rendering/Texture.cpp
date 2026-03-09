@@ -78,6 +78,11 @@ bool isTextureMemDebugEnabled() {
     return flag && *flag && std::string(flag) != "0";
 }
 
+bool requiresCookedTextures() {
+    const char* flag = std::getenv("CRESCENT_REQUIRE_COOKED_TEXTURES");
+    return flag && *flag && std::string(flag) != "0";
+}
+
 std::string QuoteShellArg(const std::string& value) {
     std::string out = "'";
     for (char c : value) {
@@ -171,7 +176,7 @@ bool ReadFileBytes(const std::string& path, std::vector<uint8_t>& outData) {
 }
 
 std::string HashPathStable(const std::string& input) {
-    uint64_t hash = 1469598103934665603ull;
+    uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : input) {
         hash ^= static_cast<uint64_t>(c);
         hash *= 1099511628211ull;
@@ -210,8 +215,18 @@ std::string NormalizeEmbeddedCacheKey(const std::string& cacheKey) {
     if (markerPos == std::string::npos || markerPos == 0) {
         return cacheKey;
     }
+    AssetDatabase& db = AssetDatabase::getInstance();
     std::string sourcePath = CanonicalizePathIfPossible(cacheKey.substr(0, markerPos));
-    return sourcePath + cacheKey.substr(markerPos);
+    std::string normalizedSource = sourcePath;
+    const std::string& rootPath = db.getRootPath();
+    if (!rootPath.empty()) {
+        std::error_code ec;
+        std::filesystem::path relative = std::filesystem::relative(sourcePath, rootPath, ec);
+        if (!ec && !relative.empty()) {
+            normalizedSource = relative.generic_string();
+        }
+    }
+    return normalizedSource + cacheKey.substr(markerPos);
 }
 
 uint32_t ComputeMipLevels(uint32_t width, uint32_t height) {
@@ -582,6 +597,12 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
                 }
             }
 
+            if (requiresCookedTextures()) {
+                std::cerr << "[TextureLoader] Cooked KTX2 texture required but missing or stale cache for: "
+                          << path << std::endl;
+                return nullptr;
+            }
+
             bool preferUastc = srgb && FileLikelyHasAlphaChannel(path);
             bool generated = EncodeKtx2WithBasisuCLI(path, cachePath, srgb, normalMap, preferUastc, flipVertical, true);
             if (isKtx2DebugEnabled()) {
@@ -664,7 +685,21 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
         if (!cachePath.empty()) {
             std::string sourcePath = ExtractEmbeddedSourcePath(cacheKey);
             const std::string& cacheDependency = sourcePath.empty() ? cacheKey : sourcePath;
-            if (IsCacheValid(cacheDependency, cachePath)) {
+            bool cacheValid = IsCacheValid(cacheDependency, cachePath);
+            if (isKtx2DebugEnabled()) {
+                std::error_code cacheEc;
+                std::error_code sourceEc;
+                bool cacheExists = std::filesystem::exists(cachePath, cacheEc);
+                bool sourceExists = std::filesystem::exists(cacheDependency, sourceEc);
+                std::cerr << "[TextureLoader] KTX2 debug: Embedded cache lookup key=" << NormalizeEmbeddedCacheKey(cacheKey)
+                          << " cache=" << cachePath
+                          << " source=" << cacheDependency
+                          << " cacheExists=" << (cacheExists ? "yes" : "no")
+                          << " sourceExists=" << (sourceExists ? "yes" : "no")
+                          << " valid=" << (cacheValid ? "yes" : "no")
+                          << std::endl;
+            }
+            if (cacheValid) {
                 if (isKtx2DebugEnabled()) {
                     std::cerr << "[TextureLoader] KTX2 debug: Using cached embedded KTX2 " << cachePath << std::endl;
                 }
@@ -672,6 +707,12 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
                     m_Cache[cacheKey] = tex;
                     return tex;
                 }
+            }
+
+            if (requiresCookedTextures()) {
+                std::cerr << "[TextureLoader] Cooked embedded KTX2 texture required but missing or stale cache for: "
+                          << cacheKey << std::endl;
+                return nullptr;
             }
 
             std::string tempSourcePath = GetEmbeddedTempSourcePath(cacheKey);

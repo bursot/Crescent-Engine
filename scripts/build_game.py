@@ -11,6 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+LDR_EXTS = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".gif", ".tif", ".tiff"}
+KTX2_CACHE_VERSION = "v2a"
+EMBEDDED_MARKER = "#embedded:"
+FNV64_OFFSET = 14695981039346656037
+FNV64_PRIME = 1099511628211
+
 
 def find_project_file(root: Path) -> Path:
     if root.is_file() and root.suffix.lower() == ".cproj":
@@ -136,6 +142,116 @@ def maybe_encode_textures(repo_root: Path, project_file: Path) -> None:
     run([sys.executable, str(script_path), str(project_file)], cwd=repo_root)
 
 
+def iter_texture_assets(project_file: Path, project_data: dict) -> list[tuple[Path, dict]]:
+    project_root = project_file.parent
+    assets_dirs = project_data.get("assetPaths") or [project_data.get("assets", "Assets")]
+    results: list[tuple[Path, dict]] = []
+
+    for relative_assets_dir in assets_dirs:
+        assets_dir = project_root / relative_assets_dir
+        if not assets_dir.exists():
+            continue
+        for meta_path in assets_dir.rglob("*.cmeta"):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if meta.get("type") != "texture":
+                continue
+            asset_path = meta_path.with_suffix("")
+            if asset_path.suffix.lower() not in LDR_EXTS:
+                continue
+            if not is_embedded_texture_path(asset_path) and not asset_path.exists():
+                continue
+            results.append((asset_path, meta))
+
+    return results
+
+
+def stable_hash(value: str) -> str:
+    hash_value = FNV64_OFFSET
+    for byte in value.encode("utf-8"):
+        hash_value ^= byte
+        hash_value = (hash_value * FNV64_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return f"{hash_value:016x}"
+
+
+def is_embedded_texture_path(asset_path: Path) -> bool:
+    return EMBEDDED_MARKER in asset_path.as_posix()
+
+
+def normalize_embedded_key(asset_root: Path, asset_path: Path) -> str:
+    key = asset_path.as_posix()
+    source_path, suffix = key.split(EMBEDDED_MARKER, 1)
+    resolved_source = Path(source_path).resolve()
+    try:
+        normalized_source = resolved_source.relative_to(asset_root.resolve()).as_posix()
+    except ValueError:
+        normalized_source = resolved_source.as_posix()
+    return f"{normalized_source}{EMBEDDED_MARKER}{suffix}"
+
+
+def expected_embedded_cache_path(project_root: Path, project_data: dict, asset_root: Path, asset_path: Path) -> Path:
+    library_dir = project_root / project_data.get("library", "Library")
+    return library_dir / "ImportCache" / f"embedded_{stable_hash(normalize_embedded_key(asset_root, asset_path))}_{KTX2_CACHE_VERSION}.ktx2"
+
+
+def expected_texture_cache_path(project_root: Path, project_data: dict, guid: str) -> Path:
+    library_dir = project_root / project_data.get("library", "Library")
+    return library_dir / "ImportCache" / f"{guid}_{KTX2_CACHE_VERSION}.ktx2"
+
+
+def validate_texture_caches(project_file: Path, project_data: dict) -> None:
+    project_root = project_file.parent
+    missing: list[str] = []
+    stale: list[str] = []
+
+    assets_dirs = project_data.get("assetPaths") or [project_data.get("assets", "Assets")]
+    asset_roots = [(project_root / relative_assets_dir).resolve() for relative_assets_dir in assets_dirs]
+
+    for asset_path, meta in iter_texture_assets(project_file, project_data):
+        asset_root = next((root for root in asset_roots if str(asset_path.resolve()).startswith(str(root) + "/") or asset_path.resolve() == root), project_root.resolve())
+        if is_embedded_texture_path(asset_path):
+            source_model_path = Path(asset_path.as_posix().split(EMBEDDED_MARKER, 1)[0])
+            if not source_model_path.exists():
+                missing.append(f"{asset_path.relative_to(project_root).as_posix()} (missing source model)")
+                continue
+            cache_path = expected_embedded_cache_path(project_root, project_data, asset_root, asset_path)
+            if not cache_path.exists():
+                missing.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
+                continue
+            try:
+                if cache_path.stat().st_mtime < source_model_path.stat().st_mtime:
+                    stale.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
+            except OSError:
+                stale.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
+            continue
+
+        guid = str(meta.get("guid") or "").strip()
+        if not guid:
+            missing.append(f"{asset_path.relative_to(project_root).as_posix()} (missing guid)")
+            continue
+
+        cache_path = expected_texture_cache_path(project_root, project_data, guid)
+        if not cache_path.exists():
+            missing.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
+            continue
+
+        try:
+            if cache_path.stat().st_mtime < asset_path.stat().st_mtime:
+                stale.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
+        except OSError:
+            stale.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
+
+    problems: list[str] = []
+    if missing:
+        problems.append("Missing cooked textures:\n" + "\n".join(f"  - {entry}" for entry in missing[:20]))
+    if stale:
+        problems.append("Stale cooked textures:\n" + "\n".join(f"  - {entry}" for entry in stale[:20]))
+    if problems:
+        raise RuntimeError("\n".join(problems))
+
+
 def build_manifest(game_data_dir: Path, project_data: dict, startup_scene: str) -> dict:
     files = []
     for path in sorted(game_data_dir.rglob("*")):
@@ -178,9 +294,11 @@ def package_game(repo_root: Path,
     validate_startup_scene(project_root, startup_scene)
     product_name = project_data.get("productName") or project_data.get("name") or "CrescentGame"
     bundle_identifier = project_data.get("bundleIdentifier") or "com.crescentengine.game"
+    require_cooked_textures = encode_textures or configuration == "Release"
 
-    if encode_textures:
+    if require_cooked_textures:
         maybe_encode_textures(repo_root, project_file)
+        validate_texture_caches(project_file, project_data)
 
     with tempfile.TemporaryDirectory(prefix="crescent-build-") as tmp_dir:
         derived_data = Path(tmp_dir) / "DerivedData"
@@ -202,6 +320,8 @@ def package_game(repo_root: Path,
     packaged_project_data["productName"] = product_name
     packaged_project_data["bundleIdentifier"] = bundle_identifier
     packaged_project_data["startupScene"] = startup_scene
+    packaged_project_data["requireCookedTextures"] = require_cooked_textures
+    packaged_project_data["textureCookFormat"] = "KTX2_ASTC4x4"
     with (game_data_dir / "Project.cproj").open("w", encoding="utf-8") as handle:
         json.dump(packaged_project_data, handle, indent=2)
         handle.write("\n")

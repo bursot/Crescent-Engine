@@ -17,11 +17,6 @@ struct GameRuntimeView: View {
             )
             .ignoresSafeArea()
 
-            if runtimeState.isRunning {
-                RuntimeCrosshair()
-                    .allowsHitTesting(false)
-            }
-
             if runtimeState.isLoading || runtimeState.errorMessage != nil {
                 RuntimeOverlay(
                     title: runtimeState.errorMessage == nil ? runtimeState.gameTitle : "Launch Failed",
@@ -58,19 +53,5 @@ private struct RuntimeOverlay: View {
         .padding(.vertical, 20)
         .background(Color.black.opacity(0.68))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-    }
-}
-
-private struct RuntimeCrosshair: View {
-    var body: some View {
-        ZStack {
-            Capsule()
-                .fill(Color.white.opacity(0.92))
-                .frame(width: 20, height: 2)
-            Capsule()
-                .fill(Color.white.opacity(0.92))
-                .frame(width: 2, height: 20)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

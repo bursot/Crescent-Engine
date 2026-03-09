@@ -148,7 +148,7 @@ struct EditorToolbar: View {
                     }) {
                         ToolbarPillLabel(
                             title: editorState.isBuildingGame ? "Building" : "Build Game",
-                            value: editorState.isBuildingGame ? "..." : "Debug",
+                            value: editorState.isBuildingGame ? "..." : "Cooked",
                             systemImage: editorState.isBuildingGame ? "shippingbox.circle.fill" : "shippingbox.fill",
                             accent: editorState.isBuildingGame ? EditorTheme.warning : EditorTheme.textAccent
                         )
@@ -156,7 +156,7 @@ struct EditorToolbar: View {
                     .buttonStyle(.plain)
                     .disabled(!editorState.hasProject || editorState.isBuildingGame)
                     .opacity(editorState.hasProject && !editorState.isBuildingGame ? 1 : 0.55)
-                    .help("Build the current project as a standalone game app")
+                    .help("Build the current scene as a standalone game app with cooked textures")
 
                     Button(action: {
                         editorState.togglePlay()
