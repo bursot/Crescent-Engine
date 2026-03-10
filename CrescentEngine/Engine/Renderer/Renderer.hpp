@@ -189,6 +189,7 @@ public:
         Math::Vector3 rotation = Math::Vector3(0.0f); // Degrees
         bool skyboxVisible = true;
         std::string sourcePath = "Builtin Sky";
+        std::string cookedIBLPath;
         int skyMode = 0; // 0 = Procedural, 1 = HDRI
         bool autoSunColor = true;
     };
@@ -196,7 +197,8 @@ public:
     EnvironmentSettings& getEnvironmentSettings() { return m_environmentSettings; }
     const EnvironmentSettings& getEnvironmentSettings() const { return m_environmentSettings; }
     
-    bool loadEnvironmentMap(const std::string& path);
+    bool loadEnvironmentMap(const std::string& path, const std::string& cookedIBLPath = "");
+    bool saveCookedEnvironmentMap(const std::string& path, const std::string& outputPath);
     void resetEnvironment();
     void setEnvironmentRotation(const Math::Vector3& eulerDegrees);
     void setEnvironmentExposure(float ev);

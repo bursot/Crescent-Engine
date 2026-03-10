@@ -336,6 +336,37 @@ std::string BuildCookedTextureRelativePath(const std::string& path) {
     return "Library/ImportCache/" + guid + "_v2a.ktx2";
 }
 
+std::string NormalizeCookedEnvironmentKey(const std::string& path) {
+    if (path.empty()) {
+        return path;
+    }
+
+    AssetDatabase& db = AssetDatabase::getInstance();
+    std::error_code ec;
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
+    std::string normalized = ec ? std::filesystem::path(path).lexically_normal().generic_string()
+                                : canonical.generic_string();
+
+    std::string rootPath = db.getRootPath();
+    if (!rootPath.empty()) {
+        std::filesystem::path root(rootPath);
+        std::filesystem::path source(normalized);
+        std::filesystem::path relative = std::filesystem::relative(source, root, ec);
+        if (!ec && !relative.empty() && relative.native().front() != '.') {
+            normalized = relative.generic_string();
+        }
+    }
+
+    return normalized;
+}
+
+std::string BuildCookedEnvironmentRelativePath(const std::string& path) {
+    if (path.empty() || path == "Builtin Sky") {
+        return "";
+    }
+    return "Library/ImportCache/hdri_" + HashRuntimeCookKey(NormalizeCookedEnvironmentKey(path)) + "_v1.cenv";
+}
+
 json SerializeTextureRef(const std::shared_ptr<Texture2D>& texture, const char* typeKey, bool includeCookedPath = false) {
     if (!texture || texture->getPath().empty()) {
         return json();
@@ -370,8 +401,14 @@ json SerializeAssetPath(const std::string& path, const char* typeKey, bool inclu
         json ref;
         ref["guid"] = guid;
         ref["path"] = relative.empty() ? path : relative;
-        if (includeCookedPath && typeKey && std::string(typeKey) == "texture") {
-            std::string cookedPath = BuildCookedTextureRelativePath(path);
+        if (includeCookedPath && typeKey) {
+            std::string type = typeKey;
+            std::string cookedPath;
+            if (type == "texture") {
+                cookedPath = BuildCookedTextureRelativePath(path);
+            } else if (type == "hdri") {
+                cookedPath = BuildCookedEnvironmentRelativePath(path);
+            }
             if (!cookedPath.empty()) {
                 ref["cookedPath"] = cookedPath;
             }
@@ -739,6 +776,27 @@ std::shared_ptr<AnimationClip> DeserializeAnimationClipData(const json& j) {
     return clip;
 }
 
+std::string ResolveCookedAssetPath(const json& entry) {
+    AssetDatabase& db = AssetDatabase::getInstance();
+    if (!entry.is_object() || !entry.contains("cookedPath")) {
+        return "";
+    }
+    std::string stored = entry.value("cookedPath", std::string());
+    if (stored.empty()) {
+        return "";
+    }
+    std::filesystem::path cookedPath(stored);
+    if (cookedPath.is_absolute()) {
+        return cookedPath.lexically_normal().string();
+    }
+    std::string libraryPath = db.getLibraryPath();
+    if (!libraryPath.empty()) {
+        std::filesystem::path projectRoot = std::filesystem::path(libraryPath).parent_path();
+        return (projectRoot / cookedPath).lexically_normal().string();
+    }
+    return cookedPath.lexically_normal().string();
+}
+
 SceneEnvironmentSettings EnvironmentFromRenderer(Renderer* renderer) {
     SceneEnvironmentSettings env;
     if (!renderer) {
@@ -746,6 +804,7 @@ SceneEnvironmentSettings EnvironmentFromRenderer(Renderer* renderer) {
     }
     const Renderer::EnvironmentSettings& src = renderer->getEnvironmentSettings();
     env.skyboxPath = src.sourcePath.empty() ? "Builtin Sky" : src.sourcePath;
+    env.cookedSkyboxPath = src.cookedIBLPath;
     env.exposureEV = src.exposureEV;
     env.iblIntensity = src.iblIntensity;
     env.skyIntensity = src.skyIntensity;
@@ -762,12 +821,12 @@ SceneEnvironmentSettings EnvironmentFromRenderer(Renderer* renderer) {
     return env;
 }
 
-json SerializeEnvironmentSettings(const SceneEnvironmentSettings& env) {
+json SerializeEnvironmentSettings(const SceneEnvironmentSettings& env, bool includeCookedAssetPaths = false) {
     json e;
     if (env.skyboxPath.empty() || env.skyboxPath == "Builtin Sky") {
         e["skybox"] = "Builtin Sky";
     } else {
-        json ref = SerializeAssetPath(env.skyboxPath, "hdri");
+        json ref = SerializeAssetPath(env.skyboxPath, "hdri", includeCookedAssetPaths);
         if (!ref.is_null() && !ref.empty()) {
             e["skybox"] = ref;
         }
@@ -873,6 +932,7 @@ SceneEnvironmentSettings DeserializeEnvironmentSettings(const json& j) {
             if (!resolved.empty()) {
                 env.skyboxPath = resolved;
             }
+            env.cookedSkyboxPath = ResolveCookedAssetPath(j["skybox"]);
         }
     }
     env.exposureEV = j.value("exposureEV", env.exposureEV);
@@ -1779,6 +1839,7 @@ void ApplyEntityComponents(Entity* entity,
         }
         meshRenderer->setCastShadows(r.value("castShadows", meshRenderer->getCastShadows()));
         meshRenderer->setReceiveShadows(r.value("receiveShadows", meshRenderer->getReceiveShadows()));
+        meshRenderer->setUseBakedVertexLighting(r.value("useBakedVertexLighting", meshRenderer->getUseBakedVertexLighting()));
 
         if (r.contains("materials") && r["materials"].is_array()) {
             const json& mats = r["materials"];
@@ -1789,6 +1850,15 @@ void ApplyEntityComponents(Entity* entity,
                     skinnedRenderer->setMaterial(static_cast<uint32_t>(i), material);
                 }
             }
+        }
+        if (r.contains("bakedVertexColors") && r["bakedVertexColors"].is_array()) {
+            std::vector<Math::Vector4> bakedColors;
+            bakedColors.reserve(r["bakedVertexColors"].size());
+            for (const auto& entry : r["bakedVertexColors"]) {
+                bakedColors.push_back(JsonToVec4(entry, Math::Vector4::Zero));
+            }
+            meshRenderer->setBakedVertexColors(bakedColors);
+            meshRenderer->setUseBakedVertexLighting(!bakedColors.empty());
         }
     }
 
@@ -2189,6 +2259,7 @@ void ApplyEntityComponents(Entity* entity,
             light->setCascadeSplits(splits);
         }
         light->setVolumetric(l.value("volumetric", light->getVolumetric()));
+        light->setBakeToVertexLighting(l.value("bakeToVertexLighting", light->getBakeToVertexLighting()));
     }
 
     if (components.contains("Decal")) {
@@ -2350,8 +2421,16 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
             components["MeshRenderer"] = {
                 {"castShadows", renderer->getCastShadows()},
                 {"receiveShadows", renderer->getReceiveShadows()},
+                {"useBakedVertexLighting", renderer->getUseBakedVertexLighting()},
                 {"materials", materials}
             };
+            if (renderer->getUseBakedVertexLighting() && !renderer->getBakedVertexColors().empty()) {
+                json bakedColors = json::array();
+                for (const auto& color : renderer->getBakedVertexColors()) {
+                    bakedColors.push_back(Vec4ToJson(color));
+                }
+                components["MeshRenderer"]["bakedVertexColors"] = bakedColors;
+            }
             if (options.embedRuntimePayloads && !entity->getComponent<SkinnedMeshRenderer>()) {
                 if (auto mesh = renderer->getMesh()) {
                     components["MeshRenderer"]["mesh"] = SerializeMeshData(*mesh);
@@ -2672,7 +2751,8 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 {"contactShadows", light->getContactShadows()},
                 {"cascadeCount", light->getCascadeCount()},
                 {"cascadeSplits", json::array({light->getCascadeSplits()[0], light->getCascadeSplits()[1], light->getCascadeSplits()[2], light->getCascadeSplits()[3]})},
-                {"volumetric", light->getVolumetric()}
+                {"volumetric", light->getVolumetric()},
+                {"bakeToVertexLighting", light->getBakeToVertexLighting()}
             };
         }
 
@@ -2777,7 +2857,7 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
         scene->setSettings(settings);
     }
     json sceneSettings;
-    sceneSettings["environment"] = SerializeEnvironmentSettings(settings.environment);
+    sceneSettings["environment"] = SerializeEnvironmentSettings(settings.environment, options.embedRuntimePayloads);
     sceneSettings["fog"] = SerializeFogSettings(settings.fog);
     sceneSettings["postProcess"] = SerializePostProcessSettings(settings.postProcess);
     sceneSettings["quality"] = SerializeQualitySettings(settings.quality);

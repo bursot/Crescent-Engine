@@ -29,6 +29,7 @@ struct LightInspector: View {
     @State private var cascadeCount: Int = 4
     @State private var cascadeSplits: [Float] = [0.08, 0.22, 0.5, 1.0]
     @State private var volumetric: Bool = false
+    @State private var bakeToVertexLighting: Bool = false
     
     private let resOptions = [256, 512, 1024, 2048, 4096]
     private let unitOptions = ["Lumens", "Lux", "Nits"]
@@ -130,6 +131,7 @@ struct LightInspector: View {
                 }
             }
             Toggle("Volumetric", isOn: Binding(get: { volumetric }, set: { volumetric = $0; push(["volumetric": $0]) }))
+            Toggle("Bake To Vertex Lighting", isOn: Binding(get: { bakeToVertexLighting }, set: { bakeToVertexLighting = $0; push(["bakeToVertexLighting": $0]) }))
             
             Divider()
             DebugToggles()
@@ -170,6 +172,7 @@ struct LightInspector: View {
             cascadeSplits = splits.map { $0.floatValue }
         }
         volumetric = (info["volumetric"] as? NSNumber)?.boolValue ?? volumetric
+        bakeToVertexLighting = (info["bakeToVertexLighting"] as? NSNumber)?.boolValue ?? bakeToVertexLighting
     }
     
     func push(_ dict: [String: Any]) {

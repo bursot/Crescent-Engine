@@ -16,6 +16,12 @@ class SceneCommands {
 public:
     using ModelImportOptions = ModelImportSettings;
 
+    struct VertexLightBakeStats {
+        int bakedMeshCount = 0;
+        int bakedVertexCount = 0;
+        int bakedLightCount = 0;
+    };
+
     // Create primitive objects
     static Entity* createCube(Scene* scene, const std::string& name = "Cube");
     static Entity* createSphere(Scene* scene, const std::string& name = "Sphere");
@@ -59,6 +65,9 @@ public:
 
     // HLOD (automatic bake)
     static Entity* buildHLOD(Scene* scene, const std::vector<std::string>& uuids, float lodStart = -1.0f, float lodEnd = -1.0f);
+
+    // Offline baked direct lighting into vertex colors for static scene geometry.
+    static VertexLightBakeStats bakeVertexLighting(Scene* scene);
 };
 
 } // namespace Crescent

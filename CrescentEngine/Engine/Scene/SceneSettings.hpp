@@ -7,6 +7,7 @@ namespace Crescent {
 
 struct SceneEnvironmentSettings {
     std::string skyboxPath = "Builtin Sky";
+    std::string cookedSkyboxPath;
     int skyMode = 0; // 0 = Procedural, 1 = HDRI
     float exposureEV = 0.0f;
     float iblIntensity = 1.0f;

@@ -11,6 +11,7 @@
 #include "../Components/ModelMeshReference.hpp"
 #include "../Components/HLODProxy.hpp"
 #include "../Assets/AssetDatabase.hpp"
+#include "../ECS/Transform.hpp"
 #include <assimp/config.h>
 #include <assimp/Importer.hpp>
 #include <assimp/GltfMaterial.h>
@@ -66,6 +67,104 @@ struct ModelCacheEntry {
     std::shared_ptr<Skeleton> skeleton;
     std::vector<std::shared_ptr<AnimationClip>> animations;
 };
+
+struct BakedDirectLight {
+    Light::Type type = Light::Type::Directional;
+    Math::Vector3 positionWS = Math::Vector3::Zero;
+    Math::Vector3 directionWS = Math::Vector3::Down;
+    Math::Vector3 color = Math::Vector3::One;
+    float intensity = 0.0f;
+    float range = 0.0f;
+    float cosInner = 1.0f;
+    float cosOuter = 1.0f;
+    float sourceRadius = 0.0f;
+};
+
+static std::shared_ptr<Mesh> CloneMeshGeometry(const std::shared_ptr<Mesh>& source) {
+    if (!source) {
+        return nullptr;
+    }
+    auto clone = std::make_shared<Mesh>();
+    clone->setName(source->getName());
+    clone->setVertices(source->getVertices());
+    clone->setIndices(source->getIndices());
+    clone->setSubmeshes(source->getSubmeshes());
+    clone->setSkinWeights(source->getSkinWeights());
+    clone->setDoubleSided(source->isDoubleSided());
+    return clone;
+}
+
+static Math::Vector3 ClampColor(const Math::Vector3& value, float maxValue) {
+    return Math::Vector3(
+        Math::Clamp(value.x, 0.0f, maxValue),
+        Math::Clamp(value.y, 0.0f, maxValue),
+        Math::Clamp(value.z, 0.0f, maxValue)
+    );
+}
+
+static Math::Vector3 BakeLightContribution(const BakedDirectLight& light,
+                                           const Math::Vector3& positionWS,
+                                           const Math::Vector3& normalWS) {
+    Math::Vector3 L = Math::Vector3::Zero;
+    float attenuation = 1.0f;
+
+    switch (light.type) {
+        case Light::Type::Directional:
+            L = (-light.directionWS).normalized();
+            attenuation = 1.0f;
+            break;
+        case Light::Type::Point:
+        case Light::Type::AreaRect:
+        case Light::Type::AreaDisk:
+        case Light::Type::EmissiveMesh: {
+            Math::Vector3 toLight = light.positionWS - positionWS;
+            float distance = toLight.length();
+            if (distance <= Math::EPSILON || (light.range > 0.0f && distance > light.range)) {
+                return Math::Vector3::Zero;
+            }
+            L = toLight / distance;
+            float rangeNorm = (light.range > 0.0f) ? Math::Clamp(distance / light.range, 0.0f, 1.0f) : 0.0f;
+            float smoothFalloff = std::pow(std::max(0.0f, 1.0f - std::pow(rangeNorm, 4.0f)), 2.0f);
+            attenuation = smoothFalloff / std::max(distance * distance, 0.25f);
+            if (light.sourceRadius > 0.0f) {
+                attenuation *= 1.0f + light.sourceRadius * 0.25f;
+            }
+            break;
+        }
+        case Light::Type::Spot: {
+            Math::Vector3 toLight = light.positionWS - positionWS;
+            float distance = toLight.length();
+            if (distance <= Math::EPSILON || (light.range > 0.0f && distance > light.range)) {
+                return Math::Vector3::Zero;
+            }
+            L = toLight / distance;
+            float rangeNorm = (light.range > 0.0f) ? Math::Clamp(distance / light.range, 0.0f, 1.0f) : 0.0f;
+            float smoothFalloff = std::pow(std::max(0.0f, 1.0f - std::pow(rangeNorm, 4.0f)), 2.0f);
+            attenuation = smoothFalloff / std::max(distance * distance, 0.25f);
+            float cosTheta = light.directionWS.normalized().dot(-L);
+            if (cosTheta <= light.cosOuter) {
+                return Math::Vector3::Zero;
+            }
+            float denom = std::max(light.cosInner - light.cosOuter, 0.0001f);
+            float spotAttenuation = Math::Clamp((cosTheta - light.cosOuter) / denom, 0.0f, 1.0f);
+            attenuation *= spotAttenuation;
+            break;
+        }
+    }
+
+    float nDotL = std::max(normalWS.dot(L), 0.0f);
+    if (nDotL <= 0.0f || attenuation <= 0.0f) {
+        return Math::Vector3::Zero;
+    }
+
+    float scaledIntensity = light.intensity;
+    if (light.type == Light::Type::Directional) {
+        scaledIntensity *= 0.35f;
+    } else {
+        scaledIntensity *= 0.075f;
+    }
+    return light.color * (scaledIntensity * attenuation * nDotL);
+}
 
 static ModelCacheEntry BuildModelCache(const std::string& path, const SceneCommands::ModelImportOptions& options) {
     Scene temp("ModelCache");
@@ -1996,6 +2095,97 @@ Entity* SceneCommands::buildHLOD(Scene* scene, const std::vector<std::string>& u
     proxy->setEnabled(true);
 
     return hlodEntity;
+}
+
+SceneCommands::VertexLightBakeStats SceneCommands::bakeVertexLighting(Scene* scene) {
+    VertexLightBakeStats stats;
+    if (!scene) {
+        return stats;
+    }
+
+    std::vector<BakedDirectLight> bakedLights;
+    bakedLights.reserve(8);
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity || !entity->isActiveInHierarchy() || entity->isEditorOnly()) {
+            continue;
+        }
+        Light* light = entity->getComponent<Light>();
+        if (!light || !light->getBakeToVertexLighting()) {
+            continue;
+        }
+
+        BakedDirectLight baked;
+        baked.type = light->getType();
+        baked.positionWS = entity->getTransform()->getPosition();
+        baked.directionWS = entity->getTransform()->forward().normalized();
+        baked.color = ClampColor(light->getEffectiveColor(), 8.0f);
+        baked.intensity = std::max(0.0f, light->getIntensity());
+        baked.range = std::max(0.0f, light->getRange());
+        baked.sourceRadius = std::max(0.0f, light->getSourceRadius());
+
+        float outerRadians = light->getSpotAngle() * Math::DEG_TO_RAD * 0.5f;
+        float innerRadians = light->getInnerSpotAngle() * Math::DEG_TO_RAD * 0.5f;
+        baked.cosOuter = std::cos(outerRadians);
+        baked.cosInner = std::cos(innerRadians);
+        bakedLights.push_back(baked);
+    }
+    stats.bakedLightCount = static_cast<int>(bakedLights.size());
+
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity || !entity->isActiveInHierarchy() || entity->isEditorOnly()) {
+            continue;
+        }
+
+        MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || entity->getComponent<SkinnedMeshRenderer>()) {
+            continue;
+        }
+
+        renderer->clearBakedVertexLighting();
+        std::shared_ptr<Mesh> sourceMesh = renderer->getMesh();
+        if (!sourceMesh || sourceMesh->getVertices().empty() || bakedLights.empty()) {
+            continue;
+        }
+
+        auto bakedMesh = CloneMeshGeometry(sourceMesh);
+        if (!bakedMesh) {
+            continue;
+        }
+
+        const auto& sourceVertices = bakedMesh->getVertices();
+        std::vector<Math::Vector4> bakedColors;
+        bakedColors.reserve(sourceVertices.size());
+
+        Math::Matrix4x4 world = entity->getTransform()->getWorldMatrix();
+        Math::Matrix4x4 normalMatrix = world.inversed().transposed();
+        for (const Vertex& vertex : sourceVertices) {
+            Math::Vector3 positionWS = world.transformPoint(vertex.position);
+            Math::Vector3 normalWS = normalMatrix.transformDirection(vertex.normal).normalized();
+            if (normalWS.lengthSquared() <= Math::EPSILON) {
+                normalWS = world.transformDirection(vertex.normal).normalized();
+            }
+            if (normalWS.lengthSquared() <= Math::EPSILON) {
+                normalWS = Math::Vector3::Up;
+            }
+
+            Math::Vector3 accumulated = Math::Vector3::Zero;
+            for (const BakedDirectLight& light : bakedLights) {
+                accumulated += BakeLightContribution(light, positionWS, normalWS);
+            }
+            accumulated = ClampColor(accumulated, 6.0f);
+            bakedColors.emplace_back(accumulated.x, accumulated.y, accumulated.z, vertex.color.w);
+        }
+
+        renderer->setMesh(bakedMesh);
+        renderer->setBakedVertexColors(bakedColors);
+        renderer->setUseBakedVertexLighting(true);
+        stats.bakedMeshCount += 1;
+        stats.bakedVertexCount += static_cast<int>(bakedColors.size());
+    }
+
+    return stats;
 }
 
 } // namespace Crescent

@@ -44,7 +44,8 @@ void ComputeWorldAABB(const Mesh* mesh,
 MeshRenderer::MeshRenderer()
     : m_Mesh(nullptr)
     , m_CastShadows(true)
-    , m_ReceiveShadows(true) {
+    , m_ReceiveShadows(true)
+    , m_UseBakedVertexLighting(false) {
     
     // Default material
     m_Materials.push_back(Material::CreateDefault());
@@ -52,6 +53,9 @@ MeshRenderer::MeshRenderer()
 
 void MeshRenderer::setMesh(std::shared_ptr<Mesh> mesh) {
     m_Mesh = mesh;
+    if (m_Mesh && !m_BakedVertexColors.empty()) {
+        setBakedVertexColors(m_BakedVertexColors);
+    }
 }
 
 void MeshRenderer::setMaterial(std::shared_ptr<Material> material) {
@@ -74,6 +78,31 @@ std::shared_ptr<Material> MeshRenderer::getMaterial(uint32_t index) const {
         return m_Materials[index];
     }
     return nullptr;
+}
+
+void MeshRenderer::setBakedVertexColors(const std::vector<Math::Vector4>& colors) {
+    m_BakedVertexColors = colors;
+    m_UseBakedVertexLighting = !m_BakedVertexColors.empty();
+    if (!m_Mesh) {
+        return;
+    }
+
+    const auto& sourceVertices = m_Mesh->getVertices();
+    if (sourceVertices.empty() || sourceVertices.size() != m_BakedVertexColors.size()) {
+        m_UseBakedVertexLighting = false;
+        return;
+    }
+
+    std::vector<Vertex> bakedVertices = sourceVertices;
+    for (size_t i = 0; i < bakedVertices.size(); ++i) {
+        bakedVertices[i].color = m_BakedVertexColors[i];
+    }
+    m_Mesh->setVertices(bakedVertices);
+}
+
+void MeshRenderer::clearBakedVertexLighting() {
+    m_UseBakedVertexLighting = false;
+    m_BakedVertexColors.clear();
 }
 
 Math::Vector3 MeshRenderer::getBoundsMin() const {

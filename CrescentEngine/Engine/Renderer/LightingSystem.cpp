@@ -174,6 +174,9 @@ void LightingSystem::gatherLights(Scene* scene, Camera* camera) {
         if (!light) {
             continue;
         }
+        if (light->getBakeToVertexLighting()) {
+            continue;
+        }
         
         Transform* transform = entity->getTransform();
         PreparedLight prepared;

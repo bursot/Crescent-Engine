@@ -988,7 +988,7 @@ class EditorState: ObservableObject {
         dockCollapsed = false
         dockTab = .console
         showConsole = true
-        addLog(.info, "Building game (\(configuration), cooked textures)...")
+        addLog(.info, "Building game (\(configuration), cooked textures + baked lighting)...")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -1068,6 +1068,34 @@ class EditorState: ObservableObject {
                     self.addLog(.error, "Build failed:\n\(detail)")
                 }
             }
+        }
+    }
+
+    func bakeLighting() {
+        guard hasProject else {
+            addLog(.error, "Open a project before baking lighting.")
+            return
+        }
+
+        dockCollapsed = false
+        dockTab = .console
+        showConsole = true
+        addLog(.info, "Baking vertex lighting...")
+
+        let result = CrescentEngineBridge.shared().bakeSceneVertexLighting() as? [String: Any] ?? [:]
+        let meshCount = (result["bakedMeshCount"] as? NSNumber)?.intValue ?? 0
+        let vertexCount = (result["bakedVertexCount"] as? NSNumber)?.intValue ?? 0
+        let lightCount = (result["bakedLightCount"] as? NSNumber)?.intValue ?? 0
+
+        if lightCount == 0 {
+            addLog(.warning, "No lights are marked 'Bake To Vertex Lighting'.")
+        } else {
+            addLog(.info, "Baked \(meshCount) meshes, \(vertexCount) vertices from \(lightCount) baked lights.")
+        }
+
+        refreshEntityList()
+        if sceneURL != nil {
+            saveScene()
         }
     }
 

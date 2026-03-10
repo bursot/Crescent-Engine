@@ -18,6 +18,7 @@ MODEL_EXTS = {
 }
 RUNTIME_RAW_ASSET_EXTS = {".hdr", ".exr", ".wav", ".mp3", ".ogg", ".flac", ".ktx", ".ktx2", ".dds", ".cube", ".cmat"}
 KTX2_CACHE_VERSION = "v2a"
+ENV_CACHE_VERSION = "v1"
 EMBEDDED_MARKER = "#embedded:"
 FNV64_OFFSET = 14695981039346656037
 FNV64_PRIME = 1099511628211
@@ -89,9 +90,156 @@ def relative_cooked_scene_path(project_root: Path, scene_path: Path) -> Path:
     return scene_path.relative_to(project_root).with_suffix(".ccscene")
 
 
+def normalize_environment_key(project_root: Path, source_path: Path, project_data: dict) -> str:
+    resolved = source_path.resolve()
+    asset_roots = [project_root / relative for relative in (project_data.get("assetPaths") or [project_data.get("assets", "Assets")])]
+    for root in asset_roots:
+        try:
+            return resolved.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            continue
+    try:
+        return resolved.relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def relative_cooked_environment_path(project_root: Path, source_path: Path, project_data: dict) -> Path:
+    key = normalize_environment_key(project_root, source_path, project_data)
+    return Path("Library") / "ImportCache" / f"hdri_{stable_hash(key)}_{ENV_CACHE_VERSION}.cenv"
+
+
+def collect_environment_refs(scene_files: list[Path], project_root: Path, project_data: dict) -> list[Path]:
+    refs: set[Path] = set()
+    asset_roots = [project_root / relative for relative in (project_data.get("assetPaths") or [project_data.get("assets", "Assets")])]
+    for scene_path in scene_files:
+        try:
+            scene_data = json.loads(scene_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        environment = scene_data.get("sceneSettings", {}).get("environment", {})
+        if not isinstance(environment, dict):
+            continue
+        skybox_entry = environment.get("skybox")
+        skybox_ref = extract_asset_ref(skybox_entry)
+        if not skybox_ref or skybox_ref == "Builtin Sky":
+            continue
+
+        candidates = [(project_root / skybox_ref).resolve()]
+        for root in asset_roots:
+            candidates.append((root / skybox_ref).resolve())
+
+        resolved = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+        refs.add(resolved)
+
+    return sorted(refs)
+
+
+def bake_source_scenes(player_app: Path,
+                       project_file: Path,
+                       scene_files: list[Path],
+                       baked_root: Path) -> tuple[dict[Path, Path], dict[str, int]]:
+    if not scene_files:
+        return {}, {
+            "bakedSceneCount": 0,
+            "bakedMeshCount": 0,
+            "bakedVertexCount": 0,
+            "bakedLightCount": 0,
+        }
+
+    executable = player_app / "Contents" / "MacOS" / "CrescentPlayer"
+    if not executable.exists():
+        raise FileNotFoundError(f"Cooker executable not found: {executable}")
+
+    project_root = project_file.parent
+    baked_scene_map: dict[Path, Path] = {}
+    stats = {
+        "bakedSceneCount": 0,
+        "bakedMeshCount": 0,
+        "bakedVertexCount": 0,
+        "bakedLightCount": 0,
+    }
+
+    for scene_path in scene_files:
+        baked_output = baked_root / scene_path.relative_to(project_root)
+        baked_output.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                str(executable),
+                "--bake-scene-lighting",
+                str(project_file),
+                str(scene_path),
+                str(baked_output),
+            ],
+            cwd=project_root,
+        )
+        baked_scene_map[scene_path] = baked_output
+        stats["bakedSceneCount"] += 1
+
+        try:
+            baked_data = json.loads(baked_output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        scene_baked_lights = 0
+        for entity in baked_data.get("entities", []):
+            components = entity.get("components", {})
+            light = components.get("Light")
+            if isinstance(light, dict) and light.get("bakeToVertexLighting", False):
+                scene_baked_lights += 1
+
+            renderer = components.get("MeshRenderer")
+            if not isinstance(renderer, dict):
+                continue
+            if not renderer.get("useBakedVertexLighting", False):
+                continue
+            stats["bakedMeshCount"] += 1
+            baked_colors = renderer.get("bakedVertexColors", [])
+            if isinstance(baked_colors, list):
+                stats["bakedVertexCount"] += len(baked_colors)
+
+        stats["bakedLightCount"] += scene_baked_lights
+
+    return baked_scene_map, stats
+
+
+def cook_runtime_environments(player_app: Path,
+                              project_file: Path,
+                              project_data: dict,
+                              environment_files: list[Path],
+                              cooked_root: Path) -> dict[Path, Path]:
+    if not environment_files:
+        return {}
+
+    executable = player_app / "Contents" / "MacOS" / "CrescentPlayer"
+    if not executable.exists():
+        raise FileNotFoundError(f"Cooker executable not found: {executable}")
+
+    project_root = project_file.parent
+    cooked_map: dict[Path, Path] = {}
+    for source_path in environment_files:
+        cooked_relative = relative_cooked_environment_path(project_root, source_path, project_data)
+        cooked_output = cooked_root / cooked_relative
+        cooked_output.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                str(executable),
+                "--cook-environment",
+                str(project_file),
+                str(source_path),
+                str(cooked_output),
+            ],
+            cwd=project_root,
+        )
+        cooked_map[source_path] = cooked_output
+    return cooked_map
+
+
 def cook_runtime_scenes(player_app: Path,
                         project_file: Path,
                         scene_files: list[Path],
+                        source_scene_lookup: Optional[dict[Path, Path]],
                         cooked_root: Path) -> dict[str, str]:
     if not scene_files:
         return {}
@@ -103,6 +251,7 @@ def cook_runtime_scenes(player_app: Path,
     project_root = project_file.parent
     cooked_map: dict[str, str] = {}
     for scene_path in scene_files:
+        source_scene_path = source_scene_lookup.get(scene_path, scene_path) if source_scene_lookup else scene_path
         cooked_relative = relative_cooked_scene_path(project_root, scene_path)
         cooked_output = cooked_root / cooked_relative
         cooked_output.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +260,7 @@ def cook_runtime_scenes(player_app: Path,
                 str(executable),
                 "--cook-scene",
                 str(project_file),
-                str(scene_path),
+                str(source_scene_path),
                 str(cooked_output),
             ],
             cwd=project_root,
@@ -254,7 +403,7 @@ def copy_packaged_import_cache(project_root: Path, project_data: dict, game_data
     for source_path in source_cache_dir.rglob("*"):
         if not source_path.is_file():
             continue
-        if source_path.suffix.lower() != ".ktx2":
+        if source_path.suffix.lower() not in {".ktx2", ".cenv"}:
             continue
         relative_path = source_path.relative_to(source_cache_dir)
         destination = packaged_cache_dir / relative_path
@@ -301,6 +450,15 @@ def patch_info_plist(info_plist_path: Path, product_name: str, bundle_identifier
     data["CFBundleIdentifier"] = bundle_identifier
     with info_plist_path.open("wb") as handle:
         plistlib.dump(data, handle)
+
+
+def prune_packaged_runtime_resources(resources_dir: Path) -> None:
+    for relative_path in ("basisu", "README_JOLT.md"):
+        target = resources_dir / relative_path
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
 
 
 def maybe_encode_textures(repo_root: Path, project_file: Path) -> None:
@@ -461,6 +619,7 @@ def package_game(repo_root: Path,
     startup_scene = resolve_startup_scene(project_root, project_data, startup_scene_override)
     validate_startup_scene(project_root, startup_scene)
     scene_files = list_scene_files(project_root, project_data)
+    environment_files = collect_environment_refs(scene_files, project_root, project_data)
     product_name = project_data.get("productName") or project_data.get("name") or "CrescentGame"
     bundle_identifier = project_data.get("bundleIdentifier") or "com.crescentengine.game"
     require_cooked_textures = encode_textures or configuration == "Release"
@@ -472,8 +631,37 @@ def package_game(repo_root: Path,
     with tempfile.TemporaryDirectory(prefix="crescent-build-") as tmp_dir:
         derived_data = Path(tmp_dir) / "DerivedData"
         built_app = build_app(repo_root, configuration, derived_data)
+        cooked_environment_root = Path(tmp_dir) / "CookedEnvironment"
+        cooked_environment_map = cook_runtime_environments(
+            built_app,
+            project_file,
+            project_data,
+            environment_files,
+            cooked_environment_root,
+        )
+        print(f"Cooked environments: {len(cooked_environment_map)}")
+        baked_scenes_root = Path(tmp_dir) / "BakedScenes"
+        baked_source_scene_map, baked_stats = bake_source_scenes(
+            built_app,
+            project_file,
+            scene_files,
+            baked_scenes_root,
+        )
+        print(
+            "Baked lighting: "
+            f"{baked_stats['bakedMeshCount']} meshes, "
+            f"{baked_stats['bakedVertexCount']} vertices, "
+            f"{baked_stats['bakedLightCount']} baked lights across "
+            f"{baked_stats['bakedSceneCount']} scenes."
+        )
         cooked_scenes_root = Path(tmp_dir) / "CookedScenes"
-        cooked_scene_map = cook_runtime_scenes(built_app, project_file, scene_files, cooked_scenes_root)
+        cooked_scene_map = cook_runtime_scenes(
+            built_app,
+            project_file,
+            scene_files,
+            baked_source_scene_map,
+            cooked_scenes_root,
+        )
 
         output_dir.mkdir(parents=True, exist_ok=True)
         packaged_app = output_dir / f"{product_name}.app"
@@ -483,6 +671,7 @@ def package_game(repo_root: Path,
         patch_info_plist(packaged_app / "Contents" / "Info.plist", product_name, bundle_identifier)
 
         resources_dir = packaged_app / "Contents" / "Resources"
+        prune_packaged_runtime_resources(resources_dir)
         game_data_dir = resources_dir / "GameData"
         game_data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -495,6 +684,9 @@ def package_game(repo_root: Path,
         packaged_project_data["textureCookFormat"] = "KTX2_ASTC4x4"
         packaged_project_data["requireCookedScenes"] = bool(cooked_scene_map)
         packaged_project_data["sceneCookFormat"] = "MessagePackEmbeddedMeshV1" if cooked_scene_map else ""
+        packaged_project_data["lightingBakeFormat"] = "VertexDirectV1"
+        packaged_project_data["requireCookedEnvironmentIBL"] = bool(cooked_environment_map)
+        packaged_project_data["environmentCookFormat"] = "CENV_RGBA16F_V1" if cooked_environment_map else ""
         packaged_project_data["cookedScenes"] = cooked_scene_map
         with (game_data_dir / "Project.cproj").open("w", encoding="utf-8") as handle:
             json.dump(packaged_project_data, handle, indent=2)
@@ -503,6 +695,7 @@ def package_game(repo_root: Path,
         copy_packaged_scenes(project_root, project_data, game_data_dir, cooked_scene_map, cooked_scenes_root)
         copy_tree_if_exists(project_root / project_data.get("settings", "Settings"), game_data_dir / "Settings")
         copy_packaged_import_cache(project_root, project_data, game_data_dir)
+        copy_tree_if_exists(cooked_environment_root / "Library" / "ImportCache", game_data_dir / "Library" / "ImportCache")
 
         manifest = build_manifest(game_data_dir, project_data, packaged_startup_scene)
         manifest_path = game_data_dir / "BuildManifest.json"

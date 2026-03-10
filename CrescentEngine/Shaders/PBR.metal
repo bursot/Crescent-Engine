@@ -38,6 +38,7 @@ struct VertexOut {
     float lodFade;
     float billboardFade;
     float billboardFlag;
+    float bakedLightingFlag;
 };
 
 struct PrepassOut {
@@ -997,6 +998,7 @@ vertex VertexOut vertex_main(
     out.lodFade = lodFade;
     out.billboardFade = billboardFade;
     out.billboardFlag = mesh.flags.x;
+    out.bakedLightingFlag = mesh.flags.y;
 
     return out;
 }
@@ -1067,6 +1069,7 @@ vertex VertexOut vertex_main_instanced(
     out.lodFade = lodFade;
     out.billboardFade = billboardFade;
     out.billboardFlag = mesh.flags.x;
+    out.bakedLightingFlag = mesh.flags.y;
     return out;
 }
 
@@ -1107,6 +1110,7 @@ vertex VertexOut vertex_skinned(
     out.lodFade = 0.0;
     out.billboardFade = 0.0;
     out.billboardFlag = 0.0;
+    out.bakedLightingFlag = 0.0;
 
     return out;
 }
@@ -2342,7 +2346,8 @@ fragment float4 fragment_main(
     
     // Albedo
     float4 albedoSample = albedoMap.sample(textureSampler, uv);
-    float3 albedo = material.albedo.rgb * in.color.rgb;
+    float3 vertexTint = (in.bakedLightingFlag > 0.5) ? float3(1.0) : in.color.rgb;
+    float3 albedo = material.albedo.rgb * vertexTint;
     bool terrainEnabled = material.terrainParams0.x > 0.5 &&
         (material.terrainFlags.y + material.terrainFlags.z + material.terrainFlags.w) > 0.5;
     if (terrainEnabled) {
@@ -2655,14 +2660,20 @@ fragment float4 fragment_main(
     float ambientAO = mix(1.0, ao, 0.35);
     float3 ambientLighting = ambientRadiance * (kD_ambient * albedo / PI) * ambientAO;
     
+    float3 bakedDirect = float3(0.0);
+    if (in.bakedLightingFlag > 0.5) {
+        float3 bakedKD = (float3(1.0) - F0) * (1.0 - metallic);
+        bakedDirect = bakedKD * albedo / PI * max(in.color.rgb, float3(0.0));
+    }
+
     // Add emission (unpack from Vector4)
     float3 emission = material.emission.xyz * material.emission.w; // emissionStrength in w
     if (material.textureFlags2.y > 0.5) {
         emission += emissionMap.sample(textureSampler, uv).rgb * material.emission.w;
     }
     
-    // Final color - Direct + IBL + ambient fill + emission
-    float3 color = Lo + environmentLighting + ambientLighting + emission;
+    // Final color - dynamic direct + baked direct + IBL + ambient fill + emission
+    float3 color = Lo + bakedDirect + environmentLighting + ambientLighting + emission;
     
     // ========== DEBUG: Check shadow map content ==========
     #if 0
@@ -2776,6 +2787,7 @@ fragment float4 skybox_fragment(
     constant EnvironmentUniforms& environment [[buffer(0)]],
     constant LightData& sun [[buffer(2)]],
     texture2d<float> environmentMap [[texture(0)]],
+    texturecube<float> environmentCubemap [[texture(1)]],
     sampler environmentSampler [[sampler(0)]]
 ) {
     if (environment.toneControl.z < 0.5) {
@@ -2805,7 +2817,14 @@ fragment float4 skybox_fragment(
     float useHDRI = environment.skyParams.x;
     if (useHDRI > 0.5) {
         float lod = max(environment.exposureIntensity.w, 1.5);
-        color = sampleEnvironment(environmentMap, environmentSampler, worldDir, lod, environment);
+        if (environment.toneControl.y > 0.5) {
+            float3x3 envRot = environmentRotation(environment);
+            float3 rotatedDir = envRot * worldDir;
+            color = environmentCubemap.sample(environmentSampler, rotatedDir, level(lod)).rgb;
+            color = applyEnvironmentGrading(color, environment);
+        } else {
+            color = sampleEnvironment(environmentMap, environmentSampler, worldDir, lod, environment);
+        }
     } else {
         float3 sunDir = normalize(-sun.direction.xyz);
         float sunIntensity = max(sun.direction.w, 0.0);

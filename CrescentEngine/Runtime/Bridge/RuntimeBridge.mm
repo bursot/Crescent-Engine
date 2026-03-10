@@ -31,6 +31,9 @@
 - (BOOL)openProjectAtPath:(NSString *)path { return [[self bridge] openProjectAtPath:path]; }
 - (NSDictionary *)getProjectSettings { return [[self bridge] getProjectSettings]; }
 - (NSDictionary *)getProjectInfo { return [[self bridge] getProjectInfo]; }
+- (NSDictionary *)bakeSceneVertexLighting { return [[self bridge] bakeSceneVertexLighting]; }
+- (BOOL)cookEnvironmentMapAtPath:(NSString *)path outputPath:(NSString *)outputPath { return [[self bridge] cookEnvironmentMap:path outputPath:outputPath]; }
+- (BOOL)saveSceneAtPath:(NSString *)path { return [[self bridge] saveSceneAtPath:path]; }
 - (BOOL)saveCookedRuntimeSceneAtPath:(NSString *)path includeEditorOnly:(BOOL)includeEditorOnly {
     return [[self bridge] saveCookedRuntimeSceneAtPath:path includeEditorOnly:includeEditorOnly];
 }

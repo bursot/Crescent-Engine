@@ -136,6 +136,9 @@ public:
     void setVolumetric(bool v) { m_Volumetric = v; }
     float getVolumetricAnisotropy() const { return m_VolumetricAnisotropy; }
     void setVolumetricAnisotropy(float g) { m_VolumetricAnisotropy = Math::Clamp(g, -0.99f, 0.99f); }
+
+    bool getBakeToVertexLighting() const { return m_BakeToVertexLighting; }
+    void setBakeToVertexLighting(bool bake) { m_BakeToVertexLighting = bake; }
     
     // Calculate attenuation at distance
     float calculateAttenuation(float distance) const;
@@ -218,6 +221,7 @@ private:
     // Volumetric
     bool m_Volumetric;
     float m_VolumetricAnisotropy;
+    bool m_BakeToVertexLighting;
     
     // Main light
     static Light* s_MainLight;

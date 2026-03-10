@@ -144,11 +144,26 @@ struct EditorToolbar: View {
 
                 ToolbarCluster {
                     Button(action: {
+                        editorState.bakeLighting()
+                    }) {
+                        ToolbarPillLabel(
+                            title: "Bake Lighting",
+                            value: "Vertex",
+                            systemImage: "sun.max.fill",
+                            accent: EditorTheme.warning
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!editorState.hasProject || editorState.isBuildingGame)
+                    .opacity(editorState.hasProject && !editorState.isBuildingGame ? 1 : 0.55)
+                    .help("Bake lights marked in the Light inspector into static mesh vertex lighting")
+
+                    Button(action: {
                         editorState.buildGame()
                     }) {
                         ToolbarPillLabel(
                             title: editorState.isBuildingGame ? "Building" : "Build Game",
-                            value: editorState.isBuildingGame ? "..." : "Cooked",
+                            value: editorState.isBuildingGame ? "..." : "Cooked+Bake",
                             systemImage: editorState.isBuildingGame ? "shippingbox.circle.fill" : "shippingbox.fill",
                             accent: editorState.isBuildingGame ? EditorTheme.warning : EditorTheme.textAccent
                         )
@@ -156,7 +171,7 @@ struct EditorToolbar: View {
                     .buttonStyle(.plain)
                     .disabled(!editorState.hasProject || editorState.isBuildingGame)
                     .opacity(editorState.hasProject && !editorState.isBuildingGame ? 1 : 0.55)
-                    .help("Build the current scene as a standalone game app with cooked textures")
+                    .help("Build the current scene as a standalone game app with cooked textures and baked lighting")
 
                     Button(action: {
                         editorState.togglePlay()

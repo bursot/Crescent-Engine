@@ -35,6 +35,13 @@ public:
     
     bool getReceiveShadows() const { return m_ReceiveShadows; }
     void setReceiveShadows(bool receive) { m_ReceiveShadows = receive; }
+
+    bool getUseBakedVertexLighting() const { return m_UseBakedVertexLighting; }
+    void setUseBakedVertexLighting(bool useBaked) { m_UseBakedVertexLighting = useBaked; }
+
+    const std::vector<Math::Vector4>& getBakedVertexColors() const { return m_BakedVertexColors; }
+    void setBakedVertexColors(const std::vector<Math::Vector4>& colors);
+    void clearBakedVertexLighting();
     
     // Bounds for culling
     Math::Vector3 getBoundsMin() const;
@@ -52,6 +59,8 @@ private:
     
     bool m_CastShadows;
     bool m_ReceiveShadows;
+    bool m_UseBakedVertexLighting;
+    std::vector<Math::Vector4> m_BakedVertexColors;
 };
 
 } // namespace Crescent

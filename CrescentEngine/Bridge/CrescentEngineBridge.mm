@@ -3373,6 +3373,21 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (NSDictionary *)bakeSceneVertexLighting {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return @{};
+        }
+        SceneCommands::VertexLightBakeStats stats = SceneCommands::bakeVertexLighting(scene);
+        return @{
+            @"bakedMeshCount": @(stats.bakedMeshCount),
+            @"bakedVertexCount": @(stats.bakedVertexCount),
+            @"bakedLightCount": @(stats.bakedLightCount)
+        };
+    }];
+}
+
 // MARK: - Material Assets
 
 - (NSString *)createMaterialAssetFromEntity:(NSString *)uuid name:(NSString *)name {
@@ -3667,6 +3682,15 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             scene->getSettings().environment.skyboxPath = [path UTF8String];
         }
         return ok ? YES : NO;
+    }];
+}
+
+- (BOOL)cookEnvironmentMap:(NSString *)path outputPath:(NSString *)outputPath {
+    return [self performSyncBool:^BOOL {
+        if (!_engine || !_engine->getRenderer() || !path || !outputPath) {
+            return NO;
+        }
+        return _engine->getRenderer()->saveCookedEnvironmentMap(path.UTF8String, outputPath.UTF8String) ? YES : NO;
     }];
 }
 
@@ -4669,6 +4693,7 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         dict[@"cookieIndex"] = @(light->getCookieIndex());
         dict[@"iesIndex"] = @(light->getIESProfileIndex());
         dict[@"volumetric"] = @(light->getVolumetric());
+        dict[@"bakeToVertexLighting"] = @(light->getBakeToVertexLighting());
         return dict;
     }];
 }
@@ -4765,6 +4790,9 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         }
         if (NSNumber* vol = info[@"volumetric"]) {
             light->setVolumetric(vol.boolValue);
+        }
+        if (NSNumber* bake = info[@"bakeToVertexLighting"]) {
+            light->setBakeToVertexLighting(bake.boolValue);
         }
         return YES;
     }];

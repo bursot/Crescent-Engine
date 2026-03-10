@@ -182,7 +182,7 @@ MTL::Texture* IBLGenerator::generateBRDFLUT() {
     desc->setWidth(size);
     desc->setHeight(size);
     desc->setUsage(MTL::TextureUsageShaderWrite | MTL::TextureUsageShaderRead);
-    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setStorageMode(MTL::StorageModeShared);
     
     MTL::Texture* brdfLUT = m_device->newTexture(desc);
     desc->release();
@@ -222,7 +222,7 @@ MTL::Texture* IBLGenerator::equirectToCubemap(MTL::Texture* equirect, uint32_t r
     desc->setHeight(resolution);
     desc->setMipmapLevelCount(mipLevels);
     desc->setUsage(MTL::TextureUsageShaderWrite | MTL::TextureUsageShaderRead);
-    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setStorageMode(MTL::StorageModeShared);
     
     MTL::Texture* cubemap = m_device->newTexture(desc);
     desc->release();
@@ -276,7 +276,7 @@ MTL::Texture* IBLGenerator::generatePrefilteredEnvMap(MTL::Texture* cubemap, uin
     desc->setHeight(resolution);
     desc->setMipmapLevelCount(maxMipLevels);
     desc->setUsage(MTL::TextureUsageShaderWrite | MTL::TextureUsageShaderRead);
-    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setStorageMode(MTL::StorageModeShared);
     
     MTL::Texture* prefiltered = m_device->newTexture(desc);
     desc->release();
@@ -342,7 +342,7 @@ MTL::Texture* IBLGenerator::generateIrradianceMap(MTL::Texture* cubemap, uint32_
     desc->setWidth(resolution);
     desc->setHeight(resolution);
     desc->setUsage(MTL::TextureUsageShaderWrite | MTL::TextureUsageShaderRead);
-    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setStorageMode(MTL::StorageModeShared);
     
     MTL::Texture* irradiance = m_device->newTexture(desc);
     desc->release();

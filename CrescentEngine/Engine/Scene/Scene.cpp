@@ -378,12 +378,14 @@ void Scene::applySettings() {
         return;
     }
     const SceneEnvironmentSettings& env = m_Settings.environment;
+    const Renderer::EnvironmentSettings& currentEnv = renderer->getEnvironmentSettings();
     if (env.skyboxPath.empty() || env.skyboxPath == "Builtin Sky") {
         if (renderer->getEnvironmentPath() != "Builtin Sky") {
             renderer->resetEnvironment();
         }
-    } else if (renderer->getEnvironmentPath() != env.skyboxPath) {
-        if (!renderer->loadEnvironmentMap(env.skyboxPath)) {
+    } else if (currentEnv.sourcePath != env.skyboxPath ||
+               currentEnv.cookedIBLPath != env.cookedSkyboxPath) {
+        if (!renderer->loadEnvironmentMap(env.skyboxPath, env.cookedSkyboxPath)) {
             renderer->resetEnvironment();
         }
     }

@@ -9,6 +9,83 @@ private enum PlayerCommandLine {
             return nil
         }
 
+        if arguments[1] == "--cook-environment" {
+            guard arguments.count >= 5 else {
+                fputs("Usage: CrescentPlayer --cook-environment <Project.cproj> <SourceHDRI> <Output.cenv>\n", stderr)
+                return 2
+            }
+
+            let projectPath = arguments[2]
+            let sourcePath = arguments[3]
+            let outputPath = arguments[4]
+            let bridge = RuntimeBridge.shared()
+
+            guard bridge.initialize() else {
+                fputs("Failed to initialize runtime bridge for environment cooking.\n", stderr)
+                return 1
+            }
+            defer {
+                bridge.shutdown()
+            }
+
+            guard bridge.openProject(path: projectPath) else {
+                fputs("Failed to open project for environment cooking.\n", stderr)
+                return 1
+            }
+
+            guard bridge.cookEnvironmentMap(path: sourcePath, outputPath: outputPath) else {
+                fputs("Failed to cook environment map.\n", stderr)
+                return 1
+            }
+
+            fputs("Cooked environment: \(outputPath)\n", stdout)
+            return 0
+        }
+
+        if arguments[1] == "--bake-scene-lighting" {
+            guard arguments.count >= 5 else {
+                fputs("Usage: CrescentPlayer --bake-scene-lighting <Project.cproj> <SourceScene.cscene> <OutputScene.cscene>\n", stderr)
+                return 2
+            }
+
+            let projectPath = arguments[2]
+            let sourceScenePath = arguments[3]
+            let outputScenePath = arguments[4]
+            let bridge = RuntimeBridge.shared()
+
+            guard bridge.initialize() else {
+                fputs("Failed to initialize runtime bridge for baked lighting.\n", stderr)
+                return 1
+            }
+            defer {
+                bridge.shutdown()
+            }
+
+            guard bridge.openProject(path: projectPath) else {
+                fputs("Failed to open project for baked lighting.\n", stderr)
+                return 1
+            }
+
+            guard bridge.loadScene(path: sourceScenePath) else {
+                fputs("Failed to load source scene for baked lighting.\n", stderr)
+                return 1
+            }
+
+            let stats = bridge.bakeSceneVertexLighting()
+            if let meshCount = stats["bakedMeshCount"] as? NSNumber,
+               let lightCount = stats["bakedLightCount"] as? NSNumber,
+               let vertexCount = stats["bakedVertexCount"] as? NSNumber {
+                fputs("Baked \(meshCount.intValue) meshes from \(lightCount.intValue) lights (\(vertexCount.intValue) vertices).\n", stdout)
+            }
+
+            guard bridge.saveScene(path: outputScenePath) else {
+                fputs("Failed to save baked source scene.\n", stderr)
+                return 1
+            }
+
+            return 0
+        }
+
         guard arguments[1] == "--cook-scene" else {
             return nil
         }

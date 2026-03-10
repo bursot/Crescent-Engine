@@ -65,6 +65,20 @@ struct CubeLUTData {
     std::vector<Math::Vector3> values;
 };
 
+constexpr uint32_t kCookedEnvironmentVersion = 1;
+constexpr size_t kRGBA16FPixelBytes = sizeof(uint16_t) * 4;
+
+struct CookedEnvironmentHeader {
+    char magic[4];
+    uint32_t version;
+    uint32_t cubemapSize;
+    uint32_t cubemapMipLevels;
+    uint32_t prefilteredSize;
+    uint32_t prefilteredMipLevels;
+    uint32_t irradianceSize;
+    uint32_t irradianceMipLevels;
+};
+
 std::string ToUpper(std::string value) {
     for (char& c : value) {
         c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -161,6 +175,160 @@ std::shared_ptr<Texture2D> CreateLUTTextureFromCube(TextureLoader* loader, const
     }
 
     return loader->createTextureFromRGBA8(path, data.data(), width, height, false, false);
+}
+
+bool ReadExact(std::istream& stream, void* dst, size_t size) {
+    stream.read(static_cast<char*>(dst), static_cast<std::streamsize>(size));
+    return stream.good();
+}
+
+bool WriteExact(std::ostream& stream, const void* src, size_t size) {
+    stream.write(static_cast<const char*>(src), static_cast<std::streamsize>(size));
+    return stream.good();
+}
+
+bool WriteCubeTexture(std::ostream& stream, MTL::Texture* texture) {
+    if (!texture) {
+        return false;
+    }
+
+    const uint32_t mipLevels = static_cast<uint32_t>(texture->mipmapLevelCount());
+    for (uint32_t mip = 0; mip < mipLevels; ++mip) {
+        const uint32_t mipSize = std::max(1u, static_cast<uint32_t>(texture->width()) >> mip);
+        const size_t bytesPerRow = static_cast<size_t>(mipSize) * kRGBA16FPixelBytes;
+        const size_t bytesPerImage = bytesPerRow * mipSize;
+        std::vector<uint8_t> faceData(bytesPerImage);
+        MTL::Region region = MTL::Region::Make2D(0, 0, mipSize, mipSize);
+
+        for (uint32_t face = 0; face < 6; ++face) {
+            texture->getBytes(faceData.data(),
+                              static_cast<NS::UInteger>(bytesPerRow),
+                              static_cast<NS::UInteger>(bytesPerImage),
+                              region,
+                              static_cast<NS::UInteger>(mip),
+                              static_cast<NS::UInteger>(face));
+            if (!WriteExact(stream, faceData.data(), faceData.size())) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+MTL::Texture* ReadCubeTexture(std::istream& stream,
+                              MTL::Device* device,
+                              uint32_t size,
+                              uint32_t mipLevels) {
+    if (!device || size == 0 || mipLevels == 0) {
+        return nullptr;
+    }
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setTextureType(MTL::TextureTypeCube);
+    desc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    desc->setWidth(size);
+    desc->setHeight(size);
+    desc->setMipmapLevelCount(mipLevels);
+    desc->setUsage(MTL::TextureUsageShaderRead);
+    desc->setStorageMode(MTL::StorageModeShared);
+    MTL::Texture* texture = device->newTexture(desc);
+    desc->release();
+    if (!texture) {
+        return nullptr;
+    }
+
+    for (uint32_t mip = 0; mip < mipLevels; ++mip) {
+        const uint32_t mipSize = std::max(1u, size >> mip);
+        const size_t bytesPerRow = static_cast<size_t>(mipSize) * kRGBA16FPixelBytes;
+        const size_t bytesPerImage = bytesPerRow * mipSize;
+        std::vector<uint8_t> faceData(bytesPerImage);
+        MTL::Region region = MTL::Region::Make2D(0, 0, mipSize, mipSize);
+
+        for (uint32_t face = 0; face < 6; ++face) {
+            if (!ReadExact(stream, faceData.data(), faceData.size())) {
+                texture->release();
+                return nullptr;
+            }
+            texture->replaceRegion(region,
+                                   static_cast<NS::UInteger>(mip),
+                                   static_cast<NS::UInteger>(face),
+                                   faceData.data(),
+                                   static_cast<NS::UInteger>(bytesPerRow),
+                                   static_cast<NS::UInteger>(bytesPerImage));
+        }
+    }
+
+    return texture;
+}
+
+bool WriteCookedEnvironmentBlob(const std::string& outputPath,
+                                MTL::Texture* cubemap,
+                                MTL::Texture* prefiltered,
+                                MTL::Texture* irradiance) {
+    if (!cubemap || !prefiltered || !irradiance) {
+        return false;
+    }
+
+    std::filesystem::path output(outputPath);
+    std::error_code ec;
+    std::filesystem::create_directories(output.parent_path(), ec);
+
+    std::ofstream stream(output, std::ios::binary | std::ios::trunc);
+    if (!stream.is_open()) {
+        return false;
+    }
+
+    CookedEnvironmentHeader header{
+        {'C', 'E', 'N', 'V'},
+        kCookedEnvironmentVersion,
+        static_cast<uint32_t>(cubemap->width()),
+        static_cast<uint32_t>(cubemap->mipmapLevelCount()),
+        static_cast<uint32_t>(prefiltered->width()),
+        static_cast<uint32_t>(prefiltered->mipmapLevelCount()),
+        static_cast<uint32_t>(irradiance->width()),
+        static_cast<uint32_t>(irradiance->mipmapLevelCount())
+    };
+
+    return WriteExact(stream, &header, sizeof(header)) &&
+           WriteCubeTexture(stream, cubemap) &&
+           WriteCubeTexture(stream, prefiltered) &&
+           WriteCubeTexture(stream, irradiance) &&
+           stream.good();
+}
+
+bool LoadCookedEnvironmentBlob(const std::string& cookedPath,
+                               MTL::Device* device,
+                               MTL::Texture*& outCubemap,
+                               MTL::Texture*& outPrefiltered,
+                               MTL::Texture*& outIrradiance) {
+    std::ifstream stream(cookedPath, std::ios::binary);
+    if (!stream.is_open()) {
+        return false;
+    }
+
+    CookedEnvironmentHeader header{};
+    if (!ReadExact(stream, &header, sizeof(header))) {
+        return false;
+    }
+    if (std::memcmp(header.magic, "CENV", 4) != 0 || header.version != kCookedEnvironmentVersion) {
+        return false;
+    }
+
+    MTL::Texture* cubemap = ReadCubeTexture(stream, device, header.cubemapSize, header.cubemapMipLevels);
+    MTL::Texture* prefiltered = ReadCubeTexture(stream, device, header.prefilteredSize, header.prefilteredMipLevels);
+    MTL::Texture* irradiance = ReadCubeTexture(stream, device, header.irradianceSize, header.irradianceMipLevels);
+    if (!cubemap || !prefiltered || !irradiance) {
+        if (cubemap) cubemap->release();
+        if (prefiltered) prefiltered->release();
+        if (irradiance) irradiance->release();
+        return false;
+    }
+
+    outCubemap = cubemap;
+    outPrefiltered = prefiltered;
+    outIrradiance = irradiance;
+    return true;
 }
 } // namespace
 
@@ -5147,7 +5315,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 Math::Vector3 boundsSize = mesh->getBoundsSize();
                 meshUniforms.boundsCenter = Math::Vector4(boundsCenter.x, boundsCenter.y, boundsCenter.z, 0.0f);
                 meshUniforms.boundsSize = Math::Vector4(boundsSize.x, boundsSize.y, boundsSize.z, 0.0f);
-                meshUniforms.flags = Math::Vector4(0.0f);
+                meshUniforms.flags = Math::Vector4(
+                    0.0f,
+                    meshRenderer->getUseBakedVertexLighting() ? 1.0f : 0.0f,
+                    0.0f,
+                    0.0f
+                );
                 encoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
                 encoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
             }
@@ -6615,6 +6788,7 @@ void Renderer::renderSkybox(MTL::RenderCommandEncoder* encoder, Camera* camera) 
     }
     auto envTex = (m_environmentTexture ? m_environmentTexture : m_defaultEnvironmentTexture);
     encoder->setFragmentTexture(envTex ? envTex->getHandle() : nullptr, 0);
+    encoder->setFragmentTexture(m_iblCubemap, 1);
     if (m_samplerState) {
         encoder->setFragmentSamplerState(m_samplerState, 0);
     }
@@ -6678,38 +6852,96 @@ void Renderer::updateEnvironmentUniforms() {
     env->rot2 = Math::Vector4(rot(0, 2), rot(1, 2), rot(2, 2), 0.0f);
 }
 
-bool Renderer::loadEnvironmentMap(const std::string& path) {
-    if (!m_textureLoader) {
+bool Renderer::saveCookedEnvironmentMap(const std::string& path, const std::string& outputPath) {
+    if (!m_textureLoader || !m_iblGenerator || !m_iblGenerator->isInitialized()) {
         return false;
     }
-    
+
     auto texture = m_textureLoader->loadTexture(path, false, false);
     if (!texture) {
         return false;
     }
-    
-    m_environmentTexture = texture;
+
+    MTL::Texture* equirectTex = static_cast<MTL::Texture*>(texture->getHandle());
+    if (!equirectTex) {
+        return false;
+    }
+
+    auto iblTextures = m_iblGenerator->processEnvironmentMap(equirectTex);
+    bool ok = WriteCookedEnvironmentBlob(outputPath,
+                                         iblTextures.cubemap,
+                                         iblTextures.prefiltered,
+                                         iblTextures.irradiance);
+    if (iblTextures.cubemap) {
+        iblTextures.cubemap->release();
+    }
+    if (iblTextures.prefiltered) {
+        iblTextures.prefiltered->release();
+    }
+    if (iblTextures.irradiance) {
+        iblTextures.irradiance->release();
+    }
+    return ok;
+}
+
+bool Renderer::loadEnvironmentMap(const std::string& path, const std::string& cookedIBLPath) {
+    if (!m_textureLoader) {
+        return false;
+    }
+
+    std::shared_ptr<Texture2D> texture;
+    std::string resolvedCookedPath = cookedIBLPath;
+    std::filesystem::path sourcePath(path);
+    if (resolvedCookedPath.empty() && sourcePath.extension() == ".cenv") {
+        resolvedCookedPath = path;
+    }
+
+    if (!path.empty() && path != "Builtin Sky" && sourcePath.extension() != ".cenv") {
+        texture = m_textureLoader->loadTexture(path, false, false);
+    }
+
+    m_environmentTexture = texture ? texture
+                                   : (m_defaultEnvironmentTexture ? m_defaultEnvironmentTexture : m_defaultWhiteTexture);
     m_environmentSettings.sourcePath = path;
+    m_environmentSettings.cookedIBLPath = resolvedCookedPath;
     
+    if (m_iblCubemap) {
+        m_iblCubemap->release();
+        m_iblCubemap = nullptr;
+    }
+    if (m_iblPrefiltered) {
+        m_iblPrefiltered->release();
+        m_iblPrefiltered = nullptr;
+    }
+    if (m_iblIrradiance) {
+        m_iblIrradiance->release();
+        m_iblIrradiance = nullptr;
+    }
+    m_hasIBL = false;
+
+    if (!resolvedCookedPath.empty()) {
+        MTL::Texture* cubemap = nullptr;
+        MTL::Texture* prefiltered = nullptr;
+        MTL::Texture* irradiance = nullptr;
+        if (LoadCookedEnvironmentBlob(resolvedCookedPath, m_device, cubemap, prefiltered, irradiance)) {
+            m_iblCubemap = cubemap;
+            m_iblPrefiltered = prefiltered;
+            m_iblIrradiance = irradiance;
+            m_hasIBL = true;
+            std::cout << "Loaded cooked IBL: " << resolvedCookedPath << std::endl;
+            return texture != nullptr || sourcePath.extension() == ".cenv";
+        }
+        std::cout << "Failed to load cooked IBL: " << resolvedCookedPath << std::endl;
+    }
+
+    if (!texture) {
+        return false;
+    }
+
     // Process IBL if generator is available
     if (m_iblGenerator && m_iblGenerator->isInitialized()) {
         std::cout << "Processing IBL for: " << path << std::endl;
-        
-        // Release old IBL textures
-        if (m_iblCubemap) {
-            m_iblCubemap->release();
-            m_iblCubemap = nullptr;
-        }
-        if (m_iblPrefiltered) {
-            m_iblPrefiltered->release();
-            m_iblPrefiltered = nullptr;
-        }
-        if (m_iblIrradiance) {
-            m_iblIrradiance->release();
-            m_iblIrradiance = nullptr;
-        }
-        
-        // Get the raw Metal texture handle
+
         MTL::Texture* equirectTex = static_cast<MTL::Texture*>(texture->getHandle());
         if (equirectTex) {
             auto iblTextures = m_iblGenerator->processEnvironmentMap(equirectTex);
@@ -6717,7 +6949,7 @@ bool Renderer::loadEnvironmentMap(const std::string& path) {
             m_iblPrefiltered = iblTextures.prefiltered;
             m_iblIrradiance = iblTextures.irradiance;
             m_hasIBL = (m_iblCubemap && m_iblPrefiltered && m_iblIrradiance);
-            
+
             if (m_hasIBL) {
                 std::cout << "IBL processing complete - high quality IBL enabled" << std::endl;
             } else {
@@ -6725,7 +6957,7 @@ bool Renderer::loadEnvironmentMap(const std::string& path) {
             }
         }
     }
-    
+
     return true;
 }
 
