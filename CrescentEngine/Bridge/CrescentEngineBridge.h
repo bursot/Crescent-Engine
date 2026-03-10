@@ -170,6 +170,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 // Scene IO / Play mode
 - (BOOL)saveSceneAtPath:(NSString *)path NS_SWIFT_NAME(saveScene(path:));
+- (BOOL)saveCookedRuntimeSceneAtPath:(NSString *)path includeEditorOnly:(BOOL)includeEditorOnly NS_SWIFT_NAME(saveCookedRuntimeScene(path:includeEditorOnly:));
 - (BOOL)loadSceneAtPath:(NSString *)path NS_SWIFT_NAME(loadScene(path:));
 - (void)enterPlayMode NS_SWIFT_NAME(enterPlayMode());
 - (void)exitPlayMode NS_SWIFT_NAME(exitPlayMode());

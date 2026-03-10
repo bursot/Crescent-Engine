@@ -27,6 +27,8 @@ final class GameRuntimeState: ObservableObject {
         let buildManifestURL = gameDataURL.appendingPathComponent("BuildManifest.json")
         if FileManager.default.fileExists(atPath: buildManifestURL.path) {
             setenv("CRESCENT_REQUIRE_COOKED_TEXTURES", "1", 1)
+            setenv("CRESCENT_PREFER_COOKED_SCENES", "1", 1)
+            setenv("CRESCENT_REQUIRE_COOKED_SCENES", "1", 1)
         }
         let bundledProjectURL = gameDataURL.appendingPathComponent("Project.cproj")
         guard FileManager.default.fileExists(atPath: bundledProjectURL.path) else {
@@ -90,6 +92,11 @@ final class GameRuntimeState: ObservableObject {
     }
 
     private func sceneHasRuntimeCamera(at url: URL) -> Bool {
+        // Cooked runtime scenes are binary; build-time validation already guarantees a gameplay camera.
+        if url.pathExtension.lowercased() == "ccscene" {
+            return true
+        }
+
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let entities = root["entities"] as? [[String: Any]] else {

@@ -10,6 +10,7 @@
 #include "../Math/Math.hpp"
 #include "SceneCommands.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 
 namespace Crescent {
@@ -233,8 +234,15 @@ void SceneManager::enterPlayMode() {
     if (!runtimeScene) {
         return;
     }
-    std::string snapshot = SceneSerializer::SerializeScene(m_EditorScene, false);
-    SceneSerializer::DeserializeScene(runtimeScene, snapshot);
+    bool preserveCookedRuntimePayloads = std::getenv("CRESCENT_PREFER_COOKED_SCENES") != nullptr ||
+                                         std::getenv("CRESCENT_REQUIRE_COOKED_SCENES") != nullptr;
+    if (preserveCookedRuntimePayloads) {
+        std::vector<uint8_t> snapshot = SceneSerializer::SerializeCookedRuntimeSceneBinary(m_EditorScene, false);
+        SceneSerializer::DeserializeSceneBinary(runtimeScene, snapshot);
+    } else {
+        std::string snapshot = SceneSerializer::SerializeScene(m_EditorScene, false);
+        SceneSerializer::DeserializeScene(runtimeScene, snapshot);
+    }
     m_RuntimeScene = runtimeScene;
     m_IsPlaying = true;
     m_IsPaused = false;

@@ -13,6 +13,7 @@
 #include "tinyexr.h"
 
 #include "../Assets/AssetDatabase.hpp"
+#include "../../../ThirdParty/nlohmann/json.hpp"
 #include <filesystem>
 #include <Metal/Metal.hpp>
 #include <algorithm>
@@ -34,6 +35,8 @@
 #include "../../../ThirdParty/basisu/transcoder/basisu_transcoder.h"
 
 namespace {
+
+using json = nlohmann::json;
 
 bool endsWithIgnoreCase(const std::string& str, const std::string& suffix) {
     if (suffix.size() > str.size()) {
@@ -76,6 +79,44 @@ bool isKtx2DebugEnabled() {
 bool isTextureMemDebugEnabled() {
     const char* flag = std::getenv("CRESCENT_TEX_MEM_DEBUG");
     return flag && *flag && std::string(flag) != "0";
+}
+
+std::string ReadGuidFromMetaSidecar(const std::string& sourcePath) {
+    if (sourcePath.empty()) {
+        return "";
+    }
+
+    const std::filesystem::path source(sourcePath);
+    const std::filesystem::path metaCandidates[] = {
+        std::filesystem::path(sourcePath + ".cmeta"),
+        std::filesystem::path(sourcePath + ".meta"),
+        source.parent_path() / (source.filename().string() + ".cmeta"),
+        source.parent_path() / (source.filename().string() + ".meta")
+    };
+
+    for (const std::filesystem::path& metaPath : metaCandidates) {
+        std::error_code ec;
+        if (!std::filesystem::exists(metaPath, ec) || ec) {
+            continue;
+        }
+
+        std::ifstream in(metaPath);
+        if (!in.is_open()) {
+            continue;
+        }
+
+        json root = json::parse(in, nullptr, false);
+        if (root.is_discarded() || !root.is_object()) {
+            continue;
+        }
+
+        std::string guid = root.value("guid", std::string());
+        if (!guid.empty()) {
+            return guid;
+        }
+    }
+
+    return "";
 }
 
 bool requiresCookedTextures() {
@@ -283,6 +324,9 @@ std::string GetKtx2CachePath(const std::string& sourcePath) {
     std::string guid = db.getGuidForPath(sourcePath);
     if (guid.empty()) {
         guid = db.registerAsset(sourcePath);
+    }
+    if (guid.empty()) {
+        guid = ReadGuidFromMetaSidecar(sourcePath);
     }
     if (guid.empty()) {
         std::error_code ec;
@@ -621,6 +665,52 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
     auto tex = loadTextureUncompressed(path, srgb, flipVertical);
     if (tex) {
         m_Cache[path] = tex;
+    }
+    return tex;
+}
+
+std::shared_ptr<Texture2D> TextureLoader::loadEmbeddedCookedTexture(const std::string& cacheKey, bool srgb, bool normalMap) {
+    if (!m_Device || cacheKey.empty() || !IsEmbeddedTextureCacheKey(cacheKey)) {
+        return nullptr;
+    }
+
+    if (auto it = m_Cache.find(cacheKey); it != m_Cache.end()) {
+        if (auto cached = it->second.lock()) {
+            return cached;
+        }
+    }
+
+    if (isKtx2Disabled()) {
+        return nullptr;
+    }
+
+    std::string cachePath = GetEmbeddedKtx2CachePath(cacheKey);
+    if (cachePath.empty()) {
+        return nullptr;
+    }
+
+    std::string sourcePath = ExtractEmbeddedSourcePath(cacheKey);
+    const std::string& cacheDependency = sourcePath.empty() ? cacheKey : sourcePath;
+    bool cacheValid = IsCacheValid(cacheDependency, cachePath);
+    if (isKtx2DebugEnabled()) {
+        std::cerr << "[TextureLoader] KTX2 debug: Embedded direct cache lookup key=" << NormalizeEmbeddedCacheKey(cacheKey)
+                  << " cache=" << cachePath
+                  << " source=" << cacheDependency
+                  << " valid=" << (cacheValid ? "yes" : "no")
+                  << std::endl;
+    }
+
+    if (!cacheValid) {
+        if (requiresCookedTextures()) {
+            std::cerr << "[TextureLoader] Cooked embedded KTX2 texture required but missing or stale cache for: "
+                      << cacheKey << std::endl;
+        }
+        return nullptr;
+    }
+
+    auto tex = loadKTX2Texture(cachePath, srgb, normalMap, cacheKey);
+    if (tex) {
+        m_Cache[cacheKey] = tex;
     }
     return tex;
 }

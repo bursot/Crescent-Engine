@@ -3833,6 +3833,22 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (BOOL)saveCookedRuntimeSceneAtPath:(NSString *)path includeEditorOnly:(BOOL)includeEditorOnly {
+    return [self performSyncBool:^BOOL {
+        if (_terrainPaintState.active) {
+            CommitTerrainPaintState(_terrainPaintState);
+            _terrainPaintState.active = false;
+            _terrainPaintState.hasLastUV = false;
+        }
+        [self clearTerrainBrushPreviewInternal];
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene || !path) {
+            return NO;
+        }
+        return SceneSerializer::SaveCookedRuntimeScene(scene, path.UTF8String, includeEditorOnly);
+    }];
+}
+
 - (BOOL)loadSceneAtPath:(NSString *)path {
     return [self performSyncBool:^BOOL {
         if (_terrainPaintState.active) {

@@ -31,7 +31,10 @@
 #include "../../../ThirdParty/nlohmann/json.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -203,6 +206,33 @@ Math::Quaternion JsonToQuat(const json& j, const Math::Quaternion& fallback = Ma
     return Math::Quaternion(j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>());
 }
 
+json MatrixToJson(const Math::Matrix4x4& matrix) {
+    json values = json::array();
+    for (float value : matrix.m) {
+        values.push_back(value);
+    }
+    return values;
+}
+
+Math::Matrix4x4 JsonToMatrix(const json& j, const Math::Matrix4x4& fallback = Math::Matrix4x4::Identity) {
+    if (!j.is_array() || j.size() < 16) {
+        return fallback;
+    }
+    Math::Matrix4x4 matrix = fallback;
+    for (size_t i = 0; i < 16; ++i) {
+        matrix.m[i] = j[i].get<float>();
+    }
+    return matrix;
+}
+
+struct BuildSceneOptions {
+    bool includeAssetRoot = false;
+    bool includeEditorOnly = true;
+    bool embedRuntimePayloads = false;
+};
+
+json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildSceneOptions& options);
+
 std::string PrimitiveTypeToString(PrimitiveType type) {
     switch (type) {
         case PrimitiveType::Cube: return "Cube";
@@ -246,7 +276,67 @@ SceneCommands::ModelImportOptions DeserializeImportOptions(const json& j) {
     return options;
 }
 
-json SerializeTextureRef(const std::shared_ptr<Texture2D>& texture, const char* typeKey) {
+std::string HashRuntimeCookKey(const std::string& input) {
+    uint64_t hash = 14695981039346656037ull;
+    for (unsigned char c : input) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ull;
+    }
+    std::ostringstream oss;
+    oss << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return oss.str();
+}
+
+std::string NormalizeEmbeddedCookKey(const std::string& path) {
+    const std::string marker = "#embedded:";
+    size_t markerPos = path.find(marker);
+    if (markerPos == std::string::npos || markerPos == 0) {
+        return path;
+    }
+
+    std::string sourcePath = path.substr(0, markerPos);
+    std::string suffix = path.substr(markerPos);
+
+    AssetDatabase& db = AssetDatabase::getInstance();
+    std::error_code ec;
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(sourcePath, ec);
+    std::string normalizedSource = ec ? std::filesystem::path(sourcePath).lexically_normal().generic_string()
+                                      : canonical.generic_string();
+
+    std::string rootPath = db.getRootPath();
+    if (!rootPath.empty()) {
+        std::filesystem::path root(rootPath);
+        std::filesystem::path source(normalizedSource);
+        std::filesystem::path relative = std::filesystem::relative(source, root, ec);
+        if (!ec && !relative.empty() && relative.native().front() != '.') {
+            normalizedSource = relative.generic_string();
+        }
+    }
+
+    return normalizedSource + suffix;
+}
+
+std::string BuildCookedTextureRelativePath(const std::string& path) {
+    if (path.empty()) {
+        return "";
+    }
+
+    if (path.find("#embedded:") != std::string::npos) {
+        return "Library/ImportCache/embedded_" + HashRuntimeCookKey(NormalizeEmbeddedCookKey(path)) + "_v2a.ktx2";
+    }
+
+    AssetDatabase& db = AssetDatabase::getInstance();
+    std::string guid = db.getGuidForPath(path);
+    if (guid.empty()) {
+        guid = db.registerAsset(path, "texture");
+    }
+    if (guid.empty()) {
+        return "";
+    }
+    return "Library/ImportCache/" + guid + "_v2a.ktx2";
+}
+
+json SerializeTextureRef(const std::shared_ptr<Texture2D>& texture, const char* typeKey, bool includeCookedPath = false) {
     if (!texture || texture->getPath().empty()) {
         return json();
     }
@@ -258,12 +348,18 @@ json SerializeTextureRef(const std::shared_ptr<Texture2D>& texture, const char* 
         json ref;
         ref["guid"] = guid;
         ref["path"] = relative.empty() ? path : relative;
+        if (includeCookedPath && typeKey && std::string(typeKey) == "texture") {
+            std::string cookedPath = BuildCookedTextureRelativePath(path);
+            if (!cookedPath.empty()) {
+                ref["cookedPath"] = cookedPath;
+            }
+        }
         return ref;
     }
     return path;
 }
 
-json SerializeAssetPath(const std::string& path, const char* typeKey) {
+json SerializeAssetPath(const std::string& path, const char* typeKey, bool includeCookedPath = false) {
     if (path.empty()) {
         return json();
     }
@@ -274,12 +370,18 @@ json SerializeAssetPath(const std::string& path, const char* typeKey) {
         json ref;
         ref["guid"] = guid;
         ref["path"] = relative.empty() ? path : relative;
+        if (includeCookedPath && typeKey && std::string(typeKey) == "texture") {
+            std::string cookedPath = BuildCookedTextureRelativePath(path);
+            if (!cookedPath.empty()) {
+                ref["cookedPath"] = cookedPath;
+            }
+        }
         return ref;
     }
     return path;
 }
 
-json SerializeMaterial(const Material& material) {
+json SerializeMaterial(const Material& material, bool includeCookedTexturePaths = false) {
     json j;
     j["name"] = material.getName();
     j["albedo"] = Vec4ToJson(material.getAlbedo());
@@ -325,8 +427,9 @@ json SerializeMaterial(const Material& material) {
     j["terrainLayer2Tiling"] = Vec2ToJson(material.getTerrainLayer2Tiling());
 
     json textures = json::object();
-    auto pushPath = [&textures](const char* key, const std::shared_ptr<Texture2D>& tex, const char* typeKey) {
-        json ref = SerializeTextureRef(tex, typeKey);
+    auto pushPath = [&textures, includeCookedTexturePaths](const char* key, const std::shared_ptr<Texture2D>& tex, const char* typeKey) {
+        bool includeCooked = includeCookedTexturePaths && std::string(key) != "terrainControl";
+        json ref = SerializeTextureRef(tex, typeKey, includeCooked);
         if (!ref.is_null() && !ref.empty()) {
             textures[key] = ref;
         }
@@ -363,6 +466,7 @@ json SerializeMeshData(const Mesh& mesh) {
     const auto& vertices = mesh.getVertices();
     const auto& indices = mesh.getIndices();
     const auto& submeshes = mesh.getSubmeshes();
+    const auto& skinWeights = mesh.getSkinWeights();
 
     json verts = json::array();
     for (const auto& v : vertices) {
@@ -395,6 +499,20 @@ json SerializeMeshData(const Mesh& mesh) {
     j["submeshes"] = subs;
     j["boundsMin"] = Vec3ToJson(mesh.getBoundsMin());
     j["boundsMax"] = Vec3ToJson(mesh.getBoundsMax());
+    if (!mesh.getName().empty()) {
+        j["name"] = mesh.getName();
+    }
+    j["doubleSided"] = mesh.isDoubleSided();
+    if (!skinWeights.empty()) {
+        json weights = json::array();
+        for (const auto& weight : skinWeights) {
+            weights.push_back({
+                weight.indices[0], weight.indices[1], weight.indices[2], weight.indices[3],
+                weight.weights[0], weight.weights[1], weight.weights[2], weight.weights[3]
+            });
+        }
+        j["skinWeights"] = weights;
+    }
     return j;
 }
 
@@ -442,13 +560,183 @@ std::shared_ptr<Mesh> DeserializeMeshData(const json& j) {
         }
     }
 
+    std::vector<SkinWeight> skinWeights;
+    if (j.contains("skinWeights") && j["skinWeights"].is_array()) {
+        for (const auto& entry : j["skinWeights"]) {
+            if (!entry.is_array() || entry.size() < 8) {
+                continue;
+            }
+            SkinWeight weight;
+            for (size_t i = 0; i < 4; ++i) {
+                weight.indices[i] = entry[i].get<uint32_t>();
+                weight.weights[i] = entry[i + 4].get<float>();
+            }
+            skinWeights.push_back(weight);
+        }
+    }
+
     auto mesh = std::make_shared<Mesh>();
     mesh->setVertices(vertices);
     mesh->setIndices(indices);
     if (!submeshes.empty()) {
         mesh->setSubmeshes(submeshes);
     }
+    if (!skinWeights.empty()) {
+        mesh->setSkinWeights(skinWeights);
+    }
+    mesh->setName(j.value("name", std::string()));
+    mesh->setDoubleSided(j.value("doubleSided", mesh->isDoubleSided()));
     return mesh;
+}
+
+json SerializeSkeletonData(const Skeleton& skeleton) {
+    json bones = json::array();
+    for (const Bone& bone : skeleton.getBones()) {
+        bones.push_back({
+            {"name", bone.name},
+            {"parentIndex", bone.parentIndex},
+            {"localBind", MatrixToJson(bone.localBind)},
+            {"inverseBind", MatrixToJson(bone.inverseBind)}
+        });
+    }
+    return {
+        {"rootIndex", skeleton.getRootIndex()},
+        {"globalInverse", MatrixToJson(skeleton.getGlobalInverse())},
+        {"bones", bones}
+    };
+}
+
+std::shared_ptr<Skeleton> DeserializeSkeletonData(const json& j) {
+    if (!j.is_object() || !j.contains("bones") || !j["bones"].is_array()) {
+        return nullptr;
+    }
+
+    auto skeleton = std::make_shared<Skeleton>();
+    skeleton->setGlobalInverse(JsonToMatrix(j.value("globalInverse", json::array()), Math::Matrix4x4::Identity));
+    for (const auto& entry : j["bones"]) {
+        if (!entry.is_object()) {
+            continue;
+        }
+        skeleton->addBone(entry.value("name", std::string()),
+                          entry.value("parentIndex", -1),
+                          JsonToMatrix(entry.value("localBind", json::array()), Math::Matrix4x4::Identity),
+                          JsonToMatrix(entry.value("inverseBind", json::array()), Math::Matrix4x4::Identity));
+    }
+    skeleton->setRootIndex(j.value("rootIndex", skeleton->getRootIndex()));
+    return skeleton;
+}
+
+json SerializeAnimationClipData(const AnimationClip& clip) {
+    json channels = json::array();
+    for (const AnimationChannel& channel : clip.getChannels()) {
+        json positions = json::array();
+        for (const VectorKeyframe& key : channel.positionKeys) {
+            positions.push_back({key.time, key.value.x, key.value.y, key.value.z});
+        }
+        json rotations = json::array();
+        for (const QuaternionKeyframe& key : channel.rotationKeys) {
+            rotations.push_back({key.time, key.value.x, key.value.y, key.value.z, key.value.w});
+        }
+        json scales = json::array();
+        for (const VectorKeyframe& key : channel.scaleKeys) {
+            scales.push_back({key.time, key.value.x, key.value.y, key.value.z});
+        }
+        channels.push_back({
+            {"boneName", channel.boneName},
+            {"boneIndex", channel.boneIndex},
+            {"positionKeys", positions},
+            {"rotationKeys", rotations},
+            {"scaleKeys", scales}
+        });
+    }
+
+    json events = json::array();
+    for (const AnimationEvent& event : clip.getEvents()) {
+        events.push_back({
+            {"time", event.time},
+            {"name", event.name}
+        });
+    }
+
+    return {
+        {"name", clip.getName()},
+        {"durationTicks", clip.getDurationTicks()},
+        {"ticksPerSecond", clip.getTicksPerSecond()},
+        {"channels", channels},
+        {"events", events}
+    };
+}
+
+std::shared_ptr<AnimationClip> DeserializeAnimationClipData(const json& j) {
+    if (!j.is_object()) {
+        return nullptr;
+    }
+
+    auto clip = std::make_shared<AnimationClip>();
+    clip->setName(j.value("name", std::string()));
+    clip->setDurationTicks(j.value("durationTicks", clip->getDurationTicks()));
+    clip->setTicksPerSecond(j.value("ticksPerSecond", clip->getTicksPerSecond()));
+
+    if (j.contains("channels") && j["channels"].is_array()) {
+        for (const auto& entry : j["channels"]) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            AnimationChannel channel;
+            channel.boneName = entry.value("boneName", std::string());
+            channel.boneIndex = entry.value("boneIndex", -1);
+            if (entry.contains("positionKeys") && entry["positionKeys"].is_array()) {
+                for (const auto& key : entry["positionKeys"]) {
+                    if (!key.is_array() || key.size() < 4) {
+                        continue;
+                    }
+                    channel.positionKeys.push_back({
+                        key[0].get<float>(),
+                        Math::Vector3(key[1].get<float>(), key[2].get<float>(), key[3].get<float>())
+                    });
+                }
+            }
+            if (entry.contains("rotationKeys") && entry["rotationKeys"].is_array()) {
+                for (const auto& key : entry["rotationKeys"]) {
+                    if (!key.is_array() || key.size() < 5) {
+                        continue;
+                    }
+                    channel.rotationKeys.push_back({
+                        key[0].get<float>(),
+                        Math::Quaternion(key[1].get<float>(),
+                                         key[2].get<float>(),
+                                         key[3].get<float>(),
+                                         key[4].get<float>())
+                    });
+                }
+            }
+            if (entry.contains("scaleKeys") && entry["scaleKeys"].is_array()) {
+                for (const auto& key : entry["scaleKeys"]) {
+                    if (!key.is_array() || key.size() < 4) {
+                        continue;
+                    }
+                    channel.scaleKeys.push_back({
+                        key[0].get<float>(),
+                        Math::Vector3(key[1].get<float>(), key[2].get<float>(), key[3].get<float>())
+                    });
+                }
+            }
+            clip->addChannel(channel);
+        }
+    }
+
+    if (j.contains("events") && j["events"].is_array()) {
+        for (const auto& entry : j["events"]) {
+            AnimationEvent event;
+            event.time = entry.value("time", 0.0f);
+            event.name = entry.value("name", std::string());
+            if (!event.name.empty()) {
+                clip->addEvent(event);
+            }
+        }
+    }
+
+    return clip;
 }
 
 SceneEnvironmentSettings EnvironmentFromRenderer(Renderer* renderer) {
@@ -549,7 +837,7 @@ json SerializePostProcessSettings(const ScenePostProcessSettings& post) {
         {"dofAperture", post.dofAperture}
     };
     if (!post.colorGradingLUT.empty()) {
-        json ref = SerializeAssetPath(post.colorGradingLUT, "texture");
+        json ref = SerializeAssetPath(post.colorGradingLUT, "texture", true);
         if (!ref.is_null() && !ref.empty()) {
             j["colorGradingLUT"] = ref;
         }
@@ -810,6 +1098,21 @@ std::string ResolveTextureEntryPath(const json& entry) {
         return entry.get<std::string>();
     }
     if (entry.is_object()) {
+        if (entry.contains("cookedPath")) {
+            std::string stored = entry.value("cookedPath", std::string());
+            if (!stored.empty()) {
+                std::filesystem::path cookedPath(stored);
+                if (cookedPath.is_absolute()) {
+                    return cookedPath.string();
+                }
+                std::string libraryPath = db.getLibraryPath();
+                if (!libraryPath.empty()) {
+                    std::filesystem::path projectRoot = std::filesystem::path(libraryPath).parent_path();
+                    return (projectRoot / cookedPath).lexically_normal().string();
+                }
+                return cookedPath.lexically_normal().string();
+            }
+        }
         if (entry.contains("guid")) {
             std::string guid = entry.value("guid", std::string());
             if (!guid.empty()) {
@@ -838,6 +1141,9 @@ std::shared_ptr<Texture2D> LoadTexturePath(TextureLoader* loader,
     }
     EmbeddedTextureInfo info;
     if (ParseEmbeddedTextureKey(path, info)) {
+        if (auto cooked = loader->loadEmbeddedCookedTexture(path, srgb, normalMap)) {
+            return cooked;
+        }
         return LoadEmbeddedTextureFromModel(loader, path, info, srgb, normalMap);
     }
     return loader->loadTexture(path, srgb, true, normalMap);
@@ -847,6 +1153,10 @@ std::shared_ptr<Texture2D> LoadTerrainControlTexturePath(TextureLoader* loader,
                                                          const std::string& path) {
     if (!loader || path.empty()) {
         return nullptr;
+    }
+    std::filesystem::path texturePath(path);
+    if (texturePath.extension() == ".ktx2") {
+        return loader->loadTexture(path, false, false, false);
     }
     return loader->loadTextureUncompressed(path, false, false);
 }
@@ -1038,6 +1348,166 @@ bool ParseUUID(const std::string& value, UUID& outUUID) {
     }
 }
 
+std::unordered_map<std::string, EntityRecord> BuildEntityRecords(Scene* scene,
+                                                                 const json& entities,
+                                                                 bool preserveUUIDs);
+void ResolveEntityParents(Scene* scene, std::unordered_map<std::string, EntityRecord>& records);
+void ApplyEntityComponents(Entity* entity,
+                           const json& components,
+                           Scene* scene,
+                           const std::string& scenePath,
+                           TextureLoader* textureLoader,
+                           std::unordered_map<std::string, ModelCacheEntry>& modelCache);
+
+bool EnvEnabled(const char* key) {
+    const char* value = std::getenv(key);
+    if (!value || !*value) {
+        return false;
+    }
+    return !(value[0] == '0' && value[1] == '\0');
+}
+
+bool HasCookedMeshPayload(const json& components) {
+    if (!components.is_object()) {
+        return false;
+    }
+    if (components.contains("MeshRenderer")) {
+        const json& meshRenderer = components["MeshRenderer"];
+        if (meshRenderer.is_object() && meshRenderer.contains("mesh")) {
+            return true;
+        }
+    }
+    if (components.contains("SkinnedMeshRenderer")) {
+        const json& skinned = components["SkinnedMeshRenderer"];
+        if (skinned.is_object() &&
+            (skinned.contains("mesh") || skinned.contains("skeleton") || skinned.contains("animationClips"))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool DeserializeSceneRoot(Scene* scene, const json& root, const std::string& scenePath) {
+    if (!scene || !root.is_object()) {
+        return false;
+    }
+
+    if (root.contains("assetRoot")) {
+        AssetDatabase& db = AssetDatabase::getInstance();
+        std::string rootPath;
+        const json& assetRoot = root["assetRoot"];
+        if (assetRoot.is_object()) {
+            rootPath = assetRoot.value("path", std::string());
+            bool relative = assetRoot.value("relativeToScene", false);
+            if (relative && !scenePath.empty()) {
+                std::filesystem::path sceneDir = std::filesystem::path(scenePath).parent_path();
+                rootPath = (sceneDir / rootPath).lexically_normal().string();
+            }
+        } else if (assetRoot.is_string()) {
+            rootPath = assetRoot.get<std::string>();
+            if (!rootPath.empty() && !scenePath.empty()) {
+                std::filesystem::path p(rootPath);
+                if (!p.is_absolute()) {
+                    std::filesystem::path sceneDir = std::filesystem::path(scenePath).parent_path();
+                    rootPath = (sceneDir / p).lexically_normal().string();
+                }
+            }
+        }
+        if (!rootPath.empty()) {
+            std::error_code ec;
+            if (std::filesystem::exists(rootPath, ec)) {
+                db.setRootPath(rootPath);
+            }
+        }
+    }
+
+    SceneSettings sceneSettings;
+    if (root.contains("sceneSettings") && root["sceneSettings"].is_object()) {
+        const json& s = root["sceneSettings"];
+        if (s.contains("environment")) {
+            sceneSettings.environment = DeserializeEnvironmentSettings(s["environment"]);
+        }
+        if (s.contains("fog")) {
+            sceneSettings.fog = DeserializeFogSettings(s["fog"]);
+        }
+        if (s.contains("postProcess")) {
+            sceneSettings.postProcess = DeserializePostProcessSettings(s["postProcess"]);
+        }
+        if (s.contains("quality")) {
+            sceneSettings.quality = DeserializeQualitySettings(s["quality"]);
+        }
+    }
+    scene->setSettings(sceneSettings);
+
+    bool wasActive = scene->isActive();
+    if (wasActive) {
+        scene->setActive(false);
+    }
+
+    scene->destroyAllEntities();
+    if (root.contains("name")) {
+        scene->setName(root.value("name", scene->getName()));
+    }
+
+    auto records = BuildEntityRecords(scene,
+                                      root.contains("entities") && root["entities"].is_array()
+                                          ? root["entities"]
+                                          : json::array(),
+                                      true);
+    ResolveEntityParents(scene, records);
+
+    Renderer* renderer = Engine::getInstance().getRenderer();
+    TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
+    std::unordered_map<std::string, ModelCacheEntry> modelCache;
+
+    for (auto& [uuid, record] : records) {
+        if (!record.entity) {
+            continue;
+        }
+        record.entity->setEditorOnly(record.editorOnly);
+        ApplyEntityComponents(record.entity, record.components, scene, scenePath, textureLoader, modelCache);
+    }
+
+    if (wasActive) {
+        scene->setActive(true);
+    }
+
+    for (auto& [uuid, record] : records) {
+        if (record.entity && !record.active) {
+            record.entity->setActive(false);
+        }
+    }
+
+    return true;
+}
+
+std::string ResolveSceneLoadPath(const std::string& path) {
+    if (path.empty()) {
+        return path;
+    }
+
+    std::filesystem::path source(path);
+    if (source.extension() == ".ccscene") {
+        return path;
+    }
+
+    if (!EnvEnabled("CRESCENT_PREFER_COOKED_SCENES") && !EnvEnabled("CRESCENT_REQUIRE_COOKED_SCENES")) {
+        return path;
+    }
+
+    std::filesystem::path cooked = source;
+    cooked.replace_extension(".ccscene");
+    std::error_code ec;
+    if (std::filesystem::exists(cooked, ec)) {
+        return cooked.string();
+    }
+
+    if (EnvEnabled("CRESCENT_REQUIRE_COOKED_SCENES")) {
+        return "";
+    }
+    return path;
+}
+
 } // namespace
 
 bool SceneSerializer::SaveScene(Scene* scene, const std::string& path) {
@@ -1052,16 +1522,47 @@ bool SceneSerializer::SaveScene(Scene* scene, const std::string& path) {
     return true;
 }
 
+bool SceneSerializer::SaveCookedRuntimeScene(Scene* scene, const std::string& path, bool includeEditorOnly) {
+    if (!scene) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::ofstream out(path, std::ios::binary);
+    if (!out.is_open()) {
+        return false;
+    }
+    std::vector<uint8_t> payload = SerializeCookedRuntimeSceneBinary(scene, includeEditorOnly);
+    if (payload.empty()) {
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+    return true;
+}
+
 bool SceneSerializer::LoadScene(Scene* scene, const std::string& path) {
     if (!scene) {
         return false;
     }
-    std::ifstream in(path);
+    std::string resolvedPath = ResolveSceneLoadPath(path);
+    if (resolvedPath.empty()) {
+        return false;
+    }
+    std::filesystem::path scenePath(resolvedPath);
+    if (scenePath.extension() == ".ccscene") {
+        std::ifstream in(resolvedPath, std::ios::binary);
+        if (!in.is_open()) {
+            return false;
+        }
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        return DeserializeSceneBinary(scene, data, resolvedPath);
+    }
+    std::ifstream in(resolvedPath);
     if (!in.is_open()) {
         return false;
     }
     std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    return DeserializeScene(scene, data, path);
+    return DeserializeScene(scene, data, resolvedPath);
 }
 
 namespace {
@@ -1193,8 +1694,9 @@ void ApplyEntityComponents(Entity* entity,
 
     MeshRenderer* meshRenderer = nullptr;
     SkinnedMeshRenderer* skinnedRenderer = nullptr;
+    const bool hasCookedPayload = HasCookedMeshPayload(components);
 
-    if (modelRef) {
+    if (modelRef && !hasCookedPayload) {
         std::string cacheKey = MakeModelCacheKey(modelRef->getSourcePath(), modelRef->getImportOptions());
         auto it = modelCache.find(cacheKey);
         if (it == modelCache.end()) {
@@ -1267,6 +1769,14 @@ void ApplyEntityComponents(Entity* entity,
         if (!meshRenderer) {
             meshRenderer = entity->addComponent<MeshRenderer>();
         }
+        if (r.contains("mesh")) {
+            if (auto mesh = DeserializeMeshData(r["mesh"])) {
+                meshRenderer->setMesh(mesh);
+                if (skinnedRenderer) {
+                    skinnedRenderer->setMesh(mesh);
+                }
+            }
+        }
         meshRenderer->setCastShadows(r.value("castShadows", meshRenderer->getCastShadows()));
         meshRenderer->setReceiveShadows(r.value("receiveShadows", meshRenderer->getReceiveShadows()));
 
@@ -1305,6 +1815,43 @@ void ApplyEntityComponents(Entity* entity,
                     meshRenderer = entity->addComponent<MeshRenderer>();
                 }
                 meshRenderer->setMesh(mesh);
+            }
+        }
+    }
+
+    if (components.contains("SkinnedMeshRenderer")) {
+        const json& s = components["SkinnedMeshRenderer"];
+        if (!skinnedRenderer && (s.contains("mesh") || s.contains("skeleton") || s.contains("animationClips"))) {
+            skinnedRenderer = entity->addComponent<SkinnedMeshRenderer>();
+        }
+        if (skinnedRenderer && s.contains("mesh")) {
+            if (auto mesh = DeserializeMeshData(s["mesh"])) {
+                skinnedRenderer->setMesh(mesh);
+                if (!meshRenderer) {
+                    meshRenderer = entity->addComponent<MeshRenderer>();
+                }
+                meshRenderer->setMesh(mesh);
+            }
+        }
+        if (skinnedRenderer && s.contains("skeleton")) {
+            if (auto skeleton = DeserializeSkeletonData(s["skeleton"])) {
+                skinnedRenderer->setSkeleton(skeleton);
+            }
+        }
+        if (skinnedRenderer && s.contains("animationClips") && s["animationClips"].is_array()) {
+            std::vector<std::shared_ptr<AnimationClip>> clips;
+            clips.reserve(s["animationClips"].size());
+            for (const auto& clipData : s["animationClips"]) {
+                clips.push_back(DeserializeAnimationClipData(clipData));
+            }
+            skinnedRenderer->setAnimationClips(clips);
+        }
+        if (skinnedRenderer && meshRenderer) {
+            const auto& materials = meshRenderer->getMaterials();
+            for (size_t i = 0; i < materials.size(); ++i) {
+                if (materials[i]) {
+                    skinnedRenderer->setMaterial(static_cast<uint32_t>(i), materials[i]);
+                }
             }
         }
     }
@@ -1718,10 +2265,13 @@ void ApplyEntityComponents(Entity* entity,
     }
 }
 
-json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scenePath, bool includeEditorOnly) {
+json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildSceneOptions& options) {
     json root;
     root["version"] = 1;
     root["name"] = scene ? scene->getName() : "Scene";
+    if (options.embedRuntimePayloads) {
+        root["runtimeCooked"] = true;
+    }
     json entities = json::array();
 
     if (!scene) {
@@ -1735,7 +2285,7 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
         if (!entity) {
             continue;
         }
-        if (!includeEditorOnly && entity->isEditorOnly()) {
+        if (!options.includeEditorOnly && entity->isEditorOnly()) {
             continue;
         }
         json e;
@@ -1792,7 +2342,7 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
             const auto& mats = renderer->getMaterials();
             for (const auto& mat : mats) {
                 if (mat) {
-                    materials.push_back(SerializeMaterial(*mat));
+                    materials.push_back(SerializeMaterial(*mat, options.embedRuntimePayloads));
                 } else {
                     materials.push_back(json::object());
                 }
@@ -1802,6 +2352,11 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"receiveShadows", renderer->getReceiveShadows()},
                 {"materials", materials}
             };
+            if (options.embedRuntimePayloads && !entity->getComponent<SkinnedMeshRenderer>()) {
+                if (auto mesh = renderer->getMesh()) {
+                    components["MeshRenderer"]["mesh"] = SerializeMeshData(*mesh);
+                }
+            }
         }
 
         if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
@@ -1815,6 +2370,26 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"rootMotionPosition", skinned->getApplyRootMotionPosition()},
                 {"rootMotionRotation", skinned->getApplyRootMotionRotation()}
             };
+            if (options.embedRuntimePayloads) {
+                if (auto mesh = skinned->getMesh()) {
+                    skinnedData["mesh"] = SerializeMeshData(*mesh);
+                }
+                if (auto skeleton = skinned->getSkeleton()) {
+                    skinnedData["skeleton"] = SerializeSkeletonData(*skeleton);
+                }
+                const auto& clips = skinned->getAnimationClips();
+                if (!clips.empty()) {
+                    json clipData = json::array();
+                    for (const auto& clip : clips) {
+                        if (clip) {
+                            clipData.push_back(SerializeAnimationClipData(*clip));
+                        } else {
+                            clipData.push_back(json::object());
+                        }
+                    }
+                    skinnedData["animationClips"] = clipData;
+                }
+            }
             const auto& clips = skinned->getAnimationClips();
             json clipEvents = json::array();
             for (size_t i = 0; i < clips.size(); ++i) {
@@ -2045,7 +2620,7 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
                 {"fireMask", controller->getFireHitMask()},
                 {"fireHitTriggers", controller->getFireHitTriggers()}
             };
-            json muzzleRef = SerializeAssetPath(controller->getMuzzleTexturePath(), "texture");
+            json muzzleRef = SerializeAssetPath(controller->getMuzzleTexturePath(), "texture", options.embedRuntimePayloads);
             if (!muzzleRef.is_null() && !muzzleRef.empty()) {
                 components["FirstPersonController"]["muzzleTexture"] = muzzleRef;
             }
@@ -2109,38 +2684,38 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
             decalData["offset"] = Vec2ToJson(decal->getOffset());
             decalData["softness"] = decal->getEdgeSoftness();
 
-            json albedoRef = SerializeTextureRef(decal->getAlbedoTexture(), "texture");
+            json albedoRef = SerializeTextureRef(decal->getAlbedoTexture(), "texture", options.embedRuntimePayloads);
             if (!albedoRef.is_null() && !albedoRef.empty()) {
                 decalData["albedo"] = albedoRef;
             } else if (!decal->getAlbedoPath().empty()) {
-                json pathRef = SerializeAssetPath(decal->getAlbedoPath(), "texture");
+                json pathRef = SerializeAssetPath(decal->getAlbedoPath(), "texture", options.embedRuntimePayloads);
                 if (!pathRef.is_null() && !pathRef.empty()) {
                     decalData["albedo"] = pathRef;
                 }
             }
-            json normalRef = SerializeTextureRef(decal->getNormalTexture(), "texture");
+            json normalRef = SerializeTextureRef(decal->getNormalTexture(), "texture", options.embedRuntimePayloads);
             if (!normalRef.is_null() && !normalRef.empty()) {
                 decalData["normal"] = normalRef;
             } else if (!decal->getNormalPath().empty()) {
-                json pathRef = SerializeAssetPath(decal->getNormalPath(), "texture");
+                json pathRef = SerializeAssetPath(decal->getNormalPath(), "texture", options.embedRuntimePayloads);
                 if (!pathRef.is_null() && !pathRef.empty()) {
                     decalData["normal"] = pathRef;
                 }
             }
-            json ormRef = SerializeTextureRef(decal->getORMTexture(), "texture");
+            json ormRef = SerializeTextureRef(decal->getORMTexture(), "texture", options.embedRuntimePayloads);
             if (!ormRef.is_null() && !ormRef.empty()) {
                 decalData["orm"] = ormRef;
             } else if (!decal->getORMPath().empty()) {
-                json pathRef = SerializeAssetPath(decal->getORMPath(), "texture");
+                json pathRef = SerializeAssetPath(decal->getORMPath(), "texture", options.embedRuntimePayloads);
                 if (!pathRef.is_null() && !pathRef.empty()) {
                     decalData["orm"] = pathRef;
                 }
             }
-            json maskRef = SerializeTextureRef(decal->getMaskTexture(), "texture");
+            json maskRef = SerializeTextureRef(decal->getMaskTexture(), "texture", options.embedRuntimePayloads);
             if (!maskRef.is_null() && !maskRef.empty()) {
                 decalData["mask"] = maskRef;
             } else if (!decal->getMaskPath().empty()) {
-                json pathRef = SerializeAssetPath(decal->getMaskPath(), "texture");
+                json pathRef = SerializeAssetPath(decal->getMaskPath(), "texture", options.embedRuntimePayloads);
                 if (!pathRef.is_null() && !pathRef.empty()) {
                     decalData["mask"] = pathRef;
                 }
@@ -2176,7 +2751,7 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
 
     root["entities"] = entities;
 
-    if (includeAssetRoot) {
+    if (options.includeAssetRoot) {
         AssetDatabase& db = AssetDatabase::getInstance();
         std::string rootPath = db.getRootPath();
         if (!rootPath.empty()) {
@@ -2214,18 +2789,39 @@ json BuildSceneJson(Scene* scene, bool includeAssetRoot, const std::string& scen
 } // namespace
 
 std::string SceneSerializer::SerializeScene(Scene* scene) {
-    json root = BuildSceneJson(scene, false, "", true);
+    BuildSceneOptions options;
+    json root = BuildSceneJson(scene, "", options);
     return root.dump(2);
 }
 
 std::string SceneSerializer::SerializeScene(Scene* scene, const std::string& scenePath) {
-    json root = BuildSceneJson(scene, true, scenePath, true);
+    BuildSceneOptions options;
+    options.includeAssetRoot = true;
+    json root = BuildSceneJson(scene, scenePath, options);
     return root.dump(2);
 }
 
 std::string SceneSerializer::SerializeScene(Scene* scene, bool includeEditorOnly) {
-    json root = BuildSceneJson(scene, false, "", includeEditorOnly);
+    BuildSceneOptions options;
+    options.includeEditorOnly = includeEditorOnly;
+    json root = BuildSceneJson(scene, "", options);
     return root.dump(2);
+}
+
+std::string SceneSerializer::SerializeCookedRuntimeScene(Scene* scene, bool includeEditorOnly) {
+    BuildSceneOptions options;
+    options.includeEditorOnly = includeEditorOnly;
+    options.embedRuntimePayloads = true;
+    json root = BuildSceneJson(scene, "", options);
+    return root.dump();
+}
+
+std::vector<uint8_t> SceneSerializer::SerializeCookedRuntimeSceneBinary(Scene* scene, bool includeEditorOnly) {
+    BuildSceneOptions options;
+    options.includeEditorOnly = includeEditorOnly;
+    options.embedRuntimePayloads = true;
+    json root = BuildSceneJson(scene, "", options);
+    return json::to_msgpack(root);
 }
 
 bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data) {
@@ -2241,94 +2837,18 @@ bool SceneSerializer::DeserializeScene(Scene* scene, const std::string& data, co
     if (root.is_discarded() || !root.is_object()) {
         return false;
     }
+    return DeserializeSceneRoot(scene, root, scenePath);
+}
 
-    if (root.contains("assetRoot")) {
-        AssetDatabase& db = AssetDatabase::getInstance();
-        std::string rootPath;
-        const json& assetRoot = root["assetRoot"];
-        if (assetRoot.is_object()) {
-            rootPath = assetRoot.value("path", std::string());
-            bool relative = assetRoot.value("relativeToScene", false);
-            if (relative && !scenePath.empty()) {
-                std::filesystem::path sceneDir = std::filesystem::path(scenePath).parent_path();
-                rootPath = (sceneDir / rootPath).lexically_normal().string();
-            }
-        } else if (assetRoot.is_string()) {
-            rootPath = assetRoot.get<std::string>();
-            if (!rootPath.empty() && !scenePath.empty()) {
-                std::filesystem::path p(rootPath);
-                if (!p.is_absolute()) {
-                    std::filesystem::path sceneDir = std::filesystem::path(scenePath).parent_path();
-                    rootPath = (sceneDir / p).lexically_normal().string();
-                }
-            }
-        }
-        if (!rootPath.empty()) {
-            std::error_code ec;
-            if (std::filesystem::exists(rootPath, ec)) {
-                db.setRootPath(rootPath);
-            }
-        }
+bool SceneSerializer::DeserializeSceneBinary(Scene* scene, const std::vector<uint8_t>& data, const std::string& scenePath) {
+    if (!scene || data.empty()) {
+        return false;
     }
-
-    SceneSettings sceneSettings;
-    if (root.contains("sceneSettings") && root["sceneSettings"].is_object()) {
-        const json& s = root["sceneSettings"];
-        if (s.contains("environment")) {
-            sceneSettings.environment = DeserializeEnvironmentSettings(s["environment"]);
-        }
-        if (s.contains("fog")) {
-            sceneSettings.fog = DeserializeFogSettings(s["fog"]);
-        }
-        if (s.contains("postProcess")) {
-            sceneSettings.postProcess = DeserializePostProcessSettings(s["postProcess"]);
-        }
-        if (s.contains("quality")) {
-            sceneSettings.quality = DeserializeQualitySettings(s["quality"]);
-        }
+    json root = json::from_msgpack(data, true, false);
+    if (root.is_discarded() || !root.is_object()) {
+        return false;
     }
-    scene->setSettings(sceneSettings);
-
-    bool wasActive = scene->isActive();
-    if (wasActive) {
-        scene->setActive(false);
-    }
-
-    scene->destroyAllEntities();
-    if (root.contains("name")) {
-        scene->setName(root.value("name", scene->getName()));
-    }
-
-    auto records = BuildEntityRecords(scene,
-                                      root.contains("entities") && root["entities"].is_array()
-                                          ? root["entities"]
-                                          : json::array(),
-                                      true);
-    ResolveEntityParents(scene, records);
-
-    Renderer* renderer = Engine::getInstance().getRenderer();
-    TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
-    std::unordered_map<std::string, ModelCacheEntry> modelCache;
-
-    for (auto& [uuid, record] : records) {
-        if (!record.entity) {
-            continue;
-        }
-        record.entity->setEditorOnly(record.editorOnly);
-        ApplyEntityComponents(record.entity, record.components, scene, scenePath, textureLoader, modelCache);
-    }
-
-    if (wasActive) {
-        scene->setActive(true);
-    }
-
-    for (auto& [uuid, record] : records) {
-        if (record.entity && !record.active) {
-            record.entity->setActive(false);
-        }
-    }
-
-    return true;
+    return DeserializeSceneRoot(scene, root, scenePath);
 }
 
 std::vector<Entity*> SceneSerializer::DuplicateEntities(Scene* scene, const std::vector<Entity*>& entities) {

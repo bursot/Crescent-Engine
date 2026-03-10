@@ -23,6 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)openProjectAtPath:(NSString *)path NS_SWIFT_NAME(openProject(path:));
 - (NSDictionary *)getProjectSettings NS_SWIFT_NAME(getProjectSettings());
 - (NSDictionary *)getProjectInfo NS_SWIFT_NAME(getProjectInfo());
+- (BOOL)saveCookedRuntimeSceneAtPath:(NSString *)path includeEditorOnly:(BOOL)includeEditorOnly NS_SWIFT_NAME(saveCookedRuntimeScene(path:includeEditorOnly:));
 - (BOOL)loadSceneAtPath:(NSString *)path NS_SWIFT_NAME(loadScene(path:));
 - (void)setViewMode:(int)mode NS_SWIFT_NAME(setViewMode(_:));
 - (void)enterPlayMode NS_SWIFT_NAME(enterPlayMode());
