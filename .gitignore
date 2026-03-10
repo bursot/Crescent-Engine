@@ -103,6 +103,3 @@ ThirdParty/assimp-build-*/
 ThirdParty/assimp-build-*
 ThirdParty/basisu/
 ThirdParty/astc-encoder/
-
-CrescentEngineTests/
-CrescentEngineUITests/
