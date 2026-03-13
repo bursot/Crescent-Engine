@@ -39,6 +39,12 @@ public:
         High,
         Ultra
     };
+
+    enum class Mobility {
+        Static,
+        Stationary,
+        Movable
+    };
     
     Light();
     virtual ~Light() = default;
@@ -137,8 +143,12 @@ public:
     float getVolumetricAnisotropy() const { return m_VolumetricAnisotropy; }
     void setVolumetricAnisotropy(float g) { m_VolumetricAnisotropy = Math::Clamp(g, -0.99f, 0.99f); }
 
-    bool getBakeToVertexLighting() const { return m_BakeToVertexLighting; }
-    void setBakeToVertexLighting(bool bake) { m_BakeToVertexLighting = bake; }
+    bool getContributeToStaticBake() const { return m_ContributeToStaticBake; }
+    void setContributeToStaticBake(bool contribute) { m_ContributeToStaticBake = contribute; }
+    Mobility getMobility() const { return m_Mobility; }
+    void setMobility(Mobility mobility) { m_Mobility = mobility; }
+    int getShadowmaskChannel() const { return m_ShadowmaskChannel; }
+    void setShadowmaskChannel(int channel) { m_ShadowmaskChannel = std::max(-1, std::min(3, channel)); }
     
     // Calculate attenuation at distance
     float calculateAttenuation(float distance) const;
@@ -221,7 +231,9 @@ private:
     // Volumetric
     bool m_Volumetric;
     float m_VolumetricAnisotropy;
-    bool m_BakeToVertexLighting;
+    bool m_ContributeToStaticBake;
+    Mobility m_Mobility;
+    int m_ShadowmaskChannel;
     
     // Main light
     static Light* s_MainLight;

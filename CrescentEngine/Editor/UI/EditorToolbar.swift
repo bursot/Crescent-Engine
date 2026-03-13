@@ -148,7 +148,7 @@ struct EditorToolbar: View {
                     }) {
                         ToolbarPillLabel(
                             title: "Bake Lighting",
-                            value: "Vertex",
+                            value: "Static",
                             systemImage: "sun.max.fill",
                             accent: EditorTheme.warning
                         )
@@ -156,7 +156,7 @@ struct EditorToolbar: View {
                     .buttonStyle(.plain)
                     .disabled(!editorState.hasProject || editorState.isBuildingGame)
                     .opacity(editorState.hasProject && !editorState.isBuildingGame ? 1 : 0.55)
-                    .help("Bake lights marked in the Light inspector into static mesh vertex lighting")
+                    .help("Bake static lighting, lightmaps, probes and shadowmasks for the current scene")
 
                     Button(action: {
                         editorState.buildGame()

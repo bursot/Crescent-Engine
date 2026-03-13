@@ -213,7 +213,7 @@ _NS_INLINE _Ret NS::Object::sendMessage(const void* pObj, SEL selector, _Args...
         
         const SendMessageProc pProc = reinterpret_cast<SendMessageProc>(&objc_msgSend);
 
-        return (*pProc)(pObj, selector, args...);
+        return (*pProc)(pObj, selector, args...);   
         }
 }
     

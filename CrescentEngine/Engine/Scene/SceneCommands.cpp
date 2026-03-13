@@ -1,4 +1,5 @@
 #include "SceneCommands.hpp"
+#include "SceneSerializer.hpp"
 #include "../Core/Engine.hpp"
 #include "../Renderer/Renderer.hpp"
 #include "../Rendering/Texture.hpp"
@@ -12,6 +13,9 @@
 #include "../Components/HLODProxy.hpp"
 #include "../Assets/AssetDatabase.hpp"
 #include "../ECS/Transform.hpp"
+#include "../Physics/PhysicsWorld.hpp"
+#include "../Rendering/stb_image.h"
+#include "../Rendering/stb_image_write.h"
 #include <assimp/config.h>
 #include <assimp/Importer.hpp>
 #include <assimp/GltfMaterial.h>
@@ -21,9 +25,12 @@
 #include <assimp/scene.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -33,6 +40,17 @@
 
 namespace Crescent {
 namespace {
+
+void ConfigurePrimitiveStaticLighting(MeshRenderer* renderer) {
+    if (!renderer) {
+        return;
+    }
+    MeshRenderer::StaticLightingData staticLighting = renderer->getStaticLighting();
+    staticLighting.staticGeometry = true;
+    staticLighting.contributeGI = true;
+    staticLighting.receiveGI = true;
+    renderer->setStaticLighting(staticLighting);
+}
 
 struct TextureCandidate {
     std::string baseNameLower;
@@ -70,6 +88,7 @@ struct ModelCacheEntry {
 
 struct BakedDirectLight {
     Light::Type type = Light::Type::Directional;
+    Light::Mobility mobility = Light::Mobility::Movable;
     Math::Vector3 positionWS = Math::Vector3::Zero;
     Math::Vector3 directionWS = Math::Vector3::Down;
     Math::Vector3 color = Math::Vector3::One;
@@ -78,6 +97,93 @@ struct BakedDirectLight {
     float cosInner = 1.0f;
     float cosOuter = 1.0f;
     float sourceRadius = 0.0f;
+    bool castShadows = true;
+    float shadowBias = 0.0005f;
+    float shadowNormalBias = 0.001f;
+    float shadowDistance = 200.0f;
+    int shadowmaskChannel = -1;
+};
+
+struct SurfaceSample {
+    bool valid = false;
+    Math::Vector3 positionWS = Math::Vector3::Zero;
+    Math::Vector3 normalWS = Math::Vector3::Up;
+    Math::Vector2 uv = Math::Vector2::Zero;
+    int materialIndex = 0;
+    float distanceSq = std::numeric_limits<float>::max();
+};
+
+struct EmissiveTriangleSurface {
+    Entity* entity = nullptr;
+    MeshRenderer* renderer = nullptr;
+    Math::Vector3 p0 = Math::Vector3::Zero;
+    Math::Vector3 p1 = Math::Vector3::Zero;
+    Math::Vector3 p2 = Math::Vector3::Zero;
+    Math::Vector3 n0 = Math::Vector3::Up;
+    Math::Vector3 n1 = Math::Vector3::Up;
+    Math::Vector3 n2 = Math::Vector3::Up;
+    Math::Vector2 uv0 = Math::Vector2::Zero;
+    Math::Vector2 uv1 = Math::Vector2::Zero;
+    Math::Vector2 uv2 = Math::Vector2::Zero;
+    int materialIndex = 0;
+    bool twoSided = false;
+    float area = 0.0f;
+    float weight = 0.0f;
+    float cumulativeWeight = 0.0f;
+};
+
+struct EmissiveLightingEstimate {
+    Math::Vector3 irradiance = Math::Vector3::Zero;
+    Math::Vector3 weightedDirection = Math::Vector3::Zero;
+    float directionWeight = 0.0f;
+    float referenceNoL = 0.0f;
+};
+
+struct EmissiveSurfaceSample {
+    const EmissiveTriangleSurface* surface = nullptr;
+    Math::Vector3 positionWS = Math::Vector3::Zero;
+    Math::Vector3 normalWS = Math::Vector3::Up;
+    Math::Vector2 uv = Math::Vector2::Zero;
+    Math::Vector3 emission = Math::Vector3::Zero;
+    float pdfArea = 0.0f;
+    bool twoSided = false;
+};
+
+struct StaticLightingLayoutCandidate {
+    Entity* entity = nullptr;
+    MeshRenderer* renderer = nullptr;
+    std::shared_ptr<Mesh> mesh;
+    float surfaceAreaWS = 0.0f;
+    int requestedInnerResolution = 0;
+    bool generatedFallbackUVs = false;
+};
+
+struct StaticLightingBakeCandidate {
+    Entity* entity = nullptr;
+    MeshRenderer* renderer = nullptr;
+    std::shared_ptr<Mesh> mesh;
+    Math::Matrix4x4 worldMatrix = Math::Matrix4x4::Identity;
+    Math::Matrix4x4 normalMatrix = Math::Matrix4x4::Identity;
+    MeshRenderer::StaticLightingData staticLighting;
+};
+
+struct ShelfAtlasState {
+    int atlasIndex = 0;
+    int width = 0;
+    int height = 0;
+    int cursorX = 0;
+    int cursorY = 0;
+    int rowHeight = 0;
+};
+
+struct LightmapChart {
+    int axis = 2;
+    int axisSign = 1;
+    std::vector<uint32_t> triangleIndices;
+    std::unordered_map<uint32_t, Math::Vector2> projectedUVs;
+    Math::Vector2 boundsMin = Math::Vector2::Zero;
+    Math::Vector2 boundsMax = Math::Vector2::One;
+    Math::Vector2 packedOffset = Math::Vector2::Zero;
 };
 
 static std::shared_ptr<Mesh> CloneMeshGeometry(const std::shared_ptr<Mesh>& source) {
@@ -100,6 +206,965 @@ static Math::Vector3 ClampColor(const Math::Vector3& value, float maxValue) {
         Math::Clamp(value.y, 0.0f, maxValue),
         Math::Clamp(value.z, 0.0f, maxValue)
     );
+}
+
+static Math::Vector3 MultiplyColor(const Math::Vector3& a, const Math::Vector3& b) {
+    return Math::Vector3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+
+static Math::Vector3 SRGBToLinear(const Math::Vector3& color) {
+    return Math::Vector3(
+        std::pow(Math::Clamp(color.x, 0.0f, 1.0f), 2.2f),
+        std::pow(Math::Clamp(color.y, 0.0f, 1.0f), 2.2f),
+        std::pow(Math::Clamp(color.z, 0.0f, 1.0f), 2.2f)
+    );
+}
+
+static uint32_t HashUint(uint32_t value) {
+    value ^= value >> 16u;
+    value *= 0x7feb352du;
+    value ^= value >> 15u;
+    value *= 0x846ca68bu;
+    value ^= value >> 16u;
+    return value;
+}
+
+static float HashToUnitFloat(uint32_t value) {
+    return static_cast<float>(HashUint(value) & 0x00ffffffu) / static_cast<float>(0x01000000u);
+}
+
+static Math::Vector2 Random2D(uint32_t seedA, uint32_t seedB) {
+    return Math::Vector2(HashToUnitFloat(seedA), HashToUnitFloat(seedB));
+}
+
+struct CPUImageCacheEntry {
+    int width = 0;
+    int height = 0;
+    std::vector<unsigned char> rgba;
+};
+
+static const CPUImageCacheEntry* LoadCPUImage(const std::string& path) {
+    static std::unordered_map<std::string, CPUImageCacheEntry> cache;
+    auto it = cache.find(path);
+    if (it != cache.end()) {
+        return it->second.rgba.empty() ? nullptr : &it->second;
+    }
+
+    CPUImageCacheEntry entry;
+    if (!path.empty() && path.rfind("builtin://", 0) != 0) {
+        int width = 0;
+        int height = 0;
+        int channels = 0;
+        stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+        if (pixels && width > 0 && height > 0) {
+            entry.width = width;
+            entry.height = height;
+            entry.rgba.assign(pixels, pixels + static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+        }
+        if (pixels) {
+            stbi_image_free(pixels);
+        }
+    }
+
+    auto [insertedIt, _] = cache.emplace(path, std::move(entry));
+    return insertedIt->second.rgba.empty() ? nullptr : &insertedIt->second;
+}
+
+static Math::Vector3 SampleCPUImageRGB(const CPUImageCacheEntry* image,
+                                       const Math::Vector2& uv,
+                                       bool srgb) {
+    if (!image || image->width <= 0 || image->height <= 0 || image->rgba.empty()) {
+        return Math::Vector3::One;
+    }
+
+    float u = uv.x - std::floor(uv.x);
+    float v = uv.y - std::floor(uv.y);
+    float x = u * static_cast<float>(image->width - 1);
+    float y = (1.0f - v) * static_cast<float>(image->height - 1);
+    int x0 = std::max(0, std::min(image->width - 1, static_cast<int>(std::floor(x))));
+    int y0 = std::max(0, std::min(image->height - 1, static_cast<int>(std::floor(y))));
+    int x1 = std::max(0, std::min(image->width - 1, x0 + 1));
+    int y1 = std::max(0, std::min(image->height - 1, y0 + 1));
+    float tx = x - static_cast<float>(x0);
+    float ty = y - static_cast<float>(y0);
+
+    auto readPixel = [&](int px, int py) {
+        size_t offset = (static_cast<size_t>(py) * static_cast<size_t>(image->width) + static_cast<size_t>(px)) * 4u;
+        Math::Vector3 color(
+            static_cast<float>(image->rgba[offset + 0]) / 255.0f,
+            static_cast<float>(image->rgba[offset + 1]) / 255.0f,
+            static_cast<float>(image->rgba[offset + 2]) / 255.0f
+        );
+        return srgb ? SRGBToLinear(color) : color;
+    };
+
+    Math::Vector3 c00 = readPixel(x0, y0);
+    Math::Vector3 c10 = readPixel(x1, y0);
+    Math::Vector3 c01 = readPixel(x0, y1);
+    Math::Vector3 c11 = readPixel(x1, y1);
+    Math::Vector3 c0 = c00 * (1.0f - tx) + c10 * tx;
+    Math::Vector3 c1 = c01 * (1.0f - tx) + c11 * tx;
+    return c0 * (1.0f - ty) + c1 * ty;
+}
+
+static float ComputeLuminance(const Math::Vector3& color) {
+    return color.x * 0.2126f + color.y * 0.7152f + color.z * 0.0722f;
+}
+
+static float TriangleArea(const Math::Vector3& a, const Math::Vector3& b, const Math::Vector3& c) {
+    return 0.5f * (b - a).cross(c - a).length();
+}
+
+static float TriangleUVArea(const Math::Vector2& a, const Math::Vector2& b, const Math::Vector2& c) {
+    Math::Vector2 ab = b - a;
+    Math::Vector2 ac = c - a;
+    return std::abs(ab.x * ac.y - ab.y * ac.x) * 0.5f;
+}
+
+static bool HasUsableLightmapUVs(const Mesh& mesh) {
+    const auto& vertices = mesh.getVertices();
+    const auto& indices = mesh.getIndices();
+    if (vertices.empty() || indices.size() < 3) {
+        return false;
+    }
+
+    Math::Vector2 uvMin(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+    Math::Vector2 uvMax(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
+    float accumulatedUVArea = 0.0f;
+
+    for (const Vertex& vertex : vertices) {
+        uvMin = Math::Vector2::Min(uvMin, vertex.texCoord1);
+        uvMax = Math::Vector2::Max(uvMax, vertex.texCoord1);
+    }
+
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        uint32_t i0 = indices[i];
+        uint32_t i1 = indices[i + 1];
+        uint32_t i2 = indices[i + 2];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+            continue;
+        }
+        accumulatedUVArea += TriangleUVArea(vertices[i0].texCoord1, vertices[i1].texCoord1, vertices[i2].texCoord1);
+    }
+
+    Math::Vector2 uvExtent = uvMax - uvMin;
+    if (uvExtent.lengthSquared() <= 1e-8f || accumulatedUVArea <= 1e-7f) {
+        return false;
+    }
+
+    // Lightmap UVs must not stack large portions of the mesh on top of each other.
+    // Primitive/material UVs often reuse the full 0..1 tile per face, which is fine
+    // for albedo tiling but invalid for lightmaps. If the summed triangle UV area is
+    // much larger than the occupied UV bounds, treat the channel as overlapped and
+    // force a dedicated unwrap.
+    float occupiedBoundsArea = std::max(uvExtent.x * uvExtent.y, 1e-6f);
+    float overlapRatio = accumulatedUVArea / occupiedBoundsArea;
+    if (overlapRatio > 1.25f) {
+        return false;
+    }
+
+    return true;
+}
+
+static std::shared_ptr<Mesh> CreateNormalizedLightmapMesh(const std::shared_ptr<Mesh>& source) {
+    if (!source) {
+        return nullptr;
+    }
+
+    const auto& sourceVertices = source->getVertices();
+    if (sourceVertices.empty()) {
+        return source;
+    }
+
+    Math::Vector2 uvMin(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+    Math::Vector2 uvMax(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
+    for (const Vertex& vertex : sourceVertices) {
+        uvMin = Math::Vector2::Min(uvMin, vertex.texCoord1);
+        uvMax = Math::Vector2::Max(uvMax, vertex.texCoord1);
+    }
+
+    Math::Vector2 uvExtent = uvMax - uvMin;
+    if (uvExtent.x <= 1e-6f || uvExtent.y <= 1e-6f) {
+        return source;
+    }
+
+    bool alreadyNormalized = uvMin.x >= -0.001f && uvMin.y >= -0.001f &&
+                             uvMax.x <= 1.001f && uvMax.y <= 1.001f;
+    if (alreadyNormalized) {
+        return source;
+    }
+
+    auto clone = CloneMeshGeometry(source);
+    auto vertices = clone->getVertices();
+    for (auto& vertex : vertices) {
+        vertex.texCoord1.x = (vertex.texCoord1.x - uvMin.x) / uvExtent.x;
+        vertex.texCoord1.y = (vertex.texCoord1.y - uvMin.y) / uvExtent.y;
+    }
+    clone->setVertices(vertices);
+    return clone;
+}
+
+static uint64_t MakeEdgeKey(uint32_t a, uint32_t b) {
+    uint32_t lo = std::min(a, b);
+    uint32_t hi = std::max(a, b);
+    return (static_cast<uint64_t>(lo) << 32) | static_cast<uint64_t>(hi);
+}
+
+static int DominantProjectionAxis(const Math::Vector3& normal) {
+    Math::Vector3 absN(std::abs(normal.x), std::abs(normal.y), std::abs(normal.z));
+    if (absN.x >= absN.y && absN.x >= absN.z) {
+        return 0;
+    }
+    if (absN.y >= absN.z) {
+        return 1;
+    }
+    return 2;
+}
+
+static int DominantProjectionSign(const Math::Vector3& normal, int axis) {
+    switch (axis) {
+        case 0: return normal.x >= 0.0f ? 1 : -1;
+        case 1: return normal.y >= 0.0f ? 1 : -1;
+        default: return normal.z >= 0.0f ? 1 : -1;
+    }
+}
+
+static Math::Vector2 ProjectLightmapUV(const Math::Vector3& position, int axis, int sign) {
+    switch (axis) {
+        case 0:
+            return sign >= 0 ? Math::Vector2(position.z, position.y) : Math::Vector2(-position.z, position.y);
+        case 1:
+            return sign >= 0 ? Math::Vector2(position.x, position.z) : Math::Vector2(position.x, -position.z);
+        default:
+            return sign >= 0 ? Math::Vector2(position.x, position.y) : Math::Vector2(-position.x, position.y);
+    }
+}
+
+static std::shared_ptr<Mesh> CreateChartedLightmapMesh(const std::shared_ptr<Mesh>& source) {
+    if (!source) {
+        return nullptr;
+    }
+
+    const auto& sourceVertices = source->getVertices();
+    const auto& sourceIndices = source->getIndices();
+    const auto& sourceSubmeshes = source->getSubmeshes();
+    if (sourceVertices.empty() || sourceIndices.size() < 3) {
+        return source;
+    }
+
+    const size_t triangleCount = sourceIndices.size() / 3;
+    std::vector<Math::Vector3> triangleNormals(triangleCount, Math::Vector3::Up);
+    std::vector<int> triangleAxes(triangleCount, 2);
+    std::vector<int> triangleSigns(triangleCount, 1);
+    std::unordered_map<uint64_t, std::vector<uint32_t>> edgeToTriangles;
+    edgeToTriangles.reserve(triangleCount * 3);
+
+    for (size_t tri = 0; tri < triangleCount; ++tri) {
+        uint32_t i0 = sourceIndices[tri * 3 + 0];
+        uint32_t i1 = sourceIndices[tri * 3 + 1];
+        uint32_t i2 = sourceIndices[tri * 3 + 2];
+        if (i0 >= sourceVertices.size() || i1 >= sourceVertices.size() || i2 >= sourceVertices.size()) {
+            continue;
+        }
+
+        const Math::Vector3& p0 = sourceVertices[i0].position;
+        const Math::Vector3& p1 = sourceVertices[i1].position;
+        const Math::Vector3& p2 = sourceVertices[i2].position;
+        Math::Vector3 faceNormal = (p1 - p0).cross(p2 - p0);
+        if (faceNormal.lengthSquared() <= Math::EPSILON) {
+            faceNormal = sourceVertices[i0].normal + sourceVertices[i1].normal + sourceVertices[i2].normal;
+        }
+        if (faceNormal.lengthSquared() <= Math::EPSILON) {
+            faceNormal = Math::Vector3::Up;
+        }
+        faceNormal.normalize();
+
+        triangleNormals[tri] = faceNormal;
+        triangleAxes[tri] = DominantProjectionAxis(faceNormal);
+        triangleSigns[tri] = DominantProjectionSign(faceNormal, triangleAxes[tri]);
+
+        edgeToTriangles[MakeEdgeKey(i0, i1)].push_back(static_cast<uint32_t>(tri));
+        edgeToTriangles[MakeEdgeKey(i1, i2)].push_back(static_cast<uint32_t>(tri));
+        edgeToTriangles[MakeEdgeKey(i2, i0)].push_back(static_cast<uint32_t>(tri));
+    }
+
+    std::vector<int> triangleChart(triangleCount, -1);
+    std::vector<LightmapChart> charts;
+    charts.reserve(triangleCount);
+    constexpr float kChartNormalDotThreshold = 0.9063f; // ~25 degrees
+
+    for (size_t tri = 0; tri < triangleCount; ++tri) {
+        if (triangleChart[tri] >= 0) {
+            continue;
+        }
+
+        LightmapChart chart;
+        chart.axis = triangleAxes[tri];
+        chart.axisSign = triangleSigns[tri];
+
+        std::vector<uint32_t> stack = {static_cast<uint32_t>(tri)};
+        triangleChart[tri] = static_cast<int>(charts.size());
+
+        while (!stack.empty()) {
+            uint32_t current = stack.back();
+            stack.pop_back();
+            chart.triangleIndices.push_back(current);
+
+            uint32_t baseIndex = current * 3;
+            uint32_t triVerts[3] = {
+                sourceIndices[baseIndex + 0],
+                sourceIndices[baseIndex + 1],
+                sourceIndices[baseIndex + 2]
+            };
+
+            for (int edge = 0; edge < 3; ++edge) {
+                uint64_t edgeKey = MakeEdgeKey(triVerts[edge], triVerts[(edge + 1) % 3]);
+                auto edgeIt = edgeToTriangles.find(edgeKey);
+                if (edgeIt == edgeToTriangles.end()) {
+                    continue;
+                }
+                for (uint32_t neighbor : edgeIt->second) {
+                    if (triangleChart[neighbor] >= 0) {
+                        continue;
+                    }
+                    if (triangleAxes[neighbor] != chart.axis || triangleSigns[neighbor] != chart.axisSign) {
+                        continue;
+                    }
+                    if (triangleNormals[current].dot(triangleNormals[neighbor]) < kChartNormalDotThreshold) {
+                        continue;
+                    }
+                    triangleChart[neighbor] = static_cast<int>(charts.size());
+                    stack.push_back(neighbor);
+                }
+            }
+        }
+
+        Math::Vector2 chartMin(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+        Math::Vector2 chartMax(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
+        for (uint32_t triIndex : chart.triangleIndices) {
+            uint32_t baseIndex = triIndex * 3;
+            for (int corner = 0; corner < 3; ++corner) {
+                uint32_t srcIndex = sourceIndices[baseIndex + corner];
+                auto projectedIt = chart.projectedUVs.find(srcIndex);
+                if (projectedIt == chart.projectedUVs.end()) {
+                    Math::Vector2 projected = ProjectLightmapUV(sourceVertices[srcIndex].position, chart.axis, chart.axisSign);
+                    projectedIt = chart.projectedUVs.emplace(srcIndex, projected).first;
+                }
+                chartMin = Math::Vector2::Min(chartMin, projectedIt->second);
+                chartMax = Math::Vector2::Max(chartMax, projectedIt->second);
+            }
+        }
+        chart.boundsMin = chartMin;
+        chart.boundsMax = chartMax;
+        charts.push_back(std::move(chart));
+    }
+
+    std::vector<size_t> chartOrder(charts.size());
+    for (size_t i = 0; i < charts.size(); ++i) {
+        chartOrder[i] = i;
+    }
+    std::sort(chartOrder.begin(), chartOrder.end(), [&](size_t a, size_t b) {
+        Math::Vector2 sizeA = charts[a].boundsMax - charts[a].boundsMin;
+        Math::Vector2 sizeB = charts[b].boundsMax - charts[b].boundsMin;
+        float areaA = sizeA.x * sizeA.y;
+        float areaB = sizeB.x * sizeB.y;
+        return areaA > areaB;
+    });
+
+    float packedCursorX = 0.0f;
+    float packedCursorY = 0.0f;
+    float packedRowHeight = 0.0f;
+    float packedWidthLimit = 0.0f;
+    for (size_t chartIndex : chartOrder) {
+        const auto& chart = charts[chartIndex];
+        Math::Vector2 size = chart.boundsMax - chart.boundsMin;
+        packedWidthLimit += std::max(size.x, 0.001f) * std::max(size.y, 0.001f);
+    }
+    packedWidthLimit = std::max(std::sqrt(std::max(packedWidthLimit, 0.0001f)), 1.0f);
+
+    float packedPageWidth = 0.0f;
+    float packedPageHeight = 0.0f;
+    for (size_t chartIndex : chartOrder) {
+        auto& chart = charts[chartIndex];
+        Math::Vector2 size = chart.boundsMax - chart.boundsMin;
+        size.x = std::max(size.x, 0.001f);
+        size.y = std::max(size.y, 0.001f);
+        float chartPadding = std::max(std::max(size.x, size.y) * 0.05f, 0.01f);
+        if (packedCursorX > 0.0f && packedCursorX + size.x + chartPadding > packedWidthLimit) {
+            packedCursorX = 0.0f;
+            packedCursorY += packedRowHeight;
+            packedRowHeight = 0.0f;
+        }
+        chart.packedOffset = Math::Vector2(packedCursorX + chartPadding * 0.5f,
+                                           packedCursorY + chartPadding * 0.5f);
+        packedCursorX += size.x + chartPadding;
+        packedRowHeight = std::max(packedRowHeight, size.y + chartPadding);
+        packedPageWidth = std::max(packedPageWidth, packedCursorX);
+        packedPageHeight = std::max(packedPageHeight, packedCursorY + packedRowHeight);
+    }
+
+    packedPageWidth = std::max(packedPageWidth, 1.0f);
+    packedPageHeight = std::max(packedPageHeight, 1.0f);
+
+    auto clone = std::make_shared<Mesh>();
+    clone->setName(source->getName());
+    clone->setDoubleSided(source->isDoubleSided());
+
+    std::vector<Vertex> newVertices;
+    std::vector<uint32_t> newIndices;
+    std::vector<Submesh> newSubmeshes;
+    std::unordered_map<uint64_t, uint32_t> remappedVertices;
+    newVertices.reserve(sourceVertices.size() + triangleCount * 2);
+    newIndices.reserve(sourceIndices.size());
+    const std::vector<Submesh> iterationSubmeshes = sourceSubmeshes.empty()
+        ? std::vector<Submesh>{Submesh(0, static_cast<uint32_t>(sourceIndices.size()), 0)}
+        : sourceSubmeshes;
+    newSubmeshes.reserve(iterationSubmeshes.size());
+
+    for (const Submesh& submesh : iterationSubmeshes) {
+        uint32_t submeshStart = static_cast<uint32_t>(newIndices.size());
+        const uint32_t submeshEnd = submesh.indexStart + submesh.indexCount;
+        for (uint32_t indexOffset = submesh.indexStart; indexOffset + 2 < submeshEnd; indexOffset += 3) {
+            uint32_t triIndex = indexOffset / 3;
+            if (triIndex >= triangleChart.size() || triangleChart[triIndex] < 0) {
+                continue;
+            }
+
+            const LightmapChart& chart = charts[triangleChart[triIndex]];
+
+            for (int corner = 0; corner < 3; ++corner) {
+                uint32_t srcIndex = sourceIndices[indexOffset + corner];
+                uint64_t remapKey = (static_cast<uint64_t>(triangleChart[triIndex]) << 32) | static_cast<uint64_t>(srcIndex);
+                auto remapIt = remappedVertices.find(remapKey);
+                if (remapIt == remappedVertices.end()) {
+                    Vertex vertex = sourceVertices[srcIndex];
+                    Math::Vector2 projected = chart.projectedUVs.at(srcIndex);
+                    Math::Vector2 local = projected - chart.boundsMin + chart.packedOffset;
+                    vertex.texCoord1 = Math::Vector2(local.x / packedPageWidth, local.y / packedPageHeight);
+                    uint32_t newIndex = static_cast<uint32_t>(newVertices.size());
+                    newVertices.push_back(vertex);
+                    remappedVertices.emplace(remapKey, newIndex);
+                    newIndices.push_back(newIndex);
+                } else {
+                    newIndices.push_back(remapIt->second);
+                }
+            }
+        }
+        newSubmeshes.emplace_back(submeshStart,
+                                  static_cast<uint32_t>(newIndices.size()) - submeshStart,
+                                  submesh.materialIndex);
+    }
+
+    if (newSubmeshes.empty() && !newIndices.empty()) {
+        newSubmeshes.emplace_back(0, static_cast<uint32_t>(newIndices.size()), 0);
+    }
+
+    clone->setVertices(newVertices);
+    clone->setIndices(newIndices);
+    clone->setSubmeshes(newSubmeshes);
+    clone->setSkinWeights(source->getSkinWeights());
+    return clone;
+}
+
+static std::shared_ptr<Mesh> CreateFallbackLightmapMesh(const std::shared_ptr<Mesh>& source) {
+    return CreateChartedLightmapMesh(source);
+}
+
+static float ComputeWorldSurfaceArea(const Mesh& mesh, const Transform& transform) {
+    const auto& vertices = mesh.getVertices();
+    const auto& indices = mesh.getIndices();
+    if (vertices.empty() || indices.size() < 3) {
+        return 0.0f;
+    }
+
+    Math::Matrix4x4 world = transform.getWorldMatrix();
+    float area = 0.0f;
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        uint32_t i0 = indices[i];
+        uint32_t i1 = indices[i + 1];
+        uint32_t i2 = indices[i + 2];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+            continue;
+        }
+        Math::Vector3 p0 = world.transformPoint(vertices[i0].position);
+        Math::Vector3 p1 = world.transformPoint(vertices[i1].position);
+        Math::Vector3 p2 = world.transformPoint(vertices[i2].position);
+        area += TriangleArea(p0, p1, p2);
+    }
+    return area;
+}
+
+static int RoundUpToMultiple(int value, int multiple) {
+    if (multiple <= 1) {
+        return value;
+    }
+    return ((value + multiple - 1) / multiple) * multiple;
+}
+
+static int EstimateLightmapInnerResolution(float surfaceAreaWS, const SceneStaticLightingSettings& settings) {
+    float texels = std::sqrt(std::max(surfaceAreaWS, 0.0001f)) * std::max(settings.texelsPerUnit, 1.0f);
+    int resolution = static_cast<int>(std::ceil(texels));
+    resolution = std::max(32, RoundUpToMultiple(resolution, 4));
+    int maxInner = std::max(32, settings.atlasSize - settings.unwrapPadding * 2);
+    return std::min(resolution, maxInner);
+}
+
+static bool TryPackShelfRect(ShelfAtlasState& atlas, int rectWidth, int rectHeight, int& outX, int& outY) {
+    if (rectWidth > atlas.width || rectHeight > atlas.height) {
+        return false;
+    }
+
+    if (atlas.cursorX + rectWidth > atlas.width) {
+        atlas.cursorX = 0;
+        atlas.cursorY += atlas.rowHeight;
+        atlas.rowHeight = 0;
+    }
+    if (atlas.cursorY + rectHeight > atlas.height) {
+        return false;
+    }
+
+    outX = atlas.cursorX;
+    outY = atlas.cursorY;
+    atlas.cursorX += rectWidth;
+    atlas.rowHeight = std::max(atlas.rowHeight, rectHeight);
+    return true;
+}
+
+static Math::Vector2 TransformLightmapUVToAtlas(const Math::Vector2& uv, const Math::Vector4& scaleOffset) {
+    return Math::Vector2(
+        uv.x * scaleOffset.x + scaleOffset.z,
+        uv.y * scaleOffset.y + scaleOffset.w
+    );
+}
+
+static bool ComputeBarycentrics(const Math::Vector2& p,
+                                const Math::Vector2& a,
+                                const Math::Vector2& b,
+                                const Math::Vector2& c,
+                                Math::Vector3& outBary) {
+    Math::Vector2 v0 = b - a;
+    Math::Vector2 v1 = c - a;
+    Math::Vector2 v2 = p - a;
+
+    float denom = v0.x * v1.y - v1.x * v0.y;
+    if (std::abs(denom) <= 1e-10f) {
+        return false;
+    }
+
+    float invDenom = 1.0f / denom;
+    float v = (v2.x * v1.y - v1.x * v2.y) * invDenom;
+    float w = (v0.x * v2.y - v2.x * v0.y) * invDenom;
+    float u = 1.0f - v - w;
+    outBary = Math::Vector3(u, v, w);
+    constexpr float kEpsilon = -0.0001f;
+    return u >= kEpsilon && v >= kEpsilon && w >= kEpsilon;
+}
+
+static Math::Vector3 ClosestPointOnTriangle(const Math::Vector3& p,
+                                            const Math::Vector3& a,
+                                            const Math::Vector3& b,
+                                            const Math::Vector3& c,
+                                            Math::Vector3& outBary) {
+    Math::Vector3 ab = b - a;
+    Math::Vector3 ac = c - a;
+    Math::Vector3 ap = p - a;
+    float d1 = ab.dot(ap);
+    float d2 = ac.dot(ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) {
+        outBary = Math::Vector3(1.0f, 0.0f, 0.0f);
+        return a;
+    }
+
+    Math::Vector3 bp = p - b;
+    float d3 = ab.dot(bp);
+    float d4 = ac.dot(bp);
+    if (d3 >= 0.0f && d4 <= d3) {
+        outBary = Math::Vector3(0.0f, 1.0f, 0.0f);
+        return b;
+    }
+
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        float v = d1 / std::max(d1 - d3, Math::EPSILON);
+        outBary = Math::Vector3(1.0f - v, v, 0.0f);
+        return a + ab * v;
+    }
+
+    Math::Vector3 cp = p - c;
+    float d5 = ab.dot(cp);
+    float d6 = ac.dot(cp);
+    if (d6 >= 0.0f && d5 <= d6) {
+        outBary = Math::Vector3(0.0f, 0.0f, 1.0f);
+        return c;
+    }
+
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        float w = d2 / std::max(d2 - d6, Math::EPSILON);
+        outBary = Math::Vector3(1.0f - w, 0.0f, w);
+        return a + ac * w;
+    }
+
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        float denom = std::max((d4 - d3) + (d5 - d6), Math::EPSILON);
+        float w = (d4 - d3) / denom;
+        outBary = Math::Vector3(0.0f, 1.0f - w, w);
+        return b + (c - b) * w;
+    }
+
+    float denom = 1.0f / std::max(va + vb + vc, Math::EPSILON);
+    float v = vb * denom;
+    float w = vc * denom;
+    outBary = Math::Vector3(1.0f - v - w, v, w);
+    return a + ab * v + ac * w;
+}
+
+static int ResolveTriangleMaterialIndex(const Mesh& mesh, size_t triangleFirstIndex) {
+    const auto& submeshes = mesh.getSubmeshes();
+    for (const Submesh& submesh : submeshes) {
+        if (triangleFirstIndex >= submesh.indexStart && triangleFirstIndex < static_cast<size_t>(submesh.indexStart + submesh.indexCount)) {
+            return static_cast<int>(submesh.materialIndex);
+        }
+    }
+    return 0;
+}
+
+static bool FindClosestSurfaceSample(Entity* entity,
+                                     const Math::Vector3& pointWS,
+                                     SurfaceSample& outSample) {
+    outSample = SurfaceSample();
+    if (!entity) {
+        return false;
+    }
+
+    MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+    if (!renderer) {
+        return false;
+    }
+    std::shared_ptr<Mesh> mesh = renderer->getMesh();
+    if (!mesh || mesh->getVertices().empty() || mesh->getIndices().size() < 3) {
+        return false;
+    }
+
+    const auto& vertices = mesh->getVertices();
+    const auto& indices = mesh->getIndices();
+    Math::Matrix4x4 worldMatrix = entity->getTransform()->getWorldMatrix();
+    Math::Matrix4x4 normalMatrix = worldMatrix.inversed().transposed();
+
+    for (size_t tri = 0; tri + 2 < indices.size(); tri += 3) {
+        uint32_t i0 = indices[tri + 0];
+        uint32_t i1 = indices[tri + 1];
+        uint32_t i2 = indices[tri + 2];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+            continue;
+        }
+
+        const Vertex& v0 = vertices[i0];
+        const Vertex& v1 = vertices[i1];
+        const Vertex& v2 = vertices[i2];
+        Math::Vector3 p0 = worldMatrix.transformPoint(v0.position);
+        Math::Vector3 p1 = worldMatrix.transformPoint(v1.position);
+        Math::Vector3 p2 = worldMatrix.transformPoint(v2.position);
+
+        Math::Vector3 bary;
+        Math::Vector3 closest = ClosestPointOnTriangle(pointWS, p0, p1, p2, bary);
+        float distanceSq = (closest - pointWS).lengthSquared();
+        if (distanceSq >= outSample.distanceSq) {
+            continue;
+        }
+
+        Math::Vector3 localNormal = (v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z).normalized();
+        Math::Vector3 worldNormal = normalMatrix.transformDirection(localNormal).normalized();
+        if (worldNormal.lengthSquared() <= Math::EPSILON) {
+            worldNormal = (p1 - p0).cross(p2 - p0).normalized();
+        }
+
+        outSample.valid = true;
+        outSample.positionWS = closest;
+        outSample.normalWS = worldNormal.lengthSquared() > Math::EPSILON ? worldNormal : Math::Vector3::Up;
+        outSample.uv = v0.texCoord * bary.x + v1.texCoord * bary.y + v2.texCoord * bary.z;
+        outSample.materialIndex = ResolveTriangleMaterialIndex(*mesh, tri);
+        outSample.distanceSq = distanceSq;
+    }
+
+    return outSample.valid;
+}
+
+static void ResolveMaterialSample(std::shared_ptr<Material> material,
+                                  const Math::Vector2& uv,
+                                  Math::Vector3& outAlbedo,
+                                  Math::Vector3& outEmission,
+                                  float& outAO) {
+    outAlbedo = Math::Vector3(0.7f, 0.7f, 0.7f);
+    outEmission = Math::Vector3::Zero;
+    outAO = 1.0f;
+    if (!material) {
+        return;
+    }
+
+    Math::Vector2 tiling = material->getUVTiling();
+    Math::Vector2 tiledUV(uv.x * tiling.x, uv.y * tiling.y);
+    tiledUV += material->getUVOffset();
+    const Math::Vector4& albedoValue = material->getAlbedo();
+    outAlbedo = ClampColor(Math::Vector3(albedoValue.x, albedoValue.y, albedoValue.z), 1.0f);
+    if (std::shared_ptr<Texture2D> albedoTexture = material->getAlbedoTexture()) {
+        outAlbedo = MultiplyColor(outAlbedo, ClampColor(SampleCPUImageRGB(LoadCPUImage(albedoTexture->getPath()), tiledUV, true), 1.0f));
+    }
+
+    outEmission = ClampColor(material->getEmission() * material->getEmissionStrength(), 16.0f);
+    if (std::shared_ptr<Texture2D> emissionTexture = material->getEmissionTexture()) {
+        outEmission = MultiplyColor(outEmission, ClampColor(SampleCPUImageRGB(LoadCPUImage(emissionTexture->getPath()), tiledUV, true), 8.0f));
+    }
+
+    outAO = Math::Clamp(material->getAO(), 0.05f, 1.0f);
+    if (std::shared_ptr<Texture2D> aoTexture = material->getAOTexture()) {
+        Math::Vector3 aoSample = SampleCPUImageRGB(LoadCPUImage(aoTexture->getPath()), tiledUV, false);
+        outAO *= Math::Clamp(aoSample.x, 0.05f, 1.0f);
+    }
+}
+
+static bool IsEmitterTwoSided(const std::shared_ptr<Mesh>& mesh,
+                              const std::shared_ptr<Material>& material) {
+    if (material && (material->isTwoSided() || material->getCullMode() == Material::CullMode::Off)) {
+        return true;
+    }
+    return mesh && mesh->isDoubleSided();
+}
+
+static std::vector<EmissiveTriangleSurface> BuildEmissiveTriangleSurfaces(Scene* scene) {
+    std::vector<EmissiveTriangleSurface> surfaces;
+    if (!scene) {
+        return surfaces;
+    }
+
+    float cumulativeWeight = 0.0f;
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity || !entity->isActiveInHierarchy() || entity->isEditorOnly()) {
+            continue;
+        }
+
+        MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || entity->getComponent<SkinnedMeshRenderer>()) {
+            continue;
+        }
+
+        const auto& staticLighting = renderer->getStaticLighting();
+        if (!staticLighting.staticGeometry || !staticLighting.contributeGI) {
+            continue;
+        }
+
+        std::shared_ptr<Mesh> mesh = renderer->getMesh();
+        if (!mesh || mesh->getVertices().empty() || mesh->getIndices().size() < 3) {
+            continue;
+        }
+
+        const auto& vertices = mesh->getVertices();
+        const auto& indices = mesh->getIndices();
+        Math::Matrix4x4 worldMatrix = entity->getTransform()->getWorldMatrix();
+        Math::Matrix4x4 normalMatrix = worldMatrix.inversed().transposed();
+
+        for (size_t tri = 0; tri + 2 < indices.size(); tri += 3) {
+            uint32_t i0 = indices[tri + 0];
+            uint32_t i1 = indices[tri + 1];
+            uint32_t i2 = indices[tri + 2];
+            if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+                continue;
+            }
+
+            int materialIndex = ResolveTriangleMaterialIndex(*mesh, tri);
+            std::shared_ptr<Material> material = renderer->getMaterial(static_cast<uint32_t>(std::max(materialIndex, 0)));
+            if (!material || material->getEmissionStrength() <= 0.0f) {
+                continue;
+            }
+
+            const Vertex& v0 = vertices[i0];
+            const Vertex& v1 = vertices[i1];
+            const Vertex& v2 = vertices[i2];
+
+            Math::Vector3 p0 = worldMatrix.transformPoint(v0.position);
+            Math::Vector3 p1 = worldMatrix.transformPoint(v1.position);
+            Math::Vector3 p2 = worldMatrix.transformPoint(v2.position);
+            float area = TriangleArea(p0, p1, p2);
+            if (area <= 1e-5f) {
+                continue;
+            }
+
+            Math::Vector2 centroidUV = (v0.texCoord + v1.texCoord + v2.texCoord) / 3.0f;
+            Math::Vector3 centroidAlbedo;
+            Math::Vector3 centroidEmission;
+            float centroidAO = 1.0f;
+            ResolveMaterialSample(material, centroidUV, centroidAlbedo, centroidEmission, centroidAO);
+            float luminance = ComputeLuminance(centroidEmission);
+            if (luminance <= 0.01f) {
+                continue;
+            }
+
+            Math::Vector3 n0 = normalMatrix.transformDirection(v0.normal).normalized();
+            Math::Vector3 n1 = normalMatrix.transformDirection(v1.normal).normalized();
+            Math::Vector3 n2 = normalMatrix.transformDirection(v2.normal).normalized();
+            Math::Vector3 triangleNormal = (p1 - p0).cross(p2 - p0).normalized();
+            if (n0.lengthSquared() <= Math::EPSILON) n0 = triangleNormal;
+            if (n1.lengthSquared() <= Math::EPSILON) n1 = triangleNormal;
+            if (n2.lengthSquared() <= Math::EPSILON) n2 = triangleNormal;
+
+            EmissiveTriangleSurface surface;
+            surface.entity = entity;
+            surface.renderer = renderer;
+            surface.p0 = p0;
+            surface.p1 = p1;
+            surface.p2 = p2;
+            surface.n0 = n0.lengthSquared() > Math::EPSILON ? n0 : Math::Vector3::Up;
+            surface.n1 = n1.lengthSquared() > Math::EPSILON ? n1 : Math::Vector3::Up;
+            surface.n2 = n2.lengthSquared() > Math::EPSILON ? n2 : Math::Vector3::Up;
+            surface.uv0 = v0.texCoord;
+            surface.uv1 = v1.texCoord;
+            surface.uv2 = v2.texCoord;
+            surface.materialIndex = materialIndex;
+            surface.twoSided = IsEmitterTwoSided(mesh, material);
+            surface.area = area;
+            surface.weight = std::max(area * luminance, 1e-5f);
+            cumulativeWeight += surface.weight;
+            surface.cumulativeWeight = cumulativeWeight;
+            surfaces.push_back(surface);
+        }
+    }
+
+    return surfaces;
+}
+
+static bool SampleEmissiveTriangleSurface(const std::vector<EmissiveTriangleSurface>& surfaces,
+                                          uint32_t sampleSeed,
+                                          int sampleIndex,
+                                          EmissiveSurfaceSample& outSample) {
+    outSample = EmissiveSurfaceSample();
+    if (surfaces.empty()) {
+        return false;
+    }
+
+    float totalWeight = std::max(surfaces.back().cumulativeWeight, 1e-5f);
+    float selection = HashToUnitFloat(sampleSeed + static_cast<uint32_t>(sampleIndex * 92821 + 17)) * totalWeight;
+    auto it = std::lower_bound(
+        surfaces.begin(),
+        surfaces.end(),
+        selection,
+        [](const EmissiveTriangleSurface& surface, float value) {
+            return surface.cumulativeWeight < value;
+        }
+    );
+    if (it == surfaces.end()) {
+        it = surfaces.end() - 1;
+    }
+
+    Math::Vector2 random = Random2D(
+        sampleSeed + static_cast<uint32_t>(sampleIndex * 2 + 101),
+        sampleSeed + static_cast<uint32_t>(sampleIndex * 2 + 102)
+    );
+    float sqrtU = std::sqrt(Math::Clamp(random.x, 0.0f, 1.0f));
+    float bary0 = 1.0f - sqrtU;
+    float bary1 = sqrtU * (1.0f - random.y);
+    float bary2 = 1.0f - bary0 - bary1;
+
+    Math::Vector3 positionWS = it->p0 * bary0 + it->p1 * bary1 + it->p2 * bary2;
+    Math::Vector3 normalWS = (it->n0 * bary0 + it->n1 * bary1 + it->n2 * bary2).normalized();
+    if (normalWS.lengthSquared() <= Math::EPSILON) {
+        normalWS = (it->p1 - it->p0).cross(it->p2 - it->p0).normalized();
+    }
+    Math::Vector2 uv = it->uv0 * bary0 + it->uv1 * bary1 + it->uv2 * bary2;
+
+    std::shared_ptr<Material> material = it->renderer
+        ? it->renderer->getMaterial(static_cast<uint32_t>(std::max(it->materialIndex, 0)))
+        : nullptr;
+    Math::Vector3 sampledAlbedo;
+    Math::Vector3 sampledEmission;
+    float sampledAO = 1.0f;
+    ResolveMaterialSample(material, uv, sampledAlbedo, sampledEmission, sampledAO);
+    if (ComputeLuminance(sampledEmission) <= 0.001f) {
+        return false;
+    }
+
+    outSample.surface = &(*it);
+    outSample.positionWS = positionWS;
+    outSample.normalWS = normalWS.lengthSquared() > Math::EPSILON ? normalWS : Math::Vector3::Up;
+    outSample.uv = uv;
+    outSample.emission = sampledEmission;
+    outSample.pdfArea = std::max((it->weight / totalWeight) / std::max(it->area, 1e-5f), 1e-5f);
+    outSample.twoSided = it->twoSided;
+    return true;
+}
+
+static EmissiveLightingEstimate EstimateEmissiveSurfaceLighting(Scene* scene,
+                                                                const std::vector<EmissiveTriangleSurface>& surfaces,
+                                                                const Math::Vector3& positionWS,
+                                                                const Math::Vector3& normalWS,
+                                                                uint32_t sampleSeed,
+                                                                int sampleCount) {
+    EmissiveLightingEstimate estimate;
+    if (!scene || surfaces.empty()) {
+        return estimate;
+    }
+
+    PhysicsWorld* physicsWorld = scene->getPhysicsWorld();
+    sampleCount = std::max(1, std::min(16, sampleCount));
+    Math::Vector3 origin = positionWS + normalWS * 0.0035f;
+
+    for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
+        EmissiveSurfaceSample sample;
+        if (!SampleEmissiveTriangleSurface(surfaces, sampleSeed, sampleIndex, sample)) {
+            continue;
+        }
+
+        Math::Vector3 toEmitter = sample.positionWS - origin;
+        float distanceSq = toEmitter.lengthSquared();
+        if (distanceSq <= 1e-4f) {
+            continue;
+        }
+        float distance = std::sqrt(distanceSq);
+        Math::Vector3 lightDir = toEmitter / distance;
+        float nDotL = std::max(normalWS.dot(lightDir), 0.0f);
+        if (nDotL <= 0.0f) {
+            continue;
+        }
+
+        float emitterCos = sample.twoSided
+            ? std::abs(sample.normalWS.dot(-lightDir))
+            : std::max(sample.normalWS.dot(-lightDir), 0.0f);
+        if (emitterCos <= 0.0f) {
+            continue;
+        }
+
+        if (physicsWorld) {
+            constexpr float kHitTolerance = 0.01f;
+            PhysicsRaycastHit hit;
+            if (physicsWorld->raycast(origin,
+                                      lightDir,
+                                      std::max(0.0f, distance - kHitTolerance),
+                                      hit,
+                                      PhysicsWorld::kAllLayersMask,
+                                      false,
+                                      nullptr)) {
+                continue;
+            }
+        }
+
+        float geometry = (nDotL * emitterCos) / std::max(distanceSq, 0.01f);
+        Math::Vector3 contribution = sample.emission * (geometry / std::max(sample.pdfArea, 1e-5f));
+        contribution = ClampColor(contribution, 32.0f);
+        estimate.irradiance += contribution;
+
+        float weight = std::max(ComputeLuminance(contribution), 0.0f);
+        estimate.weightedDirection += lightDir * weight;
+        estimate.directionWeight += weight;
+        estimate.referenceNoL += nDotL * weight;
+    }
+
+    float invSampleCount = 1.0f / static_cast<float>(sampleCount);
+    estimate.irradiance *= invSampleCount;
+    estimate.weightedDirection *= invSampleCount;
+    estimate.directionWeight *= invSampleCount;
+    estimate.referenceNoL *= invSampleCount;
+    return estimate;
 }
 
 static Math::Vector3 BakeLightContribution(const BakedDirectLight& light,
@@ -164,6 +1229,870 @@ static Math::Vector3 BakeLightContribution(const BakedDirectLight& light,
         scaledIntensity *= 0.075f;
     }
     return light.color * (scaledIntensity * attenuation * nDotL);
+}
+
+static bool ComputeIncidentLightDirection(const BakedDirectLight& light,
+                                          const Math::Vector3& positionWS,
+                                          const Math::Vector3& normalWS,
+                                          Math::Vector3& outLightDir,
+                                          float& outReferenceNdotL) {
+    switch (light.type) {
+        case Light::Type::Directional:
+            outLightDir = (-light.directionWS).normalized();
+            break;
+        case Light::Type::Point:
+        case Light::Type::Spot:
+        case Light::Type::AreaRect:
+        case Light::Type::AreaDisk:
+        case Light::Type::EmissiveMesh: {
+            Math::Vector3 toLight = light.positionWS - positionWS;
+            float distance = toLight.length();
+            if (distance <= Math::EPSILON) {
+                return false;
+            }
+            outLightDir = toLight / distance;
+            break;
+        }
+    }
+
+    if (outLightDir.lengthSquared() <= Math::EPSILON) {
+        return false;
+    }
+
+    outReferenceNdotL = std::max(normalWS.dot(outLightDir), 0.0f);
+    return outReferenceNdotL > 0.0f;
+}
+
+static bool IsDirectLightVisible(Scene* scene,
+                                 const BakedDirectLight& light,
+                                 const Math::Vector3& positionWS,
+                                 const Math::Vector3& normalWS) {
+    if (!scene || !light.castShadows) {
+        return true;
+    }
+
+    PhysicsWorld* physicsWorld = scene->getPhysicsWorld();
+    if (!physicsWorld) {
+        return true;
+    }
+
+    constexpr float kMinOriginBias = 0.0025f;
+    constexpr float kMinHitTolerance = 0.01f;
+
+    float normalBias = std::max(kMinOriginBias, light.shadowNormalBias * 8.0f);
+    float hitTolerance = std::max(kMinHitTolerance, light.shadowBias * 32.0f);
+    Math::Vector3 origin = positionWS + normalWS * normalBias;
+
+    Math::Vector3 rayDirection = Math::Vector3::Zero;
+    float maxDistance = 0.0f;
+
+    switch (light.type) {
+        case Light::Type::Directional: {
+            rayDirection = (-light.directionWS).normalized();
+            if (rayDirection.lengthSquared() <= Math::EPSILON) {
+                return true;
+            }
+            maxDistance = std::max(light.shadowDistance, 200.0f);
+            break;
+        }
+        case Light::Type::Point:
+        case Light::Type::Spot:
+        case Light::Type::AreaRect:
+        case Light::Type::AreaDisk:
+        case Light::Type::EmissiveMesh: {
+            Math::Vector3 toLight = light.positionWS - origin;
+            float distance = toLight.length();
+            if (distance <= Math::EPSILON) {
+                return true;
+            }
+            rayDirection = toLight / distance;
+            maxDistance = std::max(0.0f, distance - hitTolerance);
+            break;
+        }
+    }
+
+    if (maxDistance <= Math::EPSILON) {
+        return true;
+    }
+
+    PhysicsRaycastHit hit;
+    if (!physicsWorld->raycast(origin,
+                               rayDirection,
+                               maxDistance,
+                               hit,
+                               PhysicsWorld::kAllLayersMask,
+                               false,
+                               nullptr)) {
+        return true;
+    }
+
+    return hit.distance <= hitTolerance;
+}
+
+static Math::Vector3 SampleBakeEnvironmentRadiance(const SceneEnvironmentSettings& environment,
+                                                   const Math::Vector3& directionWS) {
+    float up = Math::Clamp(directionWS.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    Math::Vector3 ambient = environment.ambientColor * std::max(environment.ambientIntensity, 0.0f);
+    Math::Vector3 skyTint = MultiplyColor(environment.tint, Math::Vector3(0.55f, 0.65f, 0.8f));
+    Math::Vector3 horizonTint = MultiplyColor(environment.tint, Math::Vector3(0.45f, 0.47f, 0.5f));
+    Math::Vector3 groundTint = MultiplyColor(environment.tint, Math::Vector3(0.14f, 0.12f, 0.1f));
+    float skyWeight = std::pow(up, 0.35f);
+    float groundWeight = std::pow(1.0f - up, 1.75f);
+    Math::Vector3 sky = (skyTint * skyWeight + horizonTint * (1.0f - skyWeight)) * std::max(environment.skyIntensity, 0.0f);
+    Math::Vector3 ground = groundTint * (groundWeight * 0.35f);
+    Math::Vector3 ibl = sky * std::max(environment.iblIntensity, 0.0f);
+    return ClampColor(ambient + ibl + ground, 8.0f);
+}
+
+static void BuildOrthonormalBasis(const Math::Vector3& normal,
+                                  Math::Vector3& outTangent,
+                                  Math::Vector3& outBitangent) {
+    Math::Vector3 reference = (std::abs(normal.y) < 0.999f) ? Math::Vector3::Up : Math::Vector3::Right;
+    outTangent = normal.cross(reference).normalized();
+    if (outTangent.lengthSquared() <= Math::EPSILON) {
+        reference = Math::Vector3::Forward;
+        outTangent = normal.cross(reference).normalized();
+    }
+    outBitangent = outTangent.cross(normal).normalized();
+}
+
+static Math::Vector3 SampleCosineHemisphere(const Math::Vector3& normalWS, const Math::Vector2& random) {
+    float r = std::sqrt(Math::Clamp(random.x, 0.0f, 1.0f));
+    float phi = 2.0f * Math::PI * random.y;
+    float x = r * std::cos(phi);
+    float y = r * std::sin(phi);
+    float z = std::sqrt(Math::Clamp(1.0f - random.x, 0.0f, 1.0f));
+
+    Math::Vector3 tangent;
+    Math::Vector3 bitangent;
+    BuildOrthonormalBasis(normalWS, tangent, bitangent);
+    Math::Vector3 sampleDirection = tangent * x + bitangent * y + normalWS * z;
+    return sampleDirection.normalized();
+}
+
+static void ResolveIndirectSurfaceProperties(Entity* entity,
+                                             const Math::Vector3& pointWS,
+                                             Math::Vector3& outAlbedo,
+                                             Math::Vector3& outEmission,
+                                             float& outAO,
+                                             bool& outContributeGI) {
+    outAlbedo = Math::Vector3(0.7f, 0.7f, 0.7f);
+    outEmission = Math::Vector3::Zero;
+    outAO = 1.0f;
+    outContributeGI = true;
+
+    if (!entity) {
+        return;
+    }
+
+    MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+    if (!renderer) {
+        return;
+    }
+
+    const auto& staticLighting = renderer->getStaticLighting();
+    outContributeGI = staticLighting.contributeGI;
+    SurfaceSample surface;
+    if (FindClosestSurfaceSample(entity, pointWS, surface)) {
+        ResolveMaterialSample(renderer->getMaterial(static_cast<uint32_t>(std::max(surface.materialIndex, 0))),
+                              surface.uv,
+                              outAlbedo,
+                              outEmission,
+                              outAO);
+    } else if (std::shared_ptr<Material> material = renderer->getMaterial()) {
+        ResolveMaterialSample(material, Math::Vector2::Zero, outAlbedo, outEmission, outAO);
+    }
+}
+
+static int ComputeAdaptiveIndirectSampleCount(const SceneSettings& bakeSettings,
+                                              const Math::Vector3& directLighting,
+                                              const Math::Vector3& surfaceEmission,
+                                              float ao) {
+    int baseSamples = std::max(1, std::min(48, bakeSettings.staticLighting.samplesPerTexel / 32));
+    float directComplexity = Math::Clamp(ComputeLuminance(directLighting) / 1.5f, 0.0f, 1.0f);
+    float emissiveComplexity = Math::Clamp(ComputeLuminance(surfaceEmission) / 2.0f, 0.0f, 1.0f);
+    float occlusionComplexity = 1.0f - Math::Clamp(ao, 0.0f, 1.0f);
+    float complexity = Math::Clamp(directComplexity * 0.5f + emissiveComplexity * 0.3f + occlusionComplexity * 0.2f, 0.0f, 1.0f);
+    float multiplier = 0.7f + complexity * 1.7f;
+    return std::max(1, std::min(64, static_cast<int>(std::round(static_cast<float>(baseSamples) * multiplier))));
+}
+
+static Math::Vector3 EstimateIndirectLighting(Scene* scene,
+                                              const SceneSettings& bakeSettings,
+                                              const std::vector<BakedDirectLight>& bakedLights,
+                                              const std::vector<EmissiveTriangleSurface>& emissiveSurfaces,
+                                              const Math::Vector3& positionWS,
+                                              const Math::Vector3& normalWS,
+                                              uint32_t sampleSeed,
+                                              int sampleCount) {
+    if (!scene || bakeSettings.staticLighting.indirectBounces <= 0 || bakeSettings.staticLighting.samplesPerTexel <= 0) {
+        return Math::Vector3::Zero;
+    }
+
+    PhysicsWorld* physicsWorld = scene->getPhysicsWorld();
+    if (!physicsWorld) {
+        return Math::Vector3::Zero;
+    }
+
+    sampleCount = std::max(1, std::min(64, sampleCount));
+    const int bounceCount = std::max(1, std::min(4, bakeSettings.staticLighting.indirectBounces));
+    const Math::Vector3 environmentFallback = SampleBakeEnvironmentRadiance(bakeSettings.environment, normalWS);
+
+    Math::Vector3 accumulatedIndirect = Math::Vector3::Zero;
+    for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
+        Math::Vector3 throughput = Math::Vector3::One;
+        Math::Vector3 bounceOrigin = positionWS + normalWS * 0.005f;
+        Math::Vector3 bounceNormal = normalWS;
+        Math::Vector3 bounceDirection = SampleCosineHemisphere(
+            bounceNormal,
+            Random2D(sampleSeed + static_cast<uint32_t>(sampleIndex * 2 + 1),
+                     sampleSeed + static_cast<uint32_t>(sampleIndex * 2 + 2))
+        );
+
+        for (int bounceIndex = 0; bounceIndex < bounceCount; ++bounceIndex) {
+            PhysicsRaycastHit hit;
+            bool hitScene = physicsWorld->raycast(bounceOrigin,
+                                                  bounceDirection,
+                                                  512.0f,
+                                                  hit,
+                                                  PhysicsWorld::kAllLayersMask,
+                                                  false,
+                                                  nullptr);
+            if (!hitScene || !hit.hit) {
+                accumulatedIndirect += MultiplyColor(throughput, SampleBakeEnvironmentRadiance(bakeSettings.environment, bounceDirection));
+                break;
+            }
+
+            Math::Vector3 hitNormal = hit.normal.normalized();
+            if (hitNormal.lengthSquared() <= Math::EPSILON) {
+                hitNormal = (-bounceDirection).normalized();
+            } else if (hitNormal.dot(bounceDirection) > 0.0f) {
+                hitNormal = -hitNormal;
+            }
+
+            Math::Vector3 surfaceAlbedo;
+            Math::Vector3 surfaceEmission;
+            float surfaceAO = 1.0f;
+            bool contributeGI = true;
+            ResolveIndirectSurfaceProperties(hit.entity, hit.point, surfaceAlbedo, surfaceEmission, surfaceAO, contributeGI);
+            if (!contributeGI) {
+                break;
+            }
+
+            Math::Vector3 directBounce = Math::Vector3::Zero;
+            Math::Vector3 shadingPoint = hit.point + hitNormal * 0.0035f;
+            for (const BakedDirectLight& light : bakedLights) {
+                Math::Vector3 contribution = BakeLightContribution(light, shadingPoint, hitNormal);
+                if (contribution.lengthSquared() <= Math::EPSILON) {
+                    continue;
+                }
+                if (!IsDirectLightVisible(scene, light, shadingPoint, hitNormal)) {
+                    continue;
+                }
+                directBounce += contribution;
+            }
+            if (!emissiveSurfaces.empty()) {
+                EmissiveLightingEstimate emissiveBounce = EstimateEmissiveSurfaceLighting(
+                    scene,
+                    emissiveSurfaces,
+                    shadingPoint,
+                    hitNormal,
+                    sampleSeed + static_cast<uint32_t>(sampleIndex * 271 + bounceIndex * 3571 + 911),
+                    std::max(1, std::min(4, sampleCount / 4))
+                );
+                directBounce += emissiveBounce.irradiance;
+            }
+
+            Math::Vector3 lambert = surfaceAlbedo * (surfaceAO / Math::PI);
+            accumulatedIndirect += MultiplyColor(throughput, MultiplyColor(lambert, directBounce + surfaceEmission));
+
+            if (bounceIndex == bounceCount - 1) {
+                accumulatedIndirect += MultiplyColor(throughput, MultiplyColor(lambert, environmentFallback * 0.35f));
+                break;
+            }
+
+            throughput = MultiplyColor(throughput, surfaceAlbedo * (surfaceAO * 0.82f));
+            float rrProbability = Math::Clamp(std::max(throughput.x, std::max(throughput.y, throughput.z)), 0.1f, 0.95f);
+            if (bounceIndex > 0 && HashToUnitFloat(sampleSeed + static_cast<uint32_t>(sampleIndex * 17 + bounceIndex * 131)) > rrProbability) {
+                break;
+            }
+            if (bounceIndex > 0) {
+                throughput /= rrProbability;
+            }
+
+            bounceOrigin = hit.point + hitNormal * 0.005f;
+            bounceNormal = hitNormal;
+            bounceDirection = SampleCosineHemisphere(
+                bounceNormal,
+                Random2D(sampleSeed + static_cast<uint32_t>((sampleIndex + 1) * 193 + bounceIndex * 37),
+                         sampleSeed + static_cast<uint32_t>((sampleIndex + 1) * 389 + bounceIndex * 53))
+            );
+        }
+    }
+
+    return ClampColor(accumulatedIndirect / static_cast<float>(sampleCount), 12.0f);
+}
+
+struct ProbeVolumeFileHeader {
+    char magic[4];
+    uint32_t version = 3u;
+    uint32_t countX = 0u;
+    uint32_t countY = 0u;
+    uint32_t countZ = 0u;
+    float boundsMin[3] = {0.0f, 0.0f, 0.0f};
+    float boundsMax[3] = {0.0f, 0.0f, 0.0f};
+};
+
+struct ProbeVolumeFileRecord {
+    float ambientCube[6][4] = {};
+    float specularCube[6][4] = {};
+    float positionAndValidity[4] = {};
+    float visibility[2][4] = {};
+};
+
+static std::string SanitizeLightingArtifactStem(std::string value) {
+    if (value.empty()) {
+        value = "Scene";
+    }
+    for (char& c : value) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') {
+            c = '_';
+        }
+    }
+    return value;
+}
+
+static bool ComputeStaticGeometryBounds(Scene* scene,
+                                        Math::Vector3& outMin,
+                                        Math::Vector3& outMax) {
+    outMin = Math::Vector3(std::numeric_limits<float>::max());
+    outMax = Math::Vector3(std::numeric_limits<float>::lowest());
+    bool hasBounds = false;
+
+    if (!scene) {
+        return false;
+    }
+
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity || !entity->isActiveInHierarchy() || entity->isEditorOnly()) {
+            continue;
+        }
+
+        MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || entity->getComponent<SkinnedMeshRenderer>()) {
+            continue;
+        }
+
+        const auto& staticLighting = renderer->getStaticLighting();
+        if (!staticLighting.staticGeometry) {
+            continue;
+        }
+
+        std::shared_ptr<Mesh> mesh = renderer->getMesh();
+        if (!mesh || mesh->getVertices().empty() || mesh->getIndices().size() < 3) {
+            continue;
+        }
+
+        outMin = Math::Vector3::Min(outMin, renderer->getBoundsMin());
+        outMax = Math::Vector3::Max(outMax, renderer->getBoundsMax());
+        hasBounds = true;
+    }
+
+    if (!hasBounds) {
+        return false;
+    }
+
+    Math::Vector3 extent = outMax - outMin;
+    Math::Vector3 margin = Math::Vector3::Max(extent * 0.05f, Math::Vector3(0.75f, 0.75f, 0.75f));
+    outMin -= margin;
+    outMax += margin;
+    return true;
+}
+
+static Math::Vector3 ComputeProbeGridPosition(const Math::Vector3& boundsMin,
+                                              const Math::Vector3& boundsMax,
+                                              int x,
+                                              int y,
+                                              int z,
+                                              int countX,
+                                              int countY,
+                                              int countZ) {
+    float tx = (countX > 1) ? static_cast<float>(x) / static_cast<float>(countX - 1) : 0.5f;
+    float ty = (countY > 1) ? static_cast<float>(y) / static_cast<float>(countY - 1) : 0.5f;
+    float tz = (countZ > 1) ? static_cast<float>(z) / static_cast<float>(countZ - 1) : 0.5f;
+    return Math::Vector3(
+        Math::Lerp(boundsMin.x, boundsMax.x, tx),
+        Math::Lerp(boundsMin.y, boundsMax.y, ty),
+        Math::Lerp(boundsMin.z, boundsMax.z, tz)
+    );
+}
+
+static float TraceProbeVisibilityDistance(Scene* scene,
+                                          const Math::Vector3& origin,
+                                          const Math::Vector3& direction,
+                                          float maxDistance) {
+    PhysicsWorld* physicsWorld = scene ? scene->getPhysicsWorld() : nullptr;
+    if (!physicsWorld || maxDistance <= Math::EPSILON) {
+        return maxDistance;
+    }
+
+    PhysicsRaycastHit hit;
+    Math::Vector3 rayDirection = direction.normalized();
+    if (rayDirection.lengthSquared() <= Math::EPSILON) {
+        return maxDistance;
+    }
+
+    Math::Vector3 rayOrigin = origin + rayDirection * 0.02f;
+    if (!physicsWorld->raycast(rayOrigin,
+                               rayDirection,
+                               maxDistance,
+                               hit,
+                               PhysicsWorld::kAllLayersMask,
+                               false,
+                               nullptr)) {
+        return maxDistance;
+    }
+
+    return Math::Clamp(hit.distance, 0.02f, maxDistance);
+}
+
+static Math::Vector3 RelocateProbePosition(Scene* scene,
+                                           const Math::Vector3& candidatePosition,
+                                           const Math::Vector3& boundsMin,
+                                           const Math::Vector3& boundsMax,
+                                           float clearanceDistance,
+                                           float traceDistance,
+                                           float& outValidity) {
+    static const Math::Vector3 probeDirections[6] = {
+        Math::Vector3::Right,
+        -Math::Vector3::Right,
+        Math::Vector3::Up,
+        -Math::Vector3::Up,
+        Math::Vector3::Forward,
+        -Math::Vector3::Forward
+    };
+
+    Math::Vector3 position = Math::Vector3::Clamp(candidatePosition, boundsMin, boundsMax);
+    outValidity = 1.0f;
+
+    PhysicsWorld* physicsWorld = scene ? scene->getPhysicsWorld() : nullptr;
+    if (!physicsWorld) {
+        return position;
+    }
+
+    clearanceDistance = std::max(clearanceDistance, 0.08f);
+    traceDistance = std::max(traceDistance, clearanceDistance * 2.0f);
+
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        Math::Vector3 push = Math::Vector3::Zero;
+        float visibilityDistances[6] = {};
+        float openness = 0.0f;
+
+        for (int directionIndex = 0; directionIndex < 6; ++directionIndex) {
+            float hitDistance = TraceProbeVisibilityDistance(scene, position, probeDirections[directionIndex], traceDistance);
+            visibilityDistances[directionIndex] = hitDistance;
+            openness += Math::Clamp(hitDistance / traceDistance, 0.0f, 1.0f);
+            if (hitDistance < clearanceDistance) {
+                push -= probeDirections[directionIndex] * (clearanceDistance - hitDistance);
+            }
+        }
+
+        outValidity = Math::Clamp(openness / 6.0f, 0.08f, 1.0f);
+
+        std::vector<PhysicsOverlapHit> overlaps;
+        bool embeddedInGeometry = physicsWorld->overlapSphere(position,
+                                                              clearanceDistance * 0.35f,
+                                                              overlaps,
+                                                              PhysicsWorld::kAllLayersMask,
+                                                              false,
+                                                              nullptr) > 0;
+        if (!embeddedInGeometry && push.lengthSquared() <= Math::EPSILON) {
+            break;
+        }
+
+        if (push.lengthSquared() <= Math::EPSILON) {
+            int bestDirection = 0;
+            for (int directionIndex = 1; directionIndex < 6; ++directionIndex) {
+                if (visibilityDistances[directionIndex] > visibilityDistances[bestDirection]) {
+                    bestDirection = directionIndex;
+                }
+            }
+            push = probeDirections[bestDirection] * clearanceDistance;
+            outValidity *= 0.75f;
+        }
+
+        float pushLength = std::min(clearanceDistance * 0.75f, std::max(push.length(), 0.02f));
+        position = Math::Vector3::Clamp(position + push.normalized() * pushLength, boundsMin, boundsMax);
+    }
+
+    return position;
+}
+
+static Math::Vector3 EvaluateBakedLightingAtPoint(Scene* scene,
+                                                  const SceneSettings& bakeSettings,
+                                                  const std::vector<BakedDirectLight>& bakedLights,
+                                                  const std::vector<EmissiveTriangleSurface>& emissiveSurfaces,
+                                                  const Math::Vector3& positionWS,
+                                                  const Math::Vector3& normalWS,
+                                                  uint32_t sampleSeed,
+                                                  int indirectSamples) {
+    Math::Vector3 direct = Math::Vector3::Zero;
+    for (const BakedDirectLight& light : bakedLights) {
+        Math::Vector3 contribution = BakeLightContribution(light, positionWS, normalWS);
+        if (contribution.lengthSquared() <= Math::EPSILON) {
+            continue;
+        }
+        if (!IsDirectLightVisible(scene, light, positionWS, normalWS)) {
+            continue;
+        }
+        direct += contribution;
+    }
+
+    if (!emissiveSurfaces.empty()) {
+        EmissiveLightingEstimate emissive = EstimateEmissiveSurfaceLighting(
+            scene,
+            emissiveSurfaces,
+            positionWS,
+            normalWS,
+            sampleSeed ^ 0x9e3779b9u,
+            std::max(1, std::min(8, indirectSamples / 12))
+        );
+        direct += emissive.irradiance;
+    }
+
+    Math::Vector3 indirect = EstimateIndirectLighting(
+        scene,
+        bakeSettings,
+        bakedLights,
+        emissiveSurfaces,
+        positionWS,
+        normalWS,
+        sampleSeed,
+        indirectSamples
+    );
+    return ClampColor(direct + indirect, 16.0f);
+}
+
+static Math::Vector3 EvaluateSpecularProbeLightingAtPoint(Scene* scene,
+                                                          const SceneSettings& bakeSettings,
+                                                          const std::vector<BakedDirectLight>& bakedLights,
+                                                          const std::vector<EmissiveTriangleSurface>& emissiveSurfaces,
+                                                          const Math::Vector3& positionWS,
+                                                          const Math::Vector3& sampleDirectionWS,
+                                                          uint32_t sampleSeed,
+                                                          int indirectSamples) {
+    Math::Vector3 directionWS = sampleDirectionWS.normalized();
+    if (directionWS.lengthSquared() <= Math::EPSILON) {
+        return Math::Vector3::Zero;
+    }
+
+    Math::Vector3 radiance = SampleBakeEnvironmentRadiance(bakeSettings.environment, directionWS);
+    for (const BakedDirectLight& light : bakedLights) {
+        Math::Vector3 incidentDir = Math::Vector3::Zero;
+        float referenceNoL = 0.0f;
+        if (!ComputeIncidentLightDirection(light, positionWS, directionWS, incidentDir, referenceNoL)) {
+            continue;
+        }
+        if (!IsDirectLightVisible(scene, light, positionWS, directionWS)) {
+            continue;
+        }
+
+        Math::Vector3 directionalContribution = BakeLightContribution(light, positionWS, directionWS);
+        if (directionalContribution.lengthSquared() <= Math::EPSILON) {
+            continue;
+        }
+
+        float alignment = Math::Clamp(directionWS.dot(incidentDir), 0.0f, 1.0f);
+        float lobe = 0.15f + 0.85f * alignment * alignment;
+        radiance += directionalContribution * lobe * 1.35f;
+    }
+
+    if (!emissiveSurfaces.empty()) {
+        EmissiveLightingEstimate emissive = EstimateEmissiveSurfaceLighting(
+            scene,
+            emissiveSurfaces,
+            positionWS,
+            directionWS,
+            sampleSeed ^ 0x6a09e667u,
+            std::max(1, std::min(8, indirectSamples / 10))
+        );
+        radiance += emissive.irradiance;
+    }
+
+    Math::Vector3 indirect = EstimateIndirectLighting(
+        scene,
+        bakeSettings,
+        bakedLights,
+        emissiveSurfaces,
+        positionWS,
+        directionWS,
+        sampleSeed ^ 0xbb67ae85u,
+        std::max(1, indirectSamples / 2)
+    );
+    radiance += indirect * 0.65f;
+    return ClampColor(radiance, 24.0f);
+}
+
+static std::string BuildProbeVolumeArtifactPath(Scene* scene,
+                                                const SceneSettings& bakeSettings,
+                                                const std::string& scenePath) {
+    std::filesystem::path outputDir = bakeSettings.staticLighting.outputDirectory.empty()
+        ? std::filesystem::path("Library/BakedLighting")
+        : std::filesystem::path(bakeSettings.staticLighting.outputDirectory);
+    if (outputDir.is_relative()) {
+        outputDir = std::filesystem::current_path() / outputDir;
+    }
+
+    std::string sceneStem = !scenePath.empty()
+        ? std::filesystem::path(scenePath).stem().string()
+        : (scene ? scene->getName() : std::string("Scene"));
+    sceneStem = SanitizeLightingArtifactStem(sceneStem);
+    return (outputDir / (sceneStem + "_probes.bin")).lexically_normal().string();
+}
+
+static bool BakeProbeVolume(Scene* scene,
+                            const std::string& scenePath,
+                            const SceneSettings& bakeSettings,
+                            const std::vector<BakedDirectLight>& bakedLights,
+                            const std::vector<EmissiveTriangleSurface>& emissiveSurfaces) {
+    if (!scene || !bakeSettings.staticLighting.probeVolume) {
+        return false;
+    }
+
+    int countX = std::max(1, std::min(32, bakeSettings.staticLighting.probeCountX));
+    int countY = std::max(1, std::min(16, bakeSettings.staticLighting.probeCountY));
+    int countZ = std::max(1, std::min(32, bakeSettings.staticLighting.probeCountZ));
+    int probeSamples = std::max(8, std::min(256, bakeSettings.staticLighting.probeSamples));
+
+    Math::Vector3 boundsMin;
+    Math::Vector3 boundsMax;
+    if (!ComputeStaticGeometryBounds(scene, boundsMin, boundsMax)) {
+        return false;
+    }
+
+    Math::Vector3 extent = Math::Vector3::Max(boundsMax - boundsMin, Math::Vector3(0.5f, 0.5f, 0.5f));
+    auto axisSpacing = [](float axisExtent, int count) -> float {
+        return (count > 1) ? (axisExtent / static_cast<float>(count - 1)) : axisExtent;
+    };
+    float spacingX = axisSpacing(extent.x, countX);
+    float spacingY = axisSpacing(extent.y, countY);
+    float spacingZ = axisSpacing(extent.z, countZ);
+    float minSpacing = std::max(0.25f, std::min(spacingX, std::min(spacingY, spacingZ)));
+    float maxSpacing = std::max(spacingX, std::max(spacingY, spacingZ));
+    float relocationClearance = std::max(0.12f, minSpacing * 0.3f);
+    float visibilityDistance = std::max(1.5f, maxSpacing * 1.75f);
+
+    std::vector<ProbeVolumeFileRecord> records(static_cast<size_t>(countX) * static_cast<size_t>(countY) * static_cast<size_t>(countZ));
+    const Math::Vector3 probeNormals[6] = {
+        Math::Vector3::Right,
+        -Math::Vector3::Right,
+        Math::Vector3::Up,
+        -Math::Vector3::Up,
+        Math::Vector3::Forward,
+        -Math::Vector3::Forward
+    };
+
+    size_t probeIndex = 0;
+    for (int z = 0; z < countZ; ++z) {
+        for (int y = 0; y < countY; ++y) {
+            for (int x = 0; x < countX; ++x) {
+                Math::Vector3 gridPositionWS = ComputeProbeGridPosition(boundsMin, boundsMax, x, y, z, countX, countY, countZ);
+                float probeValidity = 1.0f;
+                Math::Vector3 positionWS = RelocateProbePosition(scene,
+                                                                 gridPositionWS,
+                                                                 boundsMin,
+                                                                 boundsMax,
+                                                                 relocationClearance,
+                                                                 visibilityDistance,
+                                                                 probeValidity);
+                ProbeVolumeFileRecord& record = records[probeIndex++];
+                record.positionAndValidity[0] = positionWS.x;
+                record.positionAndValidity[1] = positionWS.y;
+                record.positionAndValidity[2] = positionWS.z;
+                record.positionAndValidity[3] = probeValidity;
+
+                float probeVisibility[6] = {};
+                for (int faceIndex = 0; faceIndex < 6; ++faceIndex) {
+                    probeVisibility[faceIndex] = TraceProbeVisibilityDistance(scene,
+                                                                              positionWS,
+                                                                              probeNormals[faceIndex],
+                                                                              visibilityDistance);
+                    Math::Vector3 lighting = EvaluateBakedLightingAtPoint(
+                        scene,
+                        bakeSettings,
+                        bakedLights,
+                        emissiveSurfaces,
+                        positionWS + probeNormals[faceIndex] * 0.02f,
+                        probeNormals[faceIndex],
+                        static_cast<uint32_t>((x + 1) * 73856093u)
+                            ^ static_cast<uint32_t>((y + 1) * 19349663u)
+                            ^ static_cast<uint32_t>((z + 1) * 83492791u)
+                            ^ static_cast<uint32_t>((faceIndex + 1) * 2654435761u),
+                        probeSamples
+                    );
+                    record.ambientCube[faceIndex][0] = lighting.x;
+                    record.ambientCube[faceIndex][1] = lighting.y;
+                    record.ambientCube[faceIndex][2] = lighting.z;
+                    record.ambientCube[faceIndex][3] = 1.0f;
+
+                    Math::Vector3 specularLighting = EvaluateSpecularProbeLightingAtPoint(
+                        scene,
+                        bakeSettings,
+                        bakedLights,
+                        emissiveSurfaces,
+                        positionWS + probeNormals[faceIndex] * 0.02f,
+                        probeNormals[faceIndex],
+                        static_cast<uint32_t>((x + 1) * 2166136261u)
+                            ^ static_cast<uint32_t>((y + 1) * 16777619u)
+                            ^ static_cast<uint32_t>((z + 1) * 709607u)
+                            ^ static_cast<uint32_t>((faceIndex + 1) * 40503u),
+                        probeSamples
+                    );
+                    record.specularCube[faceIndex][0] = specularLighting.x;
+                    record.specularCube[faceIndex][1] = specularLighting.y;
+                    record.specularCube[faceIndex][2] = specularLighting.z;
+                    record.specularCube[faceIndex][3] = 1.0f;
+                }
+                record.visibility[0][0] = probeVisibility[0];
+                record.visibility[0][1] = probeVisibility[1];
+                record.visibility[0][2] = probeVisibility[2];
+                record.visibility[0][3] = probeVisibility[3];
+                record.visibility[1][0] = probeVisibility[4];
+                record.visibility[1][1] = probeVisibility[5];
+                record.visibility[1][2] = visibilityDistance;
+                record.visibility[1][3] = 0.0f;
+            }
+        }
+    }
+
+    std::string outputPath = BuildProbeVolumeArtifactPath(scene, bakeSettings, scenePath);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(outputPath).parent_path(), ec);
+
+    ProbeVolumeFileHeader header{};
+    header.magic[0] = 'C';
+    header.magic[1] = 'P';
+    header.magic[2] = 'R';
+    header.magic[3] = 'B';
+    header.version = 3u;
+    header.countX = static_cast<uint32_t>(countX);
+    header.countY = static_cast<uint32_t>(countY);
+    header.countZ = static_cast<uint32_t>(countZ);
+    header.boundsMin[0] = boundsMin.x;
+    header.boundsMin[1] = boundsMin.y;
+    header.boundsMin[2] = boundsMin.z;
+    header.boundsMax[0] = boundsMax.x;
+    header.boundsMax[1] = boundsMax.y;
+    header.boundsMax[2] = boundsMax.z;
+
+    std::ofstream out(outputPath, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    out.write(reinterpret_cast<const char*>(records.data()), static_cast<std::streamsize>(records.size() * sizeof(ProbeVolumeFileRecord)));
+    if (!out.good()) {
+        return false;
+    }
+
+    SceneSettings updatedSettings = scene->getSettings();
+    updatedSettings.staticLighting.probeVolume = true;
+    updatedSettings.staticLighting.probeCountX = countX;
+    updatedSettings.staticLighting.probeCountY = countY;
+    updatedSettings.staticLighting.probeCountZ = countZ;
+    updatedSettings.staticLighting.probeSamples = probeSamples;
+    updatedSettings.staticLighting.probeBoundsMin = boundsMin;
+    updatedSettings.staticLighting.probeBoundsMax = boundsMax;
+    updatedSettings.staticLighting.probeDataPath = outputPath;
+    scene->setSettings(updatedSettings);
+    return true;
+}
+
+static void DenoiseIndirectAtlas(const std::vector<float>& guideDirectLighting,
+                                 const std::vector<uint16_t>& coverage,
+                                 int width,
+                                 int height,
+                                 std::vector<float>& indirectLighting) {
+    if (width <= 0 || height <= 0 || indirectLighting.empty() || guideDirectLighting.size() != indirectLighting.size()) {
+        return;
+    }
+
+    std::vector<float> ping = indirectLighting;
+    std::vector<float> pong(indirectLighting.size(), 0.0f);
+    const int stepWidths[3] = {1, 2, 4};
+    const float spatialWeights[3][3] = {
+        {1.0f / 16.0f, 1.0f / 8.0f, 1.0f / 16.0f},
+        {1.0f / 8.0f, 1.0f / 4.0f, 1.0f / 8.0f},
+        {1.0f / 16.0f, 1.0f / 8.0f, 1.0f / 16.0f}
+    };
+
+    auto loadVec3 = [](const std::vector<float>& buffer, size_t pixelIndex) {
+        return Math::Vector3(buffer[pixelIndex * 3 + 0], buffer[pixelIndex * 3 + 1], buffer[pixelIndex * 3 + 2]);
+    };
+    auto storeVec3 = [](std::vector<float>& buffer, size_t pixelIndex, const Math::Vector3& value) {
+        buffer[pixelIndex * 3 + 0] = value.x;
+        buffer[pixelIndex * 3 + 1] = value.y;
+        buffer[pixelIndex * 3 + 2] = value.z;
+    };
+
+    for (int pass = 0; pass < 3; ++pass) {
+        int step = stepWidths[pass];
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                size_t pixelIndex = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
+                if (coverage[pixelIndex] == 0u) {
+                    storeVec3(pong, pixelIndex, Math::Vector3::Zero);
+                    continue;
+                }
+
+                Math::Vector3 centerIndirect = loadVec3(ping, pixelIndex);
+                float centerGuide = ComputeLuminance(loadVec3(guideDirectLighting, pixelIndex));
+                Math::Vector3 filtered = Math::Vector3::Zero;
+                float totalWeight = 0.0f;
+
+                for (int oy = -1; oy <= 1; ++oy) {
+                    int sampleY = y + oy * step;
+                    if (sampleY < 0 || sampleY >= height) {
+                        continue;
+                    }
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        int sampleX = x + ox * step;
+                        if (sampleX < 0 || sampleX >= width) {
+                            continue;
+                        }
+
+                        size_t sampleIndex = static_cast<size_t>(sampleY) * static_cast<size_t>(width) + static_cast<size_t>(sampleX);
+                        if (coverage[sampleIndex] == 0u) {
+                            continue;
+                        }
+
+                        Math::Vector3 sampleIndirect = loadVec3(ping, sampleIndex);
+                        float sampleGuide = ComputeLuminance(loadVec3(guideDirectLighting, sampleIndex));
+                        float guideDelta = std::abs(sampleGuide - centerGuide);
+                        float colorDelta = (sampleIndirect - centerIndirect).length();
+                        float coverageSimilarity = std::abs(static_cast<float>(coverage[sampleIndex]) - static_cast<float>(coverage[pixelIndex]));
+                        float weight = spatialWeights[oy + 1][ox + 1]
+                            * std::exp(-guideDelta * (2.8f / static_cast<float>(step)))
+                            * std::exp(-colorDelta * (2.0f / static_cast<float>(step)))
+                            * std::exp(-coverageSimilarity * 0.08f);
+                        filtered += sampleIndirect * weight;
+                        totalWeight += weight;
+                    }
+                }
+
+                if (totalWeight > Math::EPSILON) {
+                    filtered /= totalWeight;
+                } else {
+                    filtered = centerIndirect;
+                }
+                storeVec3(pong, pixelIndex, filtered);
+            }
+        }
+        ping.swap(pong);
+    }
+
+    indirectLighting = std::move(ping);
 }
 
 static ModelCacheEntry BuildModelCache(const std::string& path, const SceneCommands::ModelImportOptions& options) {
@@ -1064,6 +2993,11 @@ static std::shared_ptr<Mesh> BuildMesh(const aiMesh* mesh, const Skeleton* skele
         } else {
             vertex.texCoord = Math::Vector2::Zero;
         }
+        if (mesh->HasTextureCoords(1) && mesh->mTextureCoords[1]) {
+            vertex.texCoord1 = Math::Vector2(mesh->mTextureCoords[1][i].x, mesh->mTextureCoords[1][i].y);
+        } else {
+            vertex.texCoord1 = vertex.texCoord;
+        }
         
         if (mesh->HasTangentsAndBitangents()) {
             vertex.tangent = Math::Vector3(mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z);
@@ -1308,6 +3242,7 @@ Entity* SceneCommands::createCube(Scene* scene, const std::string& name) {
     MeshRenderer* renderer = entity->addComponent<MeshRenderer>();
     renderer->setMesh(Mesh::CreateCube(1.0f));
     renderer->setMaterial(Material::CreateDefault());
+    ConfigurePrimitiveStaticLighting(renderer);
     entity->addComponent<PrimitiveMesh>()->setType(PrimitiveType::Cube);
     
     return entity;
@@ -1321,6 +3256,7 @@ Entity* SceneCommands::createSphere(Scene* scene, const std::string& name) {
     MeshRenderer* renderer = entity->addComponent<MeshRenderer>();
     renderer->setMesh(Mesh::CreateSphere(0.5f, 32, 16));
     renderer->setMaterial(Material::CreateDefault());
+    ConfigurePrimitiveStaticLighting(renderer);
     entity->addComponent<PrimitiveMesh>()->setType(PrimitiveType::Sphere);
     
     return entity;
@@ -1334,6 +3270,7 @@ Entity* SceneCommands::createPlane(Scene* scene, const std::string& name) {
     MeshRenderer* renderer = entity->addComponent<MeshRenderer>();
     renderer->setMesh(Mesh::CreatePlane(10.0f, 10.0f, 1, 1));
     renderer->setMaterial(Material::CreateDefault());
+    ConfigurePrimitiveStaticLighting(renderer);
     entity->addComponent<PrimitiveMesh>()->setType(PrimitiveType::Plane);
     
     return entity;
@@ -1347,6 +3284,7 @@ Entity* SceneCommands::createCylinder(Scene* scene, const std::string& name) {
     MeshRenderer* renderer = entity->addComponent<MeshRenderer>();
     renderer->setMesh(Mesh::CreateCylinder(0.5f, 1.0f, 32));
     renderer->setMaterial(Material::CreateDefault());
+    ConfigurePrimitiveStaticLighting(renderer);
     entity->addComponent<PrimitiveMesh>()->setType(PrimitiveType::Cylinder);
     
     return entity;
@@ -1360,6 +3298,7 @@ Entity* SceneCommands::createCone(Scene* scene, const std::string& name) {
     MeshRenderer* renderer = entity->addComponent<MeshRenderer>();
     renderer->setMesh(Mesh::CreateCone(0.5f, 1.0f, 32));
     renderer->setMaterial(Material::CreateDefault());
+    ConfigurePrimitiveStaticLighting(renderer);
     entity->addComponent<PrimitiveMesh>()->setType(PrimitiveType::Cone);
     
     return entity;
@@ -1373,6 +3312,7 @@ Entity* SceneCommands::createTorus(Scene* scene, const std::string& name) {
     MeshRenderer* renderer = entity->addComponent<MeshRenderer>();
     renderer->setMesh(Mesh::CreateTorus(0.75f, 0.25f, 32, 16));
     renderer->setMaterial(Material::CreateDefault());
+    ConfigurePrimitiveStaticLighting(renderer);
     entity->addComponent<PrimitiveMesh>()->setType(PrimitiveType::Torus);
     
     return entity;
@@ -1386,6 +3326,7 @@ Entity* SceneCommands::createCapsule(Scene* scene, const std::string& name) {
     MeshRenderer* renderer = entity->addComponent<MeshRenderer>();
     renderer->setMesh(Mesh::CreateCapsule(0.5f, 2.0f, 16));
     renderer->setMaterial(Material::CreateDefault());
+    ConfigurePrimitiveStaticLighting(renderer);
     entity->addComponent<PrimitiveMesh>()->setType(PrimitiveType::Capsule);
     
     return entity;
@@ -1419,6 +3360,9 @@ Entity* SceneCommands::createPointLight(Scene* scene, const std::string& name) {
     light->setColor(Math::Vector3(1.0f, 1.0f, 1.0f));
     light->setIntensity(800.0f);
     light->setRange(15.0f);
+    // Point-light shadows are cube maps, so enabling them by default is a 6x shadow-pass hit.
+    light->setCastShadows(false);
+    light->setShadowMapResolution(512);
     
     entity->getTransform()->setPosition(Math::Vector3(0, 3, 0));
     
@@ -1436,6 +3380,7 @@ Entity* SceneCommands::createSpotLight(Scene* scene, const std::string& name) {
     light->setIntensity(1200.0f);
     light->setRange(20.0f);
     light->setSpotAngle(45.0f);
+    light->setShadowMapResolution(512);
     
     entity->getTransform()->setPosition(Math::Vector3(0, 5, 0));
     entity->getTransform()->setRotation(
@@ -2097,9 +4042,222 @@ Entity* SceneCommands::buildHLOD(Scene* scene, const std::vector<std::string>& u
     return hlodEntity;
 }
 
-SceneCommands::VertexLightBakeStats SceneCommands::bakeVertexLighting(Scene* scene) {
-    VertexLightBakeStats stats;
+SceneCommands::StaticLightingLayoutStats SceneCommands::buildStaticLightingLayout(Scene* scene, const std::string& scenePath) {
+    StaticLightingLayoutStats stats;
     if (!scene) {
+        return stats;
+    }
+
+    SceneSettings settings = scene->getSettings();
+    SceneStaticLightingSettings& staticLightingSettings = settings.staticLighting;
+    staticLightingSettings.enabled = true;
+    staticLightingSettings.lastBakeHash.clear();
+    scene->setSettings(settings);
+
+    std::vector<StaticLightingLayoutCandidate> candidates;
+    candidates.reserve(scene->getEntityCount());
+
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity || !entity->isActiveInHierarchy() || entity->isEditorOnly()) {
+            continue;
+        }
+
+        auto* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || entity->getComponent<SkinnedMeshRenderer>()) {
+            continue;
+        }
+
+        std::shared_ptr<Mesh> mesh = renderer->getMesh();
+        if (!mesh || mesh->getVertices().empty() || mesh->getIndices().size() < 3) {
+            continue;
+        }
+
+        MeshRenderer::StaticLightingData metadata = renderer->getStaticLighting();
+        metadata.lightmapUVChannel = 1;
+        metadata.lightmapIndex = -1;
+        metadata.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
+        metadata.lightmapPath.clear();
+        metadata.directionalLightmapPath.clear();
+        metadata.shadowmaskPath.clear();
+
+        if (!metadata.staticGeometry) {
+            renderer->setStaticLighting(metadata);
+            continue;
+        }
+        stats.staticGeometryRendererCount += 1;
+
+        bool generatedFallback = false;
+        std::shared_ptr<Mesh> layoutMesh = mesh;
+        if (!HasUsableLightmapUVs(*layoutMesh)) {
+            if (!staticLightingSettings.autoUnwrap) {
+                renderer->setStaticLighting(metadata);
+                stats.skippedRendererCount += 1;
+                continue;
+            }
+            layoutMesh = CreateFallbackLightmapMesh(layoutMesh);
+            generatedFallback = true;
+        }
+        layoutMesh = CreateNormalizedLightmapMesh(layoutMesh);
+        if (!layoutMesh || !HasUsableLightmapUVs(*layoutMesh)) {
+            renderer->setStaticLighting(metadata);
+            stats.skippedRendererCount += 1;
+            continue;
+        }
+
+        if (layoutMesh != mesh) {
+            renderer->setMesh(layoutMesh);
+        }
+
+        float surfaceAreaWS = ComputeWorldSurfaceArea(*layoutMesh, *entity->getTransform());
+        if (surfaceAreaWS <= 0.0001f) {
+            renderer->setStaticLighting(metadata);
+            stats.skippedRendererCount += 1;
+            continue;
+        }
+
+        StaticLightingLayoutCandidate candidate;
+        candidate.entity = entity;
+        candidate.renderer = renderer;
+        candidate.mesh = layoutMesh;
+        candidate.surfaceAreaWS = surfaceAreaWS;
+        candidate.requestedInnerResolution = EstimateLightmapInnerResolution(surfaceAreaWS, staticLightingSettings);
+        candidate.generatedFallbackUVs = generatedFallback;
+        candidates.push_back(candidate);
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const StaticLightingLayoutCandidate& a,
+                                                       const StaticLightingLayoutCandidate& b) {
+        if (a.requestedInnerResolution != b.requestedInnerResolution) {
+            return a.requestedInnerResolution > b.requestedInnerResolution;
+        }
+        return a.surfaceAreaWS > b.surfaceAreaWS;
+    });
+
+    std::vector<ShelfAtlasState> atlases;
+    atlases.reserve(std::max(staticLightingSettings.maxAtlasCount, 1));
+    const int atlasSize = std::max(256, staticLightingSettings.atlasSize);
+    const int padding = std::max(1, staticLightingSettings.unwrapPadding);
+
+    for (auto& candidate : candidates) {
+        int innerResolution = std::min(candidate.requestedInnerResolution, atlasSize - padding * 2);
+        int slotResolution = std::min(atlasSize, innerResolution + padding * 2);
+        if (slotResolution <= padding * 2) {
+            stats.skippedRendererCount += 1;
+            continue;
+        }
+
+        int packedX = 0;
+        int packedY = 0;
+        int assignedAtlasIndex = -1;
+
+        for (auto& atlas : atlases) {
+            if (TryPackShelfRect(atlas, slotResolution, slotResolution, packedX, packedY)) {
+                assignedAtlasIndex = atlas.atlasIndex;
+                break;
+            }
+        }
+
+        if (assignedAtlasIndex < 0) {
+            if (static_cast<int>(atlases.size()) >= std::max(1, staticLightingSettings.maxAtlasCount)) {
+                MeshRenderer::StaticLightingData metadata = candidate.renderer->getStaticLighting();
+                metadata.lightmapIndex = -1;
+                metadata.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
+                candidate.renderer->setStaticLighting(metadata);
+                stats.skippedRendererCount += 1;
+                continue;
+            }
+
+            ShelfAtlasState atlas;
+            atlas.atlasIndex = static_cast<int>(atlases.size());
+            atlas.width = atlasSize;
+            atlas.height = atlasSize;
+            if (!TryPackShelfRect(atlas, slotResolution, slotResolution, packedX, packedY)) {
+                stats.skippedRendererCount += 1;
+                continue;
+            }
+            assignedAtlasIndex = atlas.atlasIndex;
+            atlases.push_back(atlas);
+        }
+
+        float atlasSizeF = static_cast<float>(atlasSize);
+        float scale = static_cast<float>(innerResolution) / atlasSizeF;
+        float offsetX = static_cast<float>(packedX + padding) / atlasSizeF;
+        float offsetY = static_cast<float>(packedY + padding) / atlasSizeF;
+
+        MeshRenderer::StaticLightingData metadata = candidate.renderer->getStaticLighting();
+        metadata.lightmapIndex = assignedAtlasIndex;
+        metadata.lightmapUVChannel = 1;
+        metadata.lightmapScaleOffset = Math::Vector4(scale, scale, offsetX, offsetY);
+        metadata.lightmapPath.clear();
+        metadata.directionalLightmapPath.clear();
+        metadata.shadowmaskPath.clear();
+        candidate.renderer->setStaticLighting(metadata);
+
+        stats.rendererCount += 1;
+        if (candidate.generatedFallbackUVs) {
+            stats.generatedUVRendererCount += 1;
+        } else {
+            stats.reusedUVRendererCount += 1;
+        }
+    }
+
+    stats.atlasCount = static_cast<int>(atlases.size());
+    if (stats.rendererCount > 0) {
+        SceneSerializer::SaveStaticLightingManifest(scene, scenePath);
+    }
+    return stats;
+}
+
+SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene* scene, const std::string& scenePath) {
+    StaticLightmapBakeStats stats;
+    if (!scene) {
+        return stats;
+    }
+
+    std::vector<Light*> stationaryShadowmaskLights;
+    stationaryShadowmaskLights.reserve(4);
+    int markedStaticLightCount = 0;
+    for (const auto& entityPtr : scene->getAllEntities()) {
+        Entity* entity = entityPtr.get();
+        if (!entity) {
+            continue;
+        }
+
+        Light* light = entity->getComponent<Light>();
+        if (!light) {
+            continue;
+        }
+
+        light->setShadowmaskChannel(-1);
+        if (!entity->isActiveInHierarchy() || entity->isEditorOnly() || !light->getContributeToStaticBake()) {
+            continue;
+        }
+        markedStaticLightCount += 1;
+
+        if (light->getMobility() == Light::Mobility::Stationary && stationaryShadowmaskLights.size() < 4u) {
+            stationaryShadowmaskLights.push_back(light);
+        }
+    }
+    for (size_t index = 0; index < stationaryShadowmaskLights.size(); ++index) {
+        stationaryShadowmaskLights[index]->setShadowmaskChannel(static_cast<int>(index));
+    }
+
+    SceneSettings bakeSettings = scene->getSettings();
+    bakeSettings.staticLighting.enabled = true;
+    bakeSettings.staticLighting.directionalLightmaps = true;
+    bakeSettings.staticLighting.shadowmask = !stationaryShadowmaskLights.empty();
+    scene->setSettings(bakeSettings);
+    stats.bakedLightCount = markedStaticLightCount;
+
+    StaticLightingLayoutStats layoutStats = buildStaticLightingLayout(scene, scenePath);
+    stats.staticGeometryRendererCount = layoutStats.staticGeometryRendererCount;
+    stats.layoutRendererCount = layoutStats.rendererCount;
+    stats.layoutSkippedRendererCount = layoutStats.skippedRendererCount;
+    stats.generatedUVRendererCount = layoutStats.generatedUVRendererCount;
+    stats.reusedUVRendererCount = layoutStats.reusedUVRendererCount;
+    StaticLightingManifest manifest = SceneSerializer::BuildStaticLightingManifest(scene, scenePath);
+    if (manifest.atlases.empty()) {
         return stats;
     }
 
@@ -2110,28 +4268,40 @@ SceneCommands::VertexLightBakeStats SceneCommands::bakeVertexLighting(Scene* sce
         if (!entity || !entity->isActiveInHierarchy() || entity->isEditorOnly()) {
             continue;
         }
+
         Light* light = entity->getComponent<Light>();
-        if (!light || !light->getBakeToVertexLighting()) {
+        if (!light || !light->getContributeToStaticBake()) {
             continue;
         }
 
         BakedDirectLight baked;
         baked.type = light->getType();
+        baked.mobility = light->getMobility();
         baked.positionWS = entity->getTransform()->getPosition();
         baked.directionWS = entity->getTransform()->forward().normalized();
         baked.color = ClampColor(light->getEffectiveColor(), 8.0f);
         baked.intensity = std::max(0.0f, light->getIntensity());
         baked.range = std::max(0.0f, light->getRange());
         baked.sourceRadius = std::max(0.0f, light->getSourceRadius());
-
+        baked.castShadows = light->getCastShadows();
+        baked.shadowBias = std::max(0.0f, light->getShadowBias());
+        baked.shadowNormalBias = std::max(0.0f, light->getShadowNormalBias());
+        baked.shadowDistance = std::max(light->getShadowFarPlane(), light->getRange());
+        baked.shadowmaskChannel = light->getShadowmaskChannel();
         float outerRadians = light->getSpotAngle() * Math::DEG_TO_RAD * 0.5f;
         float innerRadians = light->getInnerSpotAngle() * Math::DEG_TO_RAD * 0.5f;
         baked.cosOuter = std::cos(outerRadians);
         baked.cosInner = std::cos(innerRadians);
         bakedLights.push_back(baked);
     }
-    stats.bakedLightCount = static_cast<int>(bakedLights.size());
+    std::vector<EmissiveTriangleSurface> emissiveSurfaces = BuildEmissiveTriangleSurfaces(scene);
+    stats.bakedLightCount = static_cast<int>(bakedLights.size()) + (emissiveSurfaces.empty() ? 0 : 1);
+    if (bakedLights.empty() && emissiveSurfaces.empty()) {
+        return stats;
+    }
 
+    std::unordered_map<int, std::vector<StaticLightingBakeCandidate>> atlasCandidates;
+    atlasCandidates.reserve(manifest.atlases.size());
     for (const auto& entityPtr : scene->getAllEntities()) {
         Entity* entity = entityPtr.get();
         if (!entity || !entity->isActiveInHierarchy() || entity->isEditorOnly()) {
@@ -2143,49 +4313,317 @@ SceneCommands::VertexLightBakeStats SceneCommands::bakeVertexLighting(Scene* sce
             continue;
         }
 
-        renderer->clearBakedVertexLighting();
-        std::shared_ptr<Mesh> sourceMesh = renderer->getMesh();
-        if (!sourceMesh || sourceMesh->getVertices().empty() || bakedLights.empty()) {
+        const auto& staticLighting = renderer->getStaticLighting();
+        if (!staticLighting.staticGeometry || staticLighting.lightmapIndex < 0 || staticLighting.lightmapUVChannel != 1) {
             continue;
         }
 
-        auto bakedMesh = CloneMeshGeometry(sourceMesh);
-        if (!bakedMesh) {
+        std::shared_ptr<Mesh> mesh = renderer->getMesh();
+        if (!mesh || mesh->getVertices().empty() || mesh->getIndices().size() < 3) {
             continue;
         }
 
-        const auto& sourceVertices = bakedMesh->getVertices();
-        std::vector<Math::Vector4> bakedColors;
-        bakedColors.reserve(sourceVertices.size());
+        StaticLightingBakeCandidate candidate;
+        candidate.entity = entity;
+        candidate.renderer = renderer;
+        candidate.mesh = mesh;
+        candidate.worldMatrix = entity->getTransform()->getWorldMatrix();
+        candidate.normalMatrix = candidate.worldMatrix.inversed().transposed();
+        candidate.staticLighting = staticLighting;
+        atlasCandidates[staticLighting.lightmapIndex].push_back(candidate);
+        stats.bakedRendererCount += 1;
+    }
 
-        Math::Matrix4x4 world = entity->getTransform()->getWorldMatrix();
-        Math::Matrix4x4 normalMatrix = world.inversed().transposed();
-        for (const Vertex& vertex : sourceVertices) {
-            Math::Vector3 positionWS = world.transformPoint(vertex.position);
-            Math::Vector3 normalWS = normalMatrix.transformDirection(vertex.normal).normalized();
-            if (normalWS.lengthSquared() <= Math::EPSILON) {
-                normalWS = world.transformDirection(vertex.normal).normalized();
-            }
-            if (normalWS.lengthSquared() <= Math::EPSILON) {
-                normalWS = Math::Vector3::Up;
-            }
+    for (auto& atlasRecord : manifest.atlases) {
+        const int atlasIndex = atlasRecord.index;
+        const int width = std::max(1, atlasRecord.width);
+        const int height = std::max(1, atlasRecord.height);
+        std::vector<float> atlasDirectLighting(static_cast<size_t>(width) * static_cast<size_t>(height) * 3u, 0.0f);
+        std::vector<float> atlasIndirectLighting(static_cast<size_t>(width) * static_cast<size_t>(height) * 3u, 0.0f);
+        std::vector<float> atlasDirectional(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0.0f);
+        std::vector<float> atlasShadowmask(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0.0f);
+        std::vector<uint16_t> atlasCoverage(static_cast<size_t>(width) * static_cast<size_t>(height), 0u);
+        std::vector<uint16_t> atlasShadowmaskCoverage(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0u);
 
-            Math::Vector3 accumulated = Math::Vector3::Zero;
-            for (const BakedDirectLight& light : bakedLights) {
-                accumulated += BakeLightContribution(light, positionWS, normalWS);
+        auto atlasIt = atlasCandidates.find(atlasIndex);
+        if (atlasIt != atlasCandidates.end()) {
+            for (const auto& candidate : atlasIt->second) {
+                const auto& vertices = candidate.mesh->getVertices();
+                const auto& indices = candidate.mesh->getIndices();
+                for (size_t tri = 0; tri + 2 < indices.size(); tri += 3) {
+                    uint32_t i0 = indices[tri + 0];
+                    uint32_t i1 = indices[tri + 1];
+                    uint32_t i2 = indices[tri + 2];
+                    if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+                        continue;
+                    }
+
+                    const Vertex& v0 = vertices[i0];
+                    const Vertex& v1 = vertices[i1];
+                    const Vertex& v2 = vertices[i2];
+
+                    Math::Vector2 uv0 = TransformLightmapUVToAtlas(v0.texCoord1, candidate.staticLighting.lightmapScaleOffset);
+                    Math::Vector2 uv1 = TransformLightmapUVToAtlas(v1.texCoord1, candidate.staticLighting.lightmapScaleOffset);
+                    Math::Vector2 uv2 = TransformLightmapUVToAtlas(v2.texCoord1, candidate.staticLighting.lightmapScaleOffset);
+
+                    Math::Vector2 p0(uv0.x * static_cast<float>(width), uv0.y * static_cast<float>(height));
+                    Math::Vector2 p1(uv1.x * static_cast<float>(width), uv1.y * static_cast<float>(height));
+                    Math::Vector2 p2(uv2.x * static_cast<float>(width), uv2.y * static_cast<float>(height));
+
+                    float minXf = std::floor(std::min(p0.x, std::min(p1.x, p2.x)));
+                    float minYf = std::floor(std::min(p0.y, std::min(p1.y, p2.y)));
+                    float maxXf = std::ceil(std::max(p0.x, std::max(p1.x, p2.x)));
+                    float maxYf = std::ceil(std::max(p0.y, std::max(p1.y, p2.y)));
+
+                    int minX = std::max(0, static_cast<int>(minXf));
+                    int minY = std::max(0, static_cast<int>(minYf));
+                    int maxX = std::min(width - 1, static_cast<int>(maxXf));
+                    int maxY = std::min(height - 1, static_cast<int>(maxYf));
+
+                    for (int y = minY; y <= maxY; ++y) {
+                        for (int x = minX; x <= maxX; ++x) {
+                            Math::Vector2 sampleUV((static_cast<float>(x) + 0.5f) / static_cast<float>(width),
+                                                   (static_cast<float>(y) + 0.5f) / static_cast<float>(height));
+                            Math::Vector3 bary;
+                            if (!ComputeBarycentrics(sampleUV, uv0, uv1, uv2, bary)) {
+                                continue;
+                            }
+
+                            Math::Vector3 localPos = v0.position * bary.x + v1.position * bary.y + v2.position * bary.z;
+                            Math::Vector3 localNormal = (v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z).normalized();
+                            if (localNormal.lengthSquared() <= Math::EPSILON) {
+                                localNormal = Math::Vector3::Up;
+                            }
+
+                            Math::Vector3 positionWS = candidate.worldMatrix.transformPoint(localPos);
+                            Math::Vector3 normalWS = candidate.normalMatrix.transformDirection(localNormal).normalized();
+                            if (normalWS.lengthSquared() <= Math::EPSILON) {
+                                normalWS = candidate.worldMatrix.transformDirection(localNormal).normalized();
+                            }
+                            if (normalWS.lengthSquared() <= Math::EPSILON) {
+                                normalWS = Math::Vector3::Up;
+                            }
+
+                            Math::Vector3 accumulated = Math::Vector3::Zero;
+                            Math::Vector3 indirect = Math::Vector3::Zero;
+                            Math::Vector3 dominantDirection = Math::Vector3::Zero;
+                            float dominantWeight = 0.0f;
+                            float referenceNoL = 0.0f;
+                            for (const BakedDirectLight& light : bakedLights) {
+                                Math::Vector3 contribution = BakeLightContribution(light, positionWS, normalWS);
+                                if (contribution.lengthSquared() <= Math::EPSILON) {
+                                    continue;
+                                }
+                                bool visible = IsDirectLightVisible(scene, light, positionWS, normalWS);
+                                if (light.mobility == Light::Mobility::Stationary && light.shadowmaskChannel >= 0) {
+                                    size_t shadowmaskIndex = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u
+                                        + static_cast<size_t>(light.shadowmaskChannel);
+                                    atlasShadowmask[shadowmaskIndex] += visible ? 1.0f : 0.0f;
+                                    atlasShadowmaskCoverage[shadowmaskIndex] += 1u;
+                                }
+                                if (!visible) {
+                                    continue;
+                                }
+                                accumulated += contribution;
+
+                                Math::Vector3 lightDir = Math::Vector3::Zero;
+                                float sampleNoL = 0.0f;
+                                if (ComputeIncidentLightDirection(light, positionWS, normalWS, lightDir, sampleNoL)) {
+                                    float weight = std::max(ComputeLuminance(contribution), 0.0f);
+                                    dominantDirection += lightDir * weight;
+                                    dominantWeight += weight;
+                                    referenceNoL += sampleNoL * weight;
+                                }
+                            }
+                            if (!emissiveSurfaces.empty()) {
+                                EmissiveLightingEstimate emissiveDirect = EstimateEmissiveSurfaceLighting(
+                                    scene,
+                                    emissiveSurfaces,
+                                    positionWS,
+                                    normalWS,
+                                    static_cast<uint32_t>((atlasIndex + 1) * 2166136261u)
+                                        ^ static_cast<uint32_t>((x + 1) * 16777619u)
+                                        ^ static_cast<uint32_t>((y + 1) * 374761393u)
+                                        ^ static_cast<uint32_t>(tri * 668265263u),
+                                    std::max(1, std::min(8, bakeSettings.staticLighting.samplesPerTexel / 32))
+                                );
+                                accumulated += emissiveDirect.irradiance;
+                                dominantDirection += emissiveDirect.weightedDirection;
+                                dominantWeight += emissiveDirect.directionWeight;
+                                referenceNoL += emissiveDirect.referenceNoL;
+                            }
+                            accumulated = ClampColor(accumulated, 16.0f);
+                            if (candidate.staticLighting.receiveGI && bakeSettings.staticLighting.indirectBounces > 0) {
+                                Math::Vector3 primaryAlbedo = Math::Vector3::One;
+                                Math::Vector3 primaryEmission = Math::Vector3::Zero;
+                                float primaryAO = 1.0f;
+                                bool primaryContributeGI = true;
+                                ResolveIndirectSurfaceProperties(candidate.entity,
+                                                                 positionWS,
+                                                                 primaryAlbedo,
+                                                                 primaryEmission,
+                                                                 primaryAO,
+                                                                 primaryContributeGI);
+                                uint32_t sampleSeed = static_cast<uint32_t>((atlasIndex + 1) * 73856093)
+                                    ^ static_cast<uint32_t>((x + 1) * 19349663)
+                                    ^ static_cast<uint32_t>((y + 1) * 83492791)
+                                    ^ static_cast<uint32_t>(tri * 2654435761u);
+                                int adaptiveSampleCount = ComputeAdaptiveIndirectSampleCount(
+                                    bakeSettings,
+                                    accumulated,
+                                    primaryEmission,
+                                    primaryAO
+                                );
+                                indirect = EstimateIndirectLighting(
+                                    scene,
+                                    bakeSettings,
+                                    bakedLights,
+                                    emissiveSurfaces,
+                                    positionWS,
+                                    normalWS,
+                                    sampleSeed,
+                                    adaptiveSampleCount
+                                );
+                            }
+
+                            size_t pixelIndex = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
+                            atlasDirectLighting[pixelIndex * 3 + 0] += accumulated.x;
+                            atlasDirectLighting[pixelIndex * 3 + 1] += accumulated.y;
+                            atlasDirectLighting[pixelIndex * 3 + 2] += accumulated.z;
+                            atlasIndirectLighting[pixelIndex * 3 + 0] += indirect.x;
+                            atlasIndirectLighting[pixelIndex * 3 + 1] += indirect.y;
+                            atlasIndirectLighting[pixelIndex * 3 + 2] += indirect.z;
+                            if (dominantWeight > Math::EPSILON) {
+                                Math::Vector3 encodedDominant = dominantDirection / dominantWeight;
+                                float encodedReference = referenceNoL / dominantWeight;
+                                atlasDirectional[pixelIndex * 4 + 0] += encodedDominant.x;
+                                atlasDirectional[pixelIndex * 4 + 1] += encodedDominant.y;
+                                atlasDirectional[pixelIndex * 4 + 2] += encodedDominant.z;
+                                atlasDirectional[pixelIndex * 4 + 3] += encodedReference;
+                            }
+                            atlasCoverage[pixelIndex] += 1;
+                        }
+                    }
+                }
             }
-            accumulated = ClampColor(accumulated, 6.0f);
-            bakedColors.emplace_back(accumulated.x, accumulated.y, accumulated.z, vertex.color.w);
         }
 
-        renderer->setMesh(bakedMesh);
-        renderer->setBakedVertexColors(bakedColors);
-        renderer->setUseBakedVertexLighting(true);
-        stats.bakedMeshCount += 1;
-        stats.bakedVertexCount += static_cast<int>(bakedColors.size());
+        std::vector<unsigned char> atlasPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0u);
+        std::vector<unsigned char> directionalPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0u);
+        std::vector<unsigned char> shadowmaskPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 255u);
+        for (size_t pixelIndex = 0; pixelIndex < atlasCoverage.size(); ++pixelIndex) {
+            uint16_t coverage = atlasCoverage[pixelIndex];
+            if (coverage == 0u) {
+                continue;
+            }
+            float invCoverage = 1.0f / static_cast<float>(coverage);
+            atlasDirectLighting[pixelIndex * 3 + 0] *= invCoverage;
+            atlasDirectLighting[pixelIndex * 3 + 1] *= invCoverage;
+            atlasDirectLighting[pixelIndex * 3 + 2] *= invCoverage;
+            atlasIndirectLighting[pixelIndex * 3 + 0] *= invCoverage;
+            atlasIndirectLighting[pixelIndex * 3 + 1] *= invCoverage;
+            atlasIndirectLighting[pixelIndex * 3 + 2] *= invCoverage;
+            atlasDirectional[pixelIndex * 4 + 0] *= invCoverage;
+            atlasDirectional[pixelIndex * 4 + 1] *= invCoverage;
+            atlasDirectional[pixelIndex * 4 + 2] *= invCoverage;
+            atlasDirectional[pixelIndex * 4 + 3] *= invCoverage;
+        }
+        if (bakeSettings.staticLighting.denoise && bakeSettings.staticLighting.indirectBounces > 0) {
+            DenoiseIndirectAtlas(atlasDirectLighting, atlasCoverage, width, height, atlasIndirectLighting);
+        }
+        for (size_t pixelIndex = 0; pixelIndex < atlasCoverage.size(); ++pixelIndex) {
+            uint16_t coverage = atlasCoverage[pixelIndex];
+            if (coverage == 0) {
+                continue;
+            }
+            float r = atlasDirectLighting[pixelIndex * 3 + 0] + atlasIndirectLighting[pixelIndex * 3 + 0];
+            float g = atlasDirectLighting[pixelIndex * 3 + 1] + atlasIndirectLighting[pixelIndex * 3 + 1];
+            float b = atlasDirectLighting[pixelIndex * 3 + 2] + atlasIndirectLighting[pixelIndex * 3 + 2];
+
+            atlasPixels[pixelIndex * 4 + 0] = static_cast<unsigned char>(Math::Clamp(std::pow(r / 16.0f, 1.0f / 2.2f), 0.0f, 1.0f) * 255.0f);
+            atlasPixels[pixelIndex * 4 + 1] = static_cast<unsigned char>(Math::Clamp(std::pow(g / 16.0f, 1.0f / 2.2f), 0.0f, 1.0f) * 255.0f);
+            atlasPixels[pixelIndex * 4 + 2] = static_cast<unsigned char>(Math::Clamp(std::pow(b / 16.0f, 1.0f / 2.2f), 0.0f, 1.0f) * 255.0f);
+            atlasPixels[pixelIndex * 4 + 3] = 255u;
+
+            Math::Vector3 directionalVec(atlasDirectional[pixelIndex * 4 + 0],
+                                         atlasDirectional[pixelIndex * 4 + 1],
+                                         atlasDirectional[pixelIndex * 4 + 2]);
+            directionalVec = Math::Vector3::Clamp(directionalVec,
+                                                  Math::Vector3(-1.0f, -1.0f, -1.0f),
+                                                  Math::Vector3(1.0f, 1.0f, 1.0f));
+            float encodedReference = Math::Clamp(atlasDirectional[pixelIndex * 4 + 3], 0.0f, 1.0f);
+            directionalPixels[pixelIndex * 4 + 0] = static_cast<unsigned char>(Math::Clamp(directionalVec.x * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f);
+            directionalPixels[pixelIndex * 4 + 1] = static_cast<unsigned char>(Math::Clamp(directionalVec.y * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f);
+            directionalPixels[pixelIndex * 4 + 2] = static_cast<unsigned char>(Math::Clamp(directionalVec.z * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f);
+            directionalPixels[pixelIndex * 4 + 3] = static_cast<unsigned char>(encodedReference * 255.0f);
+            for (size_t channel = 0; channel < 4u; ++channel) {
+                size_t shadowmaskIndex = pixelIndex * 4u + channel;
+                uint16_t shadowmaskCoverage = atlasShadowmaskCoverage[shadowmaskIndex];
+                if (shadowmaskCoverage == 0u) {
+                    continue;
+                }
+                float visibility = atlasShadowmask[shadowmaskIndex] / static_cast<float>(shadowmaskCoverage);
+                shadowmaskPixels[shadowmaskIndex] = static_cast<unsigned char>(Math::Clamp(visibility, 0.0f, 1.0f) * 255.0f);
+            }
+            stats.bakedTexelCount += 1;
+        }
+
+        std::string lightmapPath = atlasRecord.expectedLightmapPath;
+        if (lightmapPath.empty()) {
+            continue;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(lightmapPath).parent_path(), ec);
+        if (stbi_write_png(lightmapPath.c_str(), width, height, 4, atlasPixels.data(), width * 4) == 0) {
+            continue;
+        }
+
+        atlasRecord.lightmapPath = lightmapPath;
+        std::string directionalPath = atlasRecord.expectedDirectionalLightmapPath;
+        if (!directionalPath.empty()) {
+            std::error_code directionalEc;
+            std::filesystem::create_directories(std::filesystem::path(directionalPath).parent_path(), directionalEc);
+            if (stbi_write_png(directionalPath.c_str(), width, height, 4, directionalPixels.data(), width * 4) != 0) {
+                atlasRecord.directionalLightmapPath = directionalPath;
+            }
+        }
+        std::string shadowmaskPath = atlasRecord.expectedShadowmaskPath;
+        if (!shadowmaskPath.empty()) {
+            std::error_code shadowmaskEc;
+            std::filesystem::create_directories(std::filesystem::path(shadowmaskPath).parent_path(), shadowmaskEc);
+            if (stbi_write_png(shadowmaskPath.c_str(), width, height, 4, shadowmaskPixels.data(), width * 4) != 0) {
+                atlasRecord.shadowmaskPath = shadowmaskPath;
+            }
+        }
+        stats.atlasCount += 1;
+
+        if (atlasIt != atlasCandidates.end()) {
+            for (const auto& candidate : atlasIt->second) {
+                MeshRenderer::StaticLightingData metadata = candidate.renderer->getStaticLighting();
+                metadata.lightmapPath = lightmapPath;
+                metadata.directionalLightmapPath = atlasRecord.directionalLightmapPath;
+                metadata.shadowmaskPath = atlasRecord.shadowmaskPath;
+                candidate.renderer->setStaticLighting(metadata);
+            }
+        }
+    }
+
+    if (stats.atlasCount > 0) {
+        BakeProbeVolume(scene, scenePath, bakeSettings, bakedLights, emissiveSurfaces);
+        SceneSettings updatedSettings = scene->getSettings();
+        updatedSettings.staticLighting.enabled = true;
+        updatedSettings.staticLighting.directionalLightmaps = true;
+        updatedSettings.staticLighting.localReflectionProbes = bakeSettings.staticLighting.localReflectionProbes;
+        updatedSettings.staticLighting.shadowmask = !stationaryShadowmaskLights.empty();
+        updatedSettings.staticLighting.lastBakeHash = !stationaryShadowmaskLights.empty()
+            ? "lightmap_directional_gi_shadowmask_probereflections_v10"
+            : "lightmap_directional_gi_probereflections_v10";
+        scene->setSettings(updatedSettings);
+        SceneSerializer::SaveStaticLightingManifest(scene, scenePath);
     }
 
     return stats;
 }
+
 
 } // namespace Crescent

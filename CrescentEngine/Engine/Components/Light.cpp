@@ -38,7 +38,9 @@ Light::Light()
     , m_IESProfileIndex(-1)
     , m_Volumetric(false)
     , m_VolumetricAnisotropy(0.0f)
-    , m_BakeToVertexLighting(false) {
+    , m_ContributeToStaticBake(false)
+    , m_Mobility(Mobility::Movable)
+    , m_ShadowmaskChannel(-1) {
         
     // Practical split distribution: keeps near shadows sharper without starving far coverage.
     m_CascadeSplits = {0.08f, 0.22f, 0.5f, 1.0f};

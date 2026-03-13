@@ -62,6 +62,8 @@ struct ScenePostProcessSettings {
     float ssrThickness = 0.1f;
     bool taa = false;
     float taaSharpness = 0.5f;
+    bool taaSpecularStability = true;
+    float taaSpecularStabilityStrength = 1.0f;
     bool fxaa = false;
     bool motionBlur = false;
     float motionBlurStrength = 0.5f;
@@ -81,11 +83,46 @@ struct SceneQualitySettings {
     int textureQuality = 2;
 };
 
+struct SceneStaticLightingSettings {
+    bool enabled = false;
+    int mode = 1; // 0 = Disabled, 1 = Full Lightmap Bake, 2 = Shadowmask
+    int atlasSize = 2048;
+    int maxAtlasCount = 8;
+    float texelsPerUnit = 32.0f;
+    int samplesPerTexel = 256;
+    int indirectBounces = 3;
+    bool denoise = true;
+    bool directionalLightmaps = false;
+    bool shadowmask = false;
+    bool probeVolume = true;
+    bool localReflectionProbes = true;
+    bool reflectionProbeBoxProjection = true;
+    bool reflectionProbeOcclusion = true;
+    int probeCountX = 8;
+    int probeCountY = 4;
+    int probeCountZ = 8;
+    int probeSamples = 96;
+    float reflectionProbeIntensity = 1.0f;
+    float reflectionProbeBlendSharpness = 3.0f;
+    float reflectionProbeFilterStrength = 1.0f;
+    float specularOcclusionStrength = 1.0f;
+    int reflectionProbeMaxBlendCount = 4;
+    Math::Vector3 probeBoundsMin = Math::Vector3(-5.0f, 0.0f, -5.0f);
+    Math::Vector3 probeBoundsMax = Math::Vector3(5.0f, 5.0f, 5.0f);
+    bool autoUnwrap = true;
+    int unwrapPadding = 4;
+    std::string outputDirectory = "Library/BakedLighting";
+    std::string bakeManifestPath;
+    std::string probeDataPath;
+    std::string lastBakeHash;
+};
+
 struct SceneSettings {
     SceneEnvironmentSettings environment;
     SceneFogSettings fog;
     ScenePostProcessSettings postProcess;
     SceneQualitySettings quality;
+    SceneStaticLightingSettings staticLighting;
 };
 
 } // namespace Crescent

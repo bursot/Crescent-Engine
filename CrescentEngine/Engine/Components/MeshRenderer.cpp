@@ -1,6 +1,7 @@
 #include "MeshRenderer.hpp"
 #include "../ECS/Entity.hpp"
 #include "../ECS/Transform.hpp"
+#include <cmath>
 #include <limits>
 
 namespace Crescent {
@@ -103,6 +104,23 @@ void MeshRenderer::setBakedVertexColors(const std::vector<Math::Vector4>& colors
 void MeshRenderer::clearBakedVertexLighting() {
     m_UseBakedVertexLighting = false;
     m_BakedVertexColors.clear();
+}
+
+bool MeshRenderer::hasStaticLightingData() const {
+    const Math::Vector4& scaleOffset = m_StaticLighting.lightmapScaleOffset;
+    bool hasCustomScaleOffset = std::abs(scaleOffset.x - 1.0f) > 0.0001f ||
+                                std::abs(scaleOffset.y - 1.0f) > 0.0001f ||
+                                std::abs(scaleOffset.z) > 0.0001f ||
+                                std::abs(scaleOffset.w) > 0.0001f;
+    return m_StaticLighting.staticGeometry ||
+           !m_StaticLighting.contributeGI ||
+           !m_StaticLighting.receiveGI ||
+           m_StaticLighting.lightmapIndex >= 0 ||
+           m_StaticLighting.lightmapUVChannel != 1 ||
+           hasCustomScaleOffset ||
+           !m_StaticLighting.lightmapPath.empty() ||
+           !m_StaticLighting.directionalLightmapPath.empty() ||
+           !m_StaticLighting.shadowmaskPath.empty();
 }
 
 Math::Vector3 MeshRenderer::getBoundsMin() const {

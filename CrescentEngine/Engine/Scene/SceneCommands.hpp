@@ -16,10 +16,25 @@ class SceneCommands {
 public:
     using ModelImportOptions = ModelImportSettings;
 
-    struct VertexLightBakeStats {
-        int bakedMeshCount = 0;
-        int bakedVertexCount = 0;
+    struct StaticLightingLayoutStats {
+        int staticGeometryRendererCount = 0;
+        int rendererCount = 0;
+        int atlasCount = 0;
+        int generatedUVRendererCount = 0;
+        int reusedUVRendererCount = 0;
+        int skippedRendererCount = 0;
+    };
+
+    struct StaticLightmapBakeStats {
+        int atlasCount = 0;
+        int bakedRendererCount = 0;
         int bakedLightCount = 0;
+        int bakedTexelCount = 0;
+        int staticGeometryRendererCount = 0;
+        int layoutRendererCount = 0;
+        int layoutSkippedRendererCount = 0;
+        int generatedUVRendererCount = 0;
+        int reusedUVRendererCount = 0;
     };
 
     // Create primitive objects
@@ -66,8 +81,12 @@ public:
     // HLOD (automatic bake)
     static Entity* buildHLOD(Scene* scene, const std::vector<std::string>& uuids, float lodStart = -1.0f, float lodEnd = -1.0f);
 
-    // Offline baked direct lighting into vertex colors for static scene geometry.
-    static VertexLightBakeStats bakeVertexLighting(Scene* scene);
+    // Prepares static meshes for UV lightmap baking: validates/generates UV1, estimates resolution,
+    // assigns atlases, and writes per-renderer lightmap index + scale/offset metadata.
+    static StaticLightingLayoutStats buildStaticLightingLayout(Scene* scene, const std::string& scenePath = "");
+
+    // Bakes direct static lighting into atlas textures using UV1/lightmap layout.
+    static StaticLightmapBakeStats bakeStaticLightmaps(Scene* scene, const std::string& scenePath = "");
 };
 
 } // namespace Crescent

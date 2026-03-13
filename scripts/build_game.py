@@ -143,8 +143,9 @@ def bake_source_scenes(player_app: Path,
     if not scene_files:
         return {}, {
             "bakedSceneCount": 0,
-            "bakedMeshCount": 0,
-            "bakedVertexCount": 0,
+            "bakedAtlasCount": 0,
+            "bakedRendererCount": 0,
+            "bakedTexelCount": 0,
             "bakedLightCount": 0,
         }
 
@@ -156,8 +157,9 @@ def bake_source_scenes(player_app: Path,
     baked_scene_map: dict[Path, Path] = {}
     stats = {
         "bakedSceneCount": 0,
-        "bakedMeshCount": 0,
-        "bakedVertexCount": 0,
+        "bakedAtlasCount": 0,
+        "bakedRendererCount": 0,
+        "bakedTexelCount": 0,
         "bakedLightCount": 0,
     }
 
@@ -183,21 +185,35 @@ def bake_source_scenes(player_app: Path,
             continue
 
         scene_baked_lights = 0
+        scene_atlas_paths: set[str] = set()
         for entity in baked_data.get("entities", []):
             components = entity.get("components", {})
             light = components.get("Light")
-            if isinstance(light, dict) and light.get("bakeToVertexLighting", False):
+            if isinstance(light, dict) and (
+                light.get("contributeToStaticBake", False)
+                or light.get("bakeToVertexLighting", False)
+            ):
                 scene_baked_lights += 1
 
             renderer = components.get("MeshRenderer")
             if not isinstance(renderer, dict):
                 continue
-            if not renderer.get("useBakedVertexLighting", False):
+            static_lighting = renderer.get("staticLighting", {})
+            if not isinstance(static_lighting, dict):
                 continue
-            stats["bakedMeshCount"] += 1
-            baked_colors = renderer.get("bakedVertexColors", [])
-            if isinstance(baked_colors, list):
-                stats["bakedVertexCount"] += len(baked_colors)
+            lightmap = static_lighting.get("lightmap")
+            lightmap_path = None
+            if isinstance(lightmap, dict):
+                lightmap_path = lightmap.get("path")
+            elif isinstance(lightmap, str):
+                lightmap_path = lightmap
+            if not isinstance(lightmap_path, str) or not lightmap_path:
+                continue
+
+            stats["bakedRendererCount"] += 1
+            scene_atlas_paths.add(lightmap_path)
+
+        stats["bakedAtlasCount"] += len(scene_atlas_paths)
 
         stats["bakedLightCount"] += scene_baked_lights
 
@@ -649,8 +665,8 @@ def package_game(repo_root: Path,
         )
         print(
             "Baked lighting: "
-            f"{baked_stats['bakedMeshCount']} meshes, "
-            f"{baked_stats['bakedVertexCount']} vertices, "
+            f"{baked_stats['bakedAtlasCount']} atlases, "
+            f"{baked_stats['bakedRendererCount']} renderers, "
             f"{baked_stats['bakedLightCount']} baked lights across "
             f"{baked_stats['bakedSceneCount']} scenes."
         )
@@ -684,7 +700,7 @@ def package_game(repo_root: Path,
         packaged_project_data["textureCookFormat"] = "KTX2_ASTC4x4"
         packaged_project_data["requireCookedScenes"] = bool(cooked_scene_map)
         packaged_project_data["sceneCookFormat"] = "MessagePackEmbeddedMeshV1" if cooked_scene_map else ""
-        packaged_project_data["lightingBakeFormat"] = "VertexDirectV1"
+        packaged_project_data["lightingBakeFormat"] = "LightmapDirectionalShadowmaskProbeTemporalReflections_V15"
         packaged_project_data["requireCookedEnvironmentIBL"] = bool(cooked_environment_map)
         packaged_project_data["environmentCookFormat"] = "CENV_RGBA16F_V1" if cooked_environment_map else ""
         packaged_project_data["cookedScenes"] = cooked_scene_map
@@ -695,6 +711,10 @@ def package_game(repo_root: Path,
         copy_packaged_scenes(project_root, project_data, game_data_dir, cooked_scene_map, cooked_scenes_root)
         copy_tree_if_exists(project_root / project_data.get("settings", "Settings"), game_data_dir / "Settings")
         copy_packaged_import_cache(project_root, project_data, game_data_dir)
+        copy_tree_if_exists(
+            project_root / project_data.get("library", "Library") / "BakedLighting",
+            game_data_dir / "Library" / "BakedLighting",
+        )
         copy_tree_if_exists(cooked_environment_root / "Library" / "ImportCache", game_data_dir / "Library" / "ImportCache")
 
         manifest = build_manifest(game_data_dir, project_data, packaged_startup_scene)

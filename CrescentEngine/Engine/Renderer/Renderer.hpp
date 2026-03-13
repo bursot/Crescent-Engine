@@ -144,6 +144,7 @@ public:
     float getViewportHeight() const { return m_viewportHeight; }
     
     TextureLoader* getTextureLoader() const { return m_textureLoader.get(); }
+    void invalidateStaticLightingResources();
 
     std::shared_ptr<Texture2D> bakeImpostorAtlas(Mesh* mesh,
                                                  Material* material,
@@ -242,7 +243,9 @@ private:
     void buildFogVolumePipeline();
     void buildTAAPipeline();
     void buildMotionBlurPipeline();
+    void updateProbeVolume(const SceneStaticLightingSettings& staticLighting);
     void updateEnvironmentUniforms();
+    std::shared_ptr<Texture2D> resolveStaticLightingTexture(const std::string& texturePath, bool srgb);
     void renderSkybox(MTL::RenderCommandEncoder* encoder, Camera* camera);
     void rebuildSamplerState(int anisotropy);
     void ensureRenderTargets(uint32_t width, uint32_t height, uint32_t msaaSamples, int colorFormat);
@@ -330,6 +333,8 @@ private:
     MTL::DepthStencilState* m_depthStencilState;
     MTL::DepthStencilState* m_skyboxDepthState;
     MTL::DepthStencilState* m_depthReadState;
+    MTL::DepthStencilState* m_debugGridDepthState;
+    MTL::DepthStencilState* m_debugLineDepthState;
 
     // Prepass pipeline states
     MTL::RenderPipelineState* m_prepassPipelineState;
@@ -408,6 +413,8 @@ private:
     MTL::Buffer* m_clusterHeaderBuffer;
     MTL::Buffer* m_clusterIndexBuffer;
     MTL::Buffer* m_clusterParamsBuffer;
+    MTL::Buffer* m_probeVolumeBuffer;
+    MTL::Buffer* m_probeVolumeFallbackBuffer;
     MTL::Buffer* m_skinningBuffer;
     MTL::Buffer* m_prevSkinningBuffer;
     size_t m_skinningBufferCapacity;
@@ -421,6 +428,13 @@ private:
     size_t m_instanceCullCapacity;
     size_t m_instanceCountCapacity;
     size_t m_instanceIndirectCapacity;
+    std::string m_probeVolumePath;
+    Math::Vector4 m_probeVolumeBoundsMin;
+    Math::Vector4 m_probeVolumeBoundsMax;
+    Math::Vector4 m_probeVolumeGridCounts;
+    Math::Vector4 m_probeVolumeFeatureParams;
+    Math::Vector4 m_probeVolumeBlendParams;
+    Math::Vector4 m_probeVolumeReflectionParams;
     
     // Sampling and textures
     MTL::SamplerState* m_samplerState;
@@ -438,6 +452,7 @@ private:
     std::shared_ptr<Texture2D> m_colorGradingLUT;
     std::shared_ptr<Texture2D> m_colorGradingNeutralLUT;
     std::string m_colorGradingLUTPath;
+    std::unordered_map<std::string, std::shared_ptr<Texture2D>> m_staticLightingTextureCache;
     
     // Environment rendering
     MTL::RenderPipelineState* m_skyboxPipelineState;

@@ -13,6 +13,7 @@ struct VertexIn {
     float3 tangent [[attribute(3)]];
     float3 bitangent [[attribute(4)]];
     float4 color [[attribute(5)]];
+    float2 texCoord1 [[attribute(6)]];
 };
 
 struct VertexInSkinned {
@@ -22,8 +23,9 @@ struct VertexInSkinned {
     float3 tangent [[attribute(3)]];
     float3 bitangent [[attribute(4)]];
     float4 color [[attribute(5)]];
-    uint4 boneIndices [[attribute(6)]];
-    float4 boneWeights [[attribute(7)]];
+    float2 texCoord1 [[attribute(6)]];
+    uint4 boneIndices [[attribute(7)]];
+    float4 boneWeights [[attribute(8)]];
 };
 
 // Vertex output / Fragment input
@@ -32,6 +34,7 @@ struct VertexOut {
     float3 worldPosition;
     float3 normal;
     float2 texCoord;
+    float2 lightmapTexCoord;
     float3 tangent;
     float3 bitangent;
     float4 color;
@@ -39,12 +42,14 @@ struct VertexOut {
     float billboardFade;
     float billboardFlag;
     float bakedLightingFlag;
+    float staticLightmapFlag;
 };
 
 struct PrepassOut {
     float4 position [[position]];
     float3 normalVS;
     float2 texCoord;
+    float2 lightmapTexCoord;
     float lodFade;
     float billboardFade;
     float billboardFlag;
@@ -127,6 +132,7 @@ struct TAAParams {
     float4x4 prevViewProjection;
     float4 params0; // texelSize.xy, feedback, historyValid
     float4 params1; // sharpness, useVelocity, depthThreshold, normalThreshold
+    float4 params2; // x specular stability enabled, y strength
 };
 
 struct MotionBlurParams {
@@ -791,6 +797,7 @@ vertex PrepassOut vertex_prepass(
     out.position = camera.viewProjectionMatrix * float4(worldPos, 1.0);
     out.normalVS = normalize((camera.viewMatrix * float4(worldNormal, 0.0)).xyz);
     out.texCoord = in.texCoord;
+    out.lightmapTexCoord = in.texCoord1 * mesh.lightmapScaleOffset.xy + mesh.lightmapScaleOffset.zw;
     out.lodFade = lodFade;
     out.billboardFade = billboardFade;
     out.billboardFlag = mesh.flags.x;
@@ -842,6 +849,7 @@ vertex PrepassOut vertex_prepass_instanced(
     out.position = camera.viewProjectionMatrix * float4(worldPos, 1.0);
     out.normalVS = normalize((camera.viewMatrix * float4(worldNormal, 0.0)).xyz);
     out.texCoord = in.texCoord;
+    out.lightmapTexCoord = in.texCoord1 * mesh.lightmapScaleOffset.xy + mesh.lightmapScaleOffset.zw;
     out.lodFade = lodFade;
     out.billboardFade = billboardFade;
     out.billboardFlag = mesh.flags.x;
@@ -876,6 +884,7 @@ vertex PrepassOut vertex_prepass_skinned(
     float3 worldNormal = normalize(model3 * (skin3 * in.normal));
     out.normalVS = normalize((camera.viewMatrix * float4(worldNormal, 0.0)).xyz);
     out.texCoord = in.texCoord;
+    out.lightmapTexCoord = in.texCoord1;
     out.lodFade = 0.0;
     out.billboardFade = 0.0;
     out.billboardFlag = 0.0;
@@ -994,11 +1003,13 @@ vertex VertexOut vertex_main(
         texCoord = impostorAtlasUV(texCoord, toCamDir, worldToLocal, material);
     }
     out.texCoord = texCoord;
+    out.lightmapTexCoord = in.texCoord1 * mesh.lightmapScaleOffset.xy + mesh.lightmapScaleOffset.zw;
     out.color = in.color;
     out.lodFade = lodFade;
     out.billboardFade = billboardFade;
     out.billboardFlag = mesh.flags.x;
     out.bakedLightingFlag = mesh.flags.y;
+    out.staticLightmapFlag = mesh.flags.z;
 
     return out;
 }
@@ -1065,11 +1076,13 @@ vertex VertexOut vertex_main_instanced(
         texCoord = impostorAtlasUV(texCoord, toCamDir, worldToLocal, material);
     }
     out.texCoord = texCoord;
+    out.lightmapTexCoord = in.texCoord1 * mesh.lightmapScaleOffset.xy + mesh.lightmapScaleOffset.zw;
     out.color = in.color;
     out.lodFade = lodFade;
     out.billboardFade = billboardFade;
     out.billboardFlag = mesh.flags.x;
     out.bakedLightingFlag = mesh.flags.y;
+    out.staticLightmapFlag = mesh.flags.z;
     return out;
 }
 
@@ -1106,11 +1119,13 @@ vertex VertexOut vertex_skinned(
     out.bitangent = normalize(model3 * (skin3 * in.bitangent));
 
     out.texCoord = in.texCoord;
+    out.lightmapTexCoord = in.texCoord1;
     out.color = in.color;
     out.lodFade = 0.0;
     out.billboardFade = 0.0;
     out.billboardFlag = 0.0;
     out.bakedLightingFlag = 0.0;
+    out.staticLightmapFlag = 0.0;
 
     return out;
 }
@@ -1869,11 +1884,6 @@ fragment float4 taa_fragment(
     }
     meanC *= (1.0 / 9.0);
     sqMeanC *= (1.0 / 9.0);
-    float3 sigma = sqrt(max(sqMeanC - meanC * meanC, float3(0.0))) * 1.25;
-    float3 clipMin = max(minC, meanC - sigma);
-    float3 clipMax = min(maxC, meanC + sigma);
-    history = clamp(history, clipMin, clipMax);
-
     float feedback = clamp(params.params0.z, 0.02, 0.25);
     float speedPx = length(velocity / texel);
     float motionFactor = saturate(1.0 - speedPx * 0.15);
@@ -1892,15 +1902,35 @@ fragment float4 taa_fragment(
     float normalWeight = smoothstep(params.params1.w, 1.0, normalDot);
     float roughnessNow = clamp(normalNowSample.w, 0.0, 1.0);
     float roughnessPrev = clamp(normalPrevSample.w, 0.0, 1.0);
+    float roughnessMax = max(roughnessNow, roughnessPrev);
     float roughnessWeight = smoothstep(0.12, 0.45, min(roughnessNow, roughnessPrev));
+    float roughnessDelta = abs(roughnessNow - roughnessPrev);
+    float glossyFactor = 1.0 - smoothstep(0.05, 0.35, roughnessMax);
+    float specularStabilityEnabled = params.params2.x;
+    float specularStabilityStrength = clamp(params.params2.y, 0.0, 2.0);
+    float specularStability = 0.0;
+    if (specularStabilityEnabled > 0.5) {
+        float roughnessConsistency = 1.0 - smoothstep(0.03, 0.18, roughnessDelta);
+        specularStability = glossyFactor * motionFactor * depthWeight * normalWeight * roughnessConsistency;
+        specularStability *= saturate(specularStabilityStrength);
+    }
+    float3 sigma = sqrt(max(sqMeanC - meanC * meanC, float3(0.0))) * 1.25;
+    float clipScale = mix(1.0, 1.65, specularStability);
+    float3 clipMin = max(minC, meanC - sigma * clipScale);
+    float3 clipMax = min(maxC, meanC + sigma * clipScale);
+    history = clamp(history, clipMin, clipMax);
     float currLuma = luminance709(current);
     float histLuma = luminance709(history);
     float lumaDelta = abs(currLuma - histLuma) / max(max(currLuma, histLuma), 0.2);
     float lumaWeight = 1.0 - smoothstep(0.05, 0.35, lumaDelta);
-    feedback = stabilized * depthWeight * normalWeight * roughnessWeight * lumaWeight;
+    float specularLumaWeight = 1.0 - smoothstep(0.02, 0.18, lumaDelta);
+    float baseFeedback = stabilized * depthWeight * normalWeight * roughnessWeight * lumaWeight;
+    float specularFeedback = (0.18 + 0.22 * motionFactor) * specularStability * specularLumaWeight;
+    feedback = max(baseFeedback, specularFeedback);
     feedback = clamp(feedback, 0.0, 0.92);
     float3 color = mix(current, history, feedback);
     float sharpness = clamp(params.params1.x, 0.0, 1.0);
+    sharpness *= 1.0 - 0.45 * specularStability;
     color = mix(color, current, sharpness);
     return float4(color, 1.0);
 }
@@ -2259,6 +2289,321 @@ fragment float4 fog_fragment(
     return float4(color, 1.0);
 }
 
+static inline uint probe_volume_index(uint x, uint y, uint z, uint3 counts) {
+    return z * counts.x * counts.y + y * counts.x + x;
+}
+
+static inline float3 sample_probe_ambient_cube(const device ProbeAmbientCubeData& probe, float3 normal) {
+    float3 n = normalize(normal);
+    float3 sq = n * n;
+    float3 result = float3(0.0);
+    result += (n.x >= 0.0 ? probe.px.rgb : probe.nx.rgb) * sq.x;
+    result += (n.y >= 0.0 ? probe.py.rgb : probe.ny.rgb) * sq.y;
+    result += (n.z >= 0.0 ? probe.pz.rgb : probe.nz.rgb) * sq.z;
+    return max(result, float3(0.0));
+}
+
+static inline float sample_probe_visibility_cube(const device ProbeAmbientCubeData& probe, float3 direction) {
+    float3 dir = normalize(direction);
+    float3 sq = dir * dir;
+    float result = 0.0;
+    result += (dir.x >= 0.0 ? probe.visibility0.x : probe.visibility0.y) * sq.x;
+    result += (dir.y >= 0.0 ? probe.visibility0.z : probe.visibility0.w) * sq.y;
+    result += (dir.z >= 0.0 ? probe.visibility1.x : probe.visibility1.y) * sq.z;
+    return max(result, 0.0);
+}
+
+static inline float3 sample_probe_specular_cube(const device ProbeAmbientCubeData& probe, float3 direction) {
+    float3 dir = normalize(direction);
+    float3 sq = dir * dir;
+    float3 result = float3(0.0);
+    result += (dir.x >= 0.0 ? probe.specularPx.rgb : probe.specularNx.rgb) * sq.x;
+    result += (dir.y >= 0.0 ? probe.specularPy.rgb : probe.specularNy.rgb) * sq.y;
+    result += (dir.z >= 0.0 ? probe.specularPz.rgb : probe.specularNz.rgb) * sq.z;
+    return max(result, float3(0.0));
+}
+
+static inline float3 sample_probe_specular_filtered_cube(const device ProbeAmbientCubeData& probe,
+                                                         float3 direction,
+                                                         float3 normal,
+                                                         float roughness,
+                                                         float filterStrength) {
+    float3 dir = normalize(direction);
+    float filterAmount = saturate(roughness * max(filterStrength, 0.0));
+    if (filterAmount <= 1e-3) {
+        return sample_probe_specular_cube(probe, dir);
+    }
+
+    float3 up = abs(dir.y) < 0.999 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    float3 tangent = normalize(cross(up, dir));
+    float3 bitangent = normalize(cross(dir, tangent));
+    float cone = mix(0.08, 0.85, filterAmount * filterAmount);
+    float3 centerDir = normalize(mix(dir, normal, filterAmount * 0.25));
+    float3 tangentPos = normalize(centerDir + tangent * cone);
+    float3 tangentNeg = normalize(centerDir - tangent * cone);
+    float3 bitangentPos = normalize(centerDir + bitangent * cone);
+    float3 bitangentNeg = normalize(centerDir - bitangent * cone);
+    float3 normalDir = normalize(mix(centerDir, normal, 0.6 * filterAmount));
+
+    float centerWeight = mix(1.0, 0.35, filterAmount);
+    float edgeWeight = mix(0.0, 0.45, filterAmount);
+    float normalWeight = 0.35 * filterAmount;
+    float totalWeight = centerWeight + edgeWeight * 4.0 + normalWeight;
+
+    float3 result = sample_probe_specular_cube(probe, centerDir) * centerWeight;
+    result += sample_probe_specular_cube(probe, tangentPos) * edgeWeight;
+    result += sample_probe_specular_cube(probe, tangentNeg) * edgeWeight;
+    result += sample_probe_specular_cube(probe, bitangentPos) * edgeWeight;
+    result += sample_probe_specular_cube(probe, bitangentNeg) * edgeWeight;
+    result += sample_probe_specular_cube(probe, normalDir) * normalWeight;
+    return max(result / max(totalWeight, 1e-4), float3(0.0));
+}
+
+static inline float compute_specular_occlusion(float ao, float NdotV, float roughness) {
+    float exponent = exp2(-16.0 * roughness - 1.0);
+    float visibility = pow(saturate(NdotV + ao), exponent) - 1.0 + ao;
+    return saturate(visibility);
+}
+
+static inline float compute_probe_directional_occlusion(const device ProbeAmbientCubeData& probe,
+                                                        float3 worldPosition,
+                                                        float3 sampleDirection,
+                                                        float localityRadius) {
+    float3 probeToPoint = worldPosition - probe.positionAndValidity.xyz;
+    float probeDistance = length(probeToPoint);
+    float directionalVisibility = sample_probe_visibility_cube(probe, sampleDirection);
+    float referenceDistance = max(probeDistance * 0.35 + localityRadius * 0.65, 0.25);
+    float openness = saturate(directionalVisibility / referenceDistance);
+    float softened = sqrt(max(openness, 0.0));
+    return mix(0.2, 1.0, softened);
+}
+
+static inline float3 parallax_correct_probe_direction(const device ProbeAmbientCubeData& probe,
+                                                      constant ProbeVolumeUniforms& probeVolume,
+                                                      float3 worldPosition,
+                                                      float3 reflectionDirection) {
+    float3 dir = normalize(reflectionDirection);
+    if (probeVolume.featureParams.w < 0.5) {
+        return dir;
+    }
+
+    float3 boundsMin = probeVolume.boundsMin.xyz;
+    float3 boundsMax = probeVolume.boundsMax.xyz;
+    float3 clampedPosition = clamp(worldPosition, boundsMin, boundsMax);
+    float3 safeDir = select(-max(abs(dir), float3(1e-4)), max(abs(dir), float3(1e-4)), dir >= 0.0);
+    float3 targetPlane = select(boundsMin, boundsMax, dir >= 0.0);
+    float3 t = (targetPlane - clampedPosition) / safeDir;
+    float hitDistance = max(min(t.x, min(t.y, t.z)), 0.0);
+    float3 hitPoint = clampedPosition + dir * hitDistance;
+    float3 corrected = hitPoint - probe.positionAndValidity.xyz;
+    if (length_squared(corrected) <= 1e-6) {
+        return dir;
+    }
+    return normalize(corrected);
+}
+
+static inline float3 sample_probe_volume_irradiance(const device ProbeAmbientCubeData* probes,
+                                                    constant ProbeVolumeUniforms& probeVolume,
+                                                    float3 worldPosition,
+                                                    float3 normal) {
+    if (probeVolume.gridCounts.w < 0.5) {
+        return float3(0.0);
+    }
+
+    uint3 counts = uint3(
+        max(uint(probeVolume.gridCounts.x + 0.5), 1u),
+        max(uint(probeVolume.gridCounts.y + 0.5), 1u),
+        max(uint(probeVolume.gridCounts.z + 0.5), 1u)
+    );
+    float3 extent = max(probeVolume.boundsMax.xyz - probeVolume.boundsMin.xyz, float3(0.001));
+    float3 uvw = clamp((worldPosition - probeVolume.boundsMin.xyz) / extent, 0.0, 1.0);
+    float3 grid = uvw * float3(
+        counts.x > 1 ? float(counts.x - 1) : 1.0,
+        counts.y > 1 ? float(counts.y - 1) : 1.0,
+        counts.z > 1 ? float(counts.z - 1) : 1.0
+    );
+
+    uint3 base = uint3(floor(grid));
+    uint3 next = min(base + 1u, counts - 1u);
+    float3 frac = fract(grid);
+
+    float3 accum = float3(0.0);
+    float accumWeight = 0.0;
+    float3 fallbackAccum = float3(0.0);
+    float fallbackWeight = 0.0;
+    for (uint corner = 0; corner < 8u; ++corner) {
+        uint sx = (corner & 1u) != 0u ? next.x : base.x;
+        uint sy = (corner & 2u) != 0u ? next.y : base.y;
+        uint sz = (corner & 4u) != 0u ? next.z : base.z;
+        float wx = (corner & 1u) != 0u ? frac.x : (1.0 - frac.x);
+        float wy = (corner & 2u) != 0u ? frac.y : (1.0 - frac.y);
+        float wz = (corner & 4u) != 0u ? frac.z : (1.0 - frac.z);
+        float baseWeight = wx * wy * wz;
+        const device ProbeAmbientCubeData& probe = probes[probe_volume_index(sx, sy, sz, counts)];
+        float3 probeIrradiance = sample_probe_ambient_cube(probe, normal);
+        fallbackAccum += probeIrradiance * baseWeight;
+        fallbackWeight += baseWeight;
+
+        float visibilityWeight = max(probe.positionAndValidity.w, 0.05);
+        float3 probeToPoint = worldPosition - probe.positionAndValidity.xyz;
+        float probeDistance = length(probeToPoint);
+        if (probeDistance > 0.001) {
+            float visibilityDistance = sample_probe_visibility_cube(probe, probeToPoint / probeDistance);
+            float fadeRange = max(0.3, visibilityDistance * 0.35);
+            float leakage = max(probeDistance - visibilityDistance, 0.0);
+            float visibilityFade = saturate(1.0 - leakage / fadeRange);
+            visibilityWeight *= visibilityFade * visibilityFade;
+        }
+
+        float weight = baseWeight * visibilityWeight;
+        accum += probeIrradiance * weight;
+        accumWeight += weight;
+    }
+
+    if (accumWeight > 1e-4) {
+        return max(accum / accumWeight, float3(0.0));
+    }
+    if (fallbackWeight > 1e-4) {
+        return max(fallbackAccum / fallbackWeight, float3(0.0));
+    }
+    return float3(0.0);
+}
+
+static inline float4 sample_probe_volume_reflection(const device ProbeAmbientCubeData* probes,
+                                                    constant ProbeVolumeUniforms& probeVolume,
+                                                    float3 worldPosition,
+                                                    float3 reflectionDirection,
+                                                    float3 normal,
+                                                    float roughness) {
+    if (probeVolume.gridCounts.w < 0.5 || probeVolume.featureParams.y < 0.5) {
+        return float4(0.0);
+    }
+
+    uint3 counts = uint3(
+        max(uint(probeVolume.gridCounts.x + 0.5), 1u),
+        max(uint(probeVolume.gridCounts.y + 0.5), 1u),
+        max(uint(probeVolume.gridCounts.z + 0.5), 1u)
+    );
+    float3 extent = max(probeVolume.boundsMax.xyz - probeVolume.boundsMin.xyz, float3(0.001));
+    float3 uvw = clamp((worldPosition - probeVolume.boundsMin.xyz) / extent, 0.0, 1.0);
+    float3 grid = uvw * float3(
+        counts.x > 1 ? float(counts.x - 1) : 1.0,
+        counts.y > 1 ? float(counts.y - 1) : 1.0,
+        counts.z > 1 ? float(counts.z - 1) : 1.0
+    );
+    float3 cellExtent = extent / float3(
+        counts.x > 1 ? float(counts.x - 1) : 1.0,
+        counts.y > 1 ? float(counts.y - 1) : 1.0,
+        counts.z > 1 ? float(counts.z - 1) : 1.0
+    );
+    float localityRadius = max(length(cellExtent) * 1.1, 0.35);
+
+    uint3 base = uint3(floor(grid));
+    uint3 next = min(base + 1u, counts - 1u);
+    float3 frac = fract(grid);
+    float roughnessBlend = saturate(roughness * roughness);
+    float roughnessFilterStrength = max(probeVolume.reflectionParams.x, 0.0);
+    float roughnessFilterAmount = saturate(roughness * roughnessFilterStrength);
+    float3 baseSampleDirection = normalize(mix(reflectionDirection, normal, roughnessBlend));
+    float candidateWeights[8];
+    float3 candidateSamples[8];
+    float candidateOcclusion[8];
+    float fallbackWeights[8];
+    float fallbackOcclusion[8];
+
+    float3 accum = float3(0.0);
+    float accumWeight = 0.0;
+    float accumOcclusion = 0.0;
+    for (uint corner = 0; corner < 8u; ++corner) {
+        uint sx = (corner & 1u) != 0u ? next.x : base.x;
+        uint sy = (corner & 2u) != 0u ? next.y : base.y;
+        uint sz = (corner & 4u) != 0u ? next.z : base.z;
+        float wx = (corner & 1u) != 0u ? frac.x : (1.0 - frac.x);
+        float wy = (corner & 2u) != 0u ? frac.y : (1.0 - frac.y);
+        float wz = (corner & 4u) != 0u ? frac.z : (1.0 - frac.z);
+        float baseWeight = wx * wy * wz;
+
+        const device ProbeAmbientCubeData& probe = probes[probe_volume_index(sx, sy, sz, counts)];
+        float visibilityWeight = max(probe.positionAndValidity.w, 0.05);
+        float3 probeToPoint = worldPosition - probe.positionAndValidity.xyz;
+        float probeDistance = length(probeToPoint);
+        if (probeDistance > 0.001) {
+            float visibilityDistance = sample_probe_visibility_cube(probe, probeToPoint / probeDistance);
+            float fadeRange = max(0.3, visibilityDistance * 0.35);
+            float leakage = max(probeDistance - visibilityDistance, 0.0);
+            float visibilityFade = saturate(1.0 - leakage / fadeRange);
+            visibilityWeight *= visibilityFade * visibilityFade;
+        }
+
+        float3 correctedDirection = parallax_correct_probe_direction(probe, probeVolume, worldPosition, baseSampleDirection);
+        float3 sampleDirection = normalize(mix(correctedDirection, baseSampleDirection, roughnessBlend));
+        float3 sampleValue = sample_probe_specular_filtered_cube(
+            probe,
+            sampleDirection,
+            normal,
+            roughness,
+            roughnessFilterStrength
+        );
+        float directionalOcclusion = 1.0;
+        if (probeVolume.blendParams.z > 0.5) {
+            directionalOcclusion = compute_probe_directional_occlusion(probe, worldPosition, sampleDirection, localityRadius);
+        }
+        float localityWeight = saturate(1.0 - probeDistance / localityRadius);
+        localityWeight = max(localityWeight * localityWeight, 0.05);
+        localityWeight = mix(localityWeight, sqrt(localityWeight), roughnessFilterAmount);
+        candidateSamples[corner] = sampleValue * directionalOcclusion;
+        candidateOcclusion[corner] = directionalOcclusion;
+        fallbackWeights[corner] = baseWeight * visibilityWeight;
+        fallbackOcclusion[corner] = directionalOcclusion;
+        candidateWeights[corner] = baseWeight * visibilityWeight * localityWeight;
+    }
+
+    float sharpness = mix(max(probeVolume.blendParams.x, 1.0), 1.0, roughnessFilterAmount * 0.85);
+    int blendLimit = clamp(int(probeVolume.blendParams.y + 0.5), 1, 8);
+    bool consumed[8] = {false, false, false, false, false, false, false, false};
+    for (int selection = 0; selection < blendLimit; ++selection) {
+        int bestIndex = -1;
+        float bestWeight = 0.0;
+        for (int candidate = 0; candidate < 8; ++candidate) {
+            if (consumed[candidate]) {
+                continue;
+            }
+            if (candidateWeights[candidate] > bestWeight) {
+                bestWeight = candidateWeights[candidate];
+                bestIndex = candidate;
+            }
+        }
+
+        if (bestIndex < 0 || bestWeight <= 1e-5) {
+            break;
+        }
+
+        consumed[bestIndex] = true;
+        float selectedWeight = pow(bestWeight, sharpness);
+        accum += candidateSamples[bestIndex] * selectedWeight;
+        accumWeight += selectedWeight;
+        accumOcclusion += candidateOcclusion[bestIndex] * selectedWeight;
+    }
+
+    if (accumWeight <= 1e-4) {
+        float3 fallbackAccum = float3(0.0);
+        float fallbackWeight = 0.0;
+        float fallbackOccAccum = 0.0;
+        for (int candidate = 0; candidate < 8; ++candidate) {
+            fallbackAccum += candidateSamples[candidate] * fallbackWeights[candidate];
+            fallbackWeight += fallbackWeights[candidate];
+            fallbackOccAccum += fallbackOcclusion[candidate] * fallbackWeights[candidate];
+        }
+        if (fallbackWeight <= 1e-4) {
+            return float4(0.0);
+        }
+        float fallbackOcc = fallbackOccAccum / fallbackWeight;
+        return float4(max(fallbackAccum / fallbackWeight, float3(0.0)), saturate(fallbackWeight * fallbackOcc));
+    }
+    float reflectionOcclusion = accumOcclusion / accumWeight;
+    return float4(max(accum / accumWeight, float3(0.0)), saturate(accumWeight * reflectionOcclusion));
+}
+
 fragment float4 fragment_main(
     VertexOut in [[stage_in]],
     constant CameraUniforms& camera [[buffer(0)]],
@@ -2271,6 +2616,8 @@ fragment float4 fragment_main(
     const device ClusterHeader* clusterHeaders [[buffer(7)]],
     const device uint* clusterIndices [[buffer(8)]],
     constant ClusterParams& clusterParams [[buffer(9)]],
+    constant ProbeVolumeUniforms& probeVolume [[buffer(10)]],
+    const device ProbeAmbientCubeData* probeData [[buffer(11)]],
     texture2d<float> albedoMap [[texture(0)]],
     texture2d<float> normalMap [[texture(1)]],
     texture2d<float> metallicMap [[texture(2)]],
@@ -2302,6 +2649,9 @@ fragment float4 fragment_main(
     texture2d<float> terrainLayer0OrmMap [[texture(28)]],
     texture2d<float> terrainLayer1OrmMap [[texture(29)]],
     texture2d<float> terrainLayer2OrmMap [[texture(30)]],
+    texture2d<float> staticLightmap [[texture(31)]],
+    texture2d<float> directionalStaticLightmap [[texture(32)]],
+    texture2d<float> shadowmaskStaticLightmap [[texture(33)]],
     sampler textureSampler [[sampler(0)]],
     sampler environmentSampler [[sampler(1)]],
     sampler shadowSampler [[sampler(2)]]
@@ -2483,6 +2833,10 @@ fragment float4 fragment_main(
     
     // Reflectance equation
     float3 Lo = float3(0.0);
+    float4 shadowmaskSample = float4(1.0);
+    if (in.staticLightmapFlag > 0.5) {
+        shadowmaskSample = shadowmaskStaticLightmap.sample(textureSampler, saturate(in.lightmapTexCoord));
+    }
     
     // Iterate dynamic lights if provided; otherwise fall back to legacy main light
     if (lightCount > 0 && clusterHeaders && clusterIndices) {
@@ -2543,8 +2897,12 @@ fragment float4 fragment_main(
             float3 kS = F;
             float3 kD = (float3(1.0) - kS) * (1.0 - metallic);
             
-            bool usePCSS = ((uint)Ld.shadowCookie.w & 1u) != 0;
-            bool useContact = ((uint)Ld.shadowCookie.w & 2u) != 0;
+            uint lightFlags = (uint)round(Ld.shadowCookie.w);
+            bool usePCSS = (lightFlags & 1u) != 0u;
+            bool useContact = (lightFlags & 2u) != 0u;
+            bool bakedDirect = (lightFlags & 8u) != 0u;
+            uint mobility = (lightFlags >> 4u) & 0x3u;
+            int shadowmaskChannel = int((lightFlags >> 6u) & 0x7u) - 1;
             int shadowIdx = (int)round(Ld.shadowCookie.x);
             int cascadeCount = (type == 0 && Ld.shadowCookie.z >= 1.0) ? (int)round(Ld.shadowCookie.z) : 1;
             float3 LdirWorld = normalize((camera.viewMatrixInverse * float4(LdirWS, 0.0)).xyz);
@@ -2559,9 +2917,33 @@ fragment float4 fragment_main(
                     shadow = sampleShadow(shadowData, shadowIdx, cascadeCount, viewDepth, in.worldPosition, N, LdirWorld, shadowAtlas, shadowSampler, usePCSS, useContact);
                 }
             }
+
+            bool bakedStaticReceiver = in.staticLightmapFlag > 0.5 && bakedDirect;
+            if (bakedStaticReceiver) {
+                if (mobility == 0u) {
+                    continue;
+                }
+                if (mobility == 1u) {
+                    if (shadowmaskChannel < 0 || shadowmaskChannel > 3) {
+                        continue;
+                    }
+                    float shadowmaskVisibility = 1.0;
+                    switch (shadowmaskChannel) {
+                        case 0: shadowmaskVisibility = shadowmaskSample.x; break;
+                        case 1: shadowmaskVisibility = shadowmaskSample.y; break;
+                        case 2: shadowmaskVisibility = shadowmaskSample.z; break;
+                        case 3: shadowmaskVisibility = shadowmaskSample.w; break;
+                    }
+                    shadow = (receiveShadows > 0.5) ? shadowmaskVisibility : 1.0;
+                }
+            }
             
             float3 radiance = Ld.colorIntensity.rgb * Ld.colorIntensity.w * attenuation * shadow;
-            Lo += (kD * albedo / PI + specular) * radiance * NdotL;
+            if (bakedStaticReceiver && mobility == 1u) {
+                Lo += specular * radiance * NdotL;
+            } else {
+                Lo += (kD * albedo / PI + specular) * radiance * NdotL;
+            }
         }
     } else {
         // Legacy single directional light
@@ -2588,7 +2970,10 @@ fragment float4 fragment_main(
     // ENVIRONMENT LIGHTING (IBL)
     // ========================================
     float3 environmentLighting = float3(0.0);
+    float3 environmentDiffuseLighting = float3(0.0);
+    float3 environmentSpecularLighting = float3(0.0);
     float NdotV = max(dot(N, V), 0.0);
+    float3 R = reflect(-V, N);
     
     // Check if we have proper IBL textures (environment.toneControl.y)
     bool hasProperIBL = environment.toneControl.y > 0.5;
@@ -2601,7 +2986,6 @@ fragment float4 fragment_main(
         // Apply environment rotation to directions
         float3x3 envRot = environmentRotation(environment);
         float3 rotatedN = envRot * N;
-        float3 R = reflect(-V, N);
         float3 rotatedR = envRot * R;
         
         // Diffuse IBL - sample irradiance cubemap
@@ -2622,10 +3006,8 @@ fragment float4 fragment_main(
         float3 kD = (1.0 - kS) * (1.0 - metallic);
         
         // Combine diffuse and specular IBL
-        float3 diffuseIBL = kD * irradiance * albedo;
-        float3 specularIBL = prefilteredColor * (F * envBRDF.x + envBRDF.y);
-        
-        environmentLighting = (diffuseIBL + specularIBL);
+        environmentDiffuseLighting = kD * irradiance * albedo;
+        environmentSpecularLighting = prefilteredColor * (F * envBRDF.x + envBRDF.y);
     } else {
         // ========================================
         // FALLBACK IBL with LOD-based sampling
@@ -2638,7 +3020,6 @@ fragment float4 fragment_main(
         float3 diffuseIBL = irradiance * albedo;
         
         // Specular - roughness-based blur
-        float3 R = reflect(-V, N);
         float roughLod = roughness * 6.0;
         float3 specularIBL = sampleEnvironment(environmentMap, environmentSampler, R, roughLod, environment);
         
@@ -2646,12 +3027,14 @@ fragment float4 fragment_main(
         float2 envBRDF = float2(1.0 - roughness, 0.0); // Rough approximation
         specularIBL *= (kS_ibl * envBRDF.x + envBRDF.y);
         
-        environmentLighting = (kD_ibl * diffuseIBL + specularIBL);
+        environmentDiffuseLighting = kD_ibl * diffuseIBL;
+        environmentSpecularLighting = specularIBL;
     }
     
     // AO should mostly shape indirect lighting, but full-strength AO often causes muddy shadows.
     float indirectAO = mix(1.0, ao, 0.6);
-    environmentLighting *= environment.exposureIntensity.y * indirectAO; // IBL intensity
+    environmentDiffuseLighting *= environment.exposureIntensity.y * indirectAO;
+    environmentSpecularLighting *= environment.exposureIntensity.y;
     
     // Artist-controlled ambient fill in physically-plausible diffuse form.
     float3 ambientRadiance = environment.ambientColorIntensity.rgb * environment.ambientColorIntensity.w;
@@ -2659,11 +3042,53 @@ fragment float4 fragment_main(
     float3 kD_ambient = (float3(1.0) - F_ambient) * (1.0 - metallic);
     float ambientAO = mix(1.0, ao, 0.35);
     float3 ambientLighting = ambientRadiance * (kD_ambient * albedo / PI) * ambientAO;
+    float3 probeLighting = float3(0.0);
+    if (in.staticLightmapFlag < 0.5 && probeVolume.gridCounts.w > 0.5 && probeVolume.featureParams.x > 0.5) {
+        probeLighting = sample_probe_volume_irradiance(probeData, probeVolume, in.worldPosition, N);
+    }
+    float probeAO = mix(1.0, ao, 0.5);
+    float3 probeIndirect = probeLighting * (kD_ambient * albedo / PI) * probeAO;
+    float3 F_probe = fresnelSchlickRoughness(NdotV, F0, roughness);
+    float2 probeBRDF = hasProperIBL
+        ? brdfLUT.sample(environmentSampler, float2(NdotV, roughness)).rg
+        : float2(1.0 - roughness, 0.0);
+    float4 localReflectionSample = sample_probe_volume_reflection(probeData, probeVolume, in.worldPosition, R, N, roughness);
+    float localReflectionWeight = localReflectionSample.a * saturate(probeVolume.featureParams.z);
+    float specularOcclusionStrength = clamp(probeVolume.blendParams.w, 0.0, 2.0);
+    float specularAO = mix(1.0, compute_specular_occlusion(ao, NdotV, roughness), saturate(specularOcclusionStrength));
+    if (specularOcclusionStrength > 1.0) {
+        specularAO = pow(max(specularAO, 1e-3), specularOcclusionStrength);
+    }
+    float probeSpecularOcclusion = 1.0;
+    if (probeVolume.blendParams.z > 0.5 && probeVolume.featureParams.y > 0.5 && localReflectionSample.a > 1e-4) {
+        probeSpecularOcclusion = mix(1.0, saturate(localReflectionSample.a), 0.65);
+    }
+    float3 localReflectionLighting = localReflectionSample.rgb * (F_probe * probeBRDF.x + probeBRDF.y) * specularAO;
+    localReflectionLighting *= probeSpecularOcclusion;
+    environmentSpecularLighting *= specularAO * probeSpecularOcclusion;
+    environmentSpecularLighting = mix(environmentSpecularLighting, localReflectionLighting, saturate(localReflectionWeight));
+    environmentLighting = environmentDiffuseLighting + environmentSpecularLighting;
     
     float3 bakedDirect = float3(0.0);
     if (in.bakedLightingFlag > 0.5) {
         float3 bakedKD = (float3(1.0) - F0) * (1.0 - metallic);
         bakedDirect = bakedKD * albedo / PI * max(in.color.rgb, float3(0.0));
+    }
+    if (in.staticLightmapFlag > 0.5) {
+        float2 lightmapUV = clamp(in.lightmapTexCoord, float2(0.0), float2(1.0));
+        float3 bakedRadiance = max(staticLightmap.sample(textureSampler, lightmapUV).rgb * 16.0, float3(0.0));
+        float4 directionalSample = directionalStaticLightmap.sample(textureSampler, lightmapUV);
+        float3 dominantVector = directionalSample.rgb * 2.0 - 1.0;
+        float directionality = saturate(length(dominantVector));
+        if (directionality > 0.001) {
+            float3 dominantDirection = dominantVector / directionality;
+            float referenceNoL = max(directionalSample.a, 0.125);
+            float relitNoL = saturate(dot(N, dominantDirection));
+            float directionalFactor = clamp(relitNoL / referenceNoL, 0.0, 2.0);
+            bakedRadiance *= mix(1.0, directionalFactor, directionality);
+        }
+        float3 bakedKD = (float3(1.0) - F0) * (1.0 - metallic);
+        bakedDirect += bakedKD * albedo / PI * bakedRadiance;
     }
 
     // Add emission (unpack from Vector4)
@@ -2673,7 +3098,7 @@ fragment float4 fragment_main(
     }
     
     // Final color - dynamic direct + baked direct + IBL + ambient fill + emission
-    float3 color = Lo + bakedDirect + environmentLighting + ambientLighting + emission;
+    float3 color = Lo + bakedDirect + environmentLighting + ambientLighting + probeIndirect + emission;
     
     // ========== DEBUG: Check shadow map content ==========
     #if 0

@@ -2,6 +2,7 @@
 #include "SceneCommands.hpp"
 #include "../Assets/AssetDatabase.hpp"
 #include "../Core/Engine.hpp"
+#include "../Project/Project.hpp"
 #include "../Renderer/Renderer.hpp"
 #include "../Rendering/Texture.hpp"
 #include "../Components/MeshRenderer.hpp"
@@ -30,10 +31,13 @@
 #include "../ECS/Transform.hpp"
 #include "../../../ThirdParty/nlohmann/json.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -53,6 +57,171 @@ json Vec3ToJson(const Math::Vector3& v) {
 
 json Vec4ToJson(const Math::Vector4& v) {
     return json::array({v.x, v.y, v.z, v.w});
+}
+
+std::string FormatUTCNowISO8601() {
+    using clock = std::chrono::system_clock;
+    std::time_t now = clock::to_time_t(clock::now());
+    std::tm utc{};
+#if defined(_WIN32)
+    gmtime_s(&utc, &now);
+#else
+    gmtime_r(&now, &utc);
+#endif
+    std::ostringstream stream;
+    stream << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+    return stream.str();
+}
+
+std::string NormalizePathString(const std::string& path) {
+    if (path.empty()) {
+        return "";
+    }
+    std::error_code ec;
+    std::filesystem::path normalized = std::filesystem::weakly_canonical(path, ec);
+    if (ec) {
+        normalized = std::filesystem::path(path).lexically_normal();
+    }
+    return normalized.generic_string();
+}
+
+std::string SanitizeFileComponent(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+    for (char c : value) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        } else if (c == '_' || c == '-') {
+            result.push_back(c);
+        } else if (std::isspace(static_cast<unsigned char>(c)) || c == '.') {
+            result.push_back('_');
+        }
+    }
+    while (!result.empty() && result.front() == '_') {
+        result.erase(result.begin());
+    }
+    while (!result.empty() && result.back() == '_') {
+        result.pop_back();
+    }
+    return result.empty() ? "scene" : result;
+}
+
+std::string GetProjectRootPath() {
+    if (auto project = ProjectManager::getInstance().getActiveProject()) {
+        return NormalizePathString(project->getRootPath());
+    }
+
+    AssetDatabase& db = AssetDatabase::getInstance();
+    if (!db.getLibraryPath().empty()) {
+        return NormalizePathString(std::filesystem::path(db.getLibraryPath()).parent_path().string());
+    }
+    if (!db.getRootPath().empty()) {
+        return NormalizePathString(std::filesystem::path(db.getRootPath()).parent_path().string());
+    }
+    return "";
+}
+
+std::string MakeProjectRelativePath(const std::string& path) {
+    if (path.empty()) {
+        return "";
+    }
+
+    std::string projectRoot = GetProjectRootPath();
+    if (projectRoot.empty()) {
+        return std::filesystem::path(path).lexically_normal().generic_string();
+    }
+
+    std::filesystem::path normalizedPath(NormalizePathString(path));
+    std::error_code ec;
+    std::filesystem::path relative = std::filesystem::relative(normalizedPath, std::filesystem::path(projectRoot), ec);
+    if (!ec && !relative.empty() && !relative.is_absolute() && relative.native().front() != '.') {
+        return relative.generic_string();
+    }
+    return normalizedPath.generic_string();
+}
+
+std::string ResolveProjectPath(const std::string& path) {
+    if (path.empty()) {
+        return "";
+    }
+    std::filesystem::path stored(path);
+    if (stored.is_absolute()) {
+        return NormalizePathString(stored.string());
+    }
+    std::string projectRoot = GetProjectRootPath();
+    if (projectRoot.empty()) {
+        return stored.lexically_normal().generic_string();
+    }
+    return NormalizePathString((std::filesystem::path(projectRoot) / stored).string());
+}
+
+std::string ResolveStaticLightingOutputDirectory(const SceneStaticLightingSettings& settings) {
+    if (settings.outputDirectory.empty()) {
+        return ResolveProjectPath("Library/BakedLighting");
+    }
+    return ResolveProjectPath(settings.outputDirectory);
+}
+
+std::string ResolveSceneStem(const Scene* scene, const std::string& scenePath) {
+    std::filesystem::path sourcePath(scenePath);
+    std::string stem = sourcePath.stem().string();
+    if (stem.empty() && scene) {
+        stem = SanitizeFileComponent(scene->getName());
+    }
+    return stem.empty() ? "scene" : stem;
+}
+
+std::string BuildStaticLightingArtifactPath(const Scene* scene,
+                                            const std::string& scenePath,
+                                            int atlasIndex,
+                                            const char* suffix) {
+    if (atlasIndex < 0 || !suffix) {
+        return "";
+    }
+    std::filesystem::path outputDir = ResolveStaticLightingOutputDirectory(scene->getSettings().staticLighting);
+    std::ostringstream name;
+    name << ResolveSceneStem(scene, scenePath) << "_atlas_" << std::setw(3) << std::setfill('0') << atlasIndex << suffix;
+    return NormalizePathString((outputDir / name.str()).string());
+}
+
+bool ShouldPersistStaticLightingManifest(Scene* scene) {
+    if (!scene) {
+        return false;
+    }
+
+    const SceneStaticLightingSettings& settings = scene->getSettings().staticLighting;
+    if (settings.enabled || !settings.bakeManifestPath.empty() || !settings.lastBakeHash.empty()) {
+        return true;
+    }
+
+    for (const auto& entityHandle : scene->getAllEntities()) {
+        Entity* entity = entityHandle.get();
+        if (!entity) {
+            continue;
+        }
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            if (renderer->hasStaticLightingData()) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+json SerializeProjectPathRef(const std::string& path) {
+    if (path.empty()) {
+        return json();
+    }
+
+    std::string stored = MakeProjectRelativePath(path);
+    if (stored.empty()) {
+        return json();
+    }
+    return json{
+        {"path", stored},
+        {"projectRelative", true}
+    };
 }
 
 std::string AnimatorParamTypeToString(AnimatorParameterType type) {
@@ -415,7 +584,7 @@ json SerializeAssetPath(const std::string& path, const char* typeKey, bool inclu
         }
         return ref;
     }
-    return path;
+    return SerializeProjectPathRef(path);
 }
 
 json SerializeMaterial(const Material& material, bool includeCookedTexturePaths = false) {
@@ -511,6 +680,7 @@ json SerializeMeshData(const Mesh& mesh) {
             v.position.x, v.position.y, v.position.z,
             v.normal.x, v.normal.y, v.normal.z,
             v.texCoord.x, v.texCoord.y,
+            v.texCoord1.x, v.texCoord1.y,
             v.tangent.x, v.tangent.y, v.tangent.z,
             v.bitangent.x, v.bitangent.y, v.bitangent.z,
             v.color.x, v.color.y, v.color.z, v.color.w
@@ -574,9 +744,17 @@ std::shared_ptr<Mesh> DeserializeMeshData(const json& j) {
         v.position = Math::Vector3(entry[0], entry[1], entry[2]);
         v.normal = Math::Vector3(entry[3], entry[4], entry[5]);
         v.texCoord = Math::Vector2(entry[6], entry[7]);
-        v.tangent = Math::Vector3(entry[8], entry[9], entry[10]);
-        v.bitangent = Math::Vector3(entry[11], entry[12], entry[13]);
-        v.color = Math::Vector4(entry[14], entry[15], entry[16], entry[17]);
+        if (entry.size() >= 20) {
+            v.texCoord1 = Math::Vector2(entry[8], entry[9]);
+            v.tangent = Math::Vector3(entry[10], entry[11], entry[12]);
+            v.bitangent = Math::Vector3(entry[13], entry[14], entry[15]);
+            v.color = Math::Vector4(entry[16], entry[17], entry[18], entry[19]);
+        } else {
+            v.texCoord1 = v.texCoord;
+            v.tangent = Math::Vector3(entry[8], entry[9], entry[10]);
+            v.bitangent = Math::Vector3(entry[11], entry[12], entry[13]);
+            v.color = Math::Vector4(entry[14], entry[15], entry[16], entry[17]);
+        }
         vertices.push_back(v);
     }
 
@@ -888,6 +1066,8 @@ json SerializePostProcessSettings(const ScenePostProcessSettings& post) {
         {"ssrThickness", post.ssrThickness},
         {"taa", post.taa},
         {"taaSharpness", post.taaSharpness},
+        {"taaSpecularStability", post.taaSpecularStability},
+        {"taaSpecularStabilityStrength", post.taaSpecularStabilityStrength},
         {"fxaa", post.fxaa},
         {"motionBlur", post.motionBlur},
         {"motionBlurStrength", post.motionBlurStrength},
@@ -914,6 +1094,48 @@ json SerializeQualitySettings(const SceneQualitySettings& quality) {
         {"renderScale", quality.renderScale},
         {"lodBias", quality.lodBias},
         {"textureQuality", quality.textureQuality}
+    };
+}
+
+json SerializeStaticLightingSettings(const SceneStaticLightingSettings& staticLighting) {
+    std::string outputDirectory = staticLighting.outputDirectory.empty()
+        ? std::string("Library/BakedLighting")
+        : MakeProjectRelativePath(ResolveStaticLightingOutputDirectory(staticLighting));
+    std::string bakeManifestPath = staticLighting.bakeManifestPath.empty()
+        ? std::string()
+        : MakeProjectRelativePath(ResolveProjectPath(staticLighting.bakeManifestPath));
+    return {
+        {"enabled", staticLighting.enabled},
+        {"mode", staticLighting.mode},
+        {"atlasSize", staticLighting.atlasSize},
+        {"maxAtlasCount", staticLighting.maxAtlasCount},
+        {"texelsPerUnit", staticLighting.texelsPerUnit},
+        {"samplesPerTexel", staticLighting.samplesPerTexel},
+        {"indirectBounces", staticLighting.indirectBounces},
+        {"denoise", staticLighting.denoise},
+        {"directionalLightmaps", staticLighting.directionalLightmaps},
+        {"shadowmask", staticLighting.shadowmask},
+        {"probeVolume", staticLighting.probeVolume},
+        {"localReflectionProbes", staticLighting.localReflectionProbes},
+        {"reflectionProbeBoxProjection", staticLighting.reflectionProbeBoxProjection},
+        {"reflectionProbeOcclusion", staticLighting.reflectionProbeOcclusion},
+        {"probeCountX", staticLighting.probeCountX},
+        {"probeCountY", staticLighting.probeCountY},
+        {"probeCountZ", staticLighting.probeCountZ},
+        {"probeSamples", staticLighting.probeSamples},
+        {"reflectionProbeIntensity", staticLighting.reflectionProbeIntensity},
+        {"reflectionProbeBlendSharpness", staticLighting.reflectionProbeBlendSharpness},
+        {"reflectionProbeFilterStrength", staticLighting.reflectionProbeFilterStrength},
+        {"specularOcclusionStrength", staticLighting.specularOcclusionStrength},
+        {"reflectionProbeMaxBlendCount", staticLighting.reflectionProbeMaxBlendCount},
+        {"probeBoundsMin", Vec3ToJson(staticLighting.probeBoundsMin)},
+        {"probeBoundsMax", Vec3ToJson(staticLighting.probeBoundsMax)},
+        {"autoUnwrap", staticLighting.autoUnwrap},
+        {"unwrapPadding", staticLighting.unwrapPadding},
+        {"outputDirectory", outputDirectory},
+        {"bakeManifestPath", bakeManifestPath},
+        {"probeDataPath", staticLighting.probeDataPath.empty() ? std::string() : MakeProjectRelativePath(ResolveProjectPath(staticLighting.probeDataPath))},
+        {"lastBakeHash", staticLighting.lastBakeHash}
     };
 }
 
@@ -1006,6 +1228,8 @@ ScenePostProcessSettings DeserializePostProcessSettings(const json& j) {
     post.ssrThickness = j.value("ssrThickness", post.ssrThickness);
     post.taa = j.value("taa", post.taa);
     post.taaSharpness = j.value("taaSharpness", post.taaSharpness);
+    post.taaSpecularStability = j.value("taaSpecularStability", post.taaSpecularStability);
+    post.taaSpecularStabilityStrength = j.value("taaSpecularStabilityStrength", post.taaSpecularStabilityStrength);
     post.fxaa = j.value("fxaa", post.fxaa);
     post.motionBlur = j.value("motionBlur", post.motionBlur);
     post.motionBlurStrength = j.value("motionBlurStrength", post.motionBlurStrength);
@@ -1035,6 +1259,182 @@ SceneQualitySettings DeserializeQualitySettings(const json& j) {
     quality.lodBias = j.value("lodBias", quality.lodBias);
     quality.textureQuality = j.value("textureQuality", quality.textureQuality);
     return quality;
+}
+
+SceneStaticLightingSettings DeserializeStaticLightingSettings(const json& j) {
+    SceneStaticLightingSettings staticLighting;
+    if (!j.is_object()) {
+        return staticLighting;
+    }
+    staticLighting.enabled = j.value("enabled", staticLighting.enabled);
+    staticLighting.mode = j.value("mode", staticLighting.mode);
+    staticLighting.atlasSize = j.value("atlasSize", staticLighting.atlasSize);
+    staticLighting.maxAtlasCount = j.value("maxAtlasCount", staticLighting.maxAtlasCount);
+    staticLighting.texelsPerUnit = j.value("texelsPerUnit", staticLighting.texelsPerUnit);
+    staticLighting.samplesPerTexel = j.value("samplesPerTexel", staticLighting.samplesPerTexel);
+    staticLighting.indirectBounces = j.value("indirectBounces", staticLighting.indirectBounces);
+    staticLighting.denoise = j.value("denoise", staticLighting.denoise);
+    staticLighting.directionalLightmaps = j.value("directionalLightmaps", staticLighting.directionalLightmaps);
+    staticLighting.shadowmask = j.value("shadowmask", staticLighting.shadowmask);
+    staticLighting.probeVolume = j.value("probeVolume", staticLighting.probeVolume);
+    staticLighting.localReflectionProbes = j.value("localReflectionProbes", staticLighting.localReflectionProbes);
+    staticLighting.reflectionProbeBoxProjection = j.value("reflectionProbeBoxProjection", staticLighting.reflectionProbeBoxProjection);
+    staticLighting.reflectionProbeOcclusion = j.value("reflectionProbeOcclusion", staticLighting.reflectionProbeOcclusion);
+    staticLighting.probeCountX = j.value("probeCountX", staticLighting.probeCountX);
+    staticLighting.probeCountY = j.value("probeCountY", staticLighting.probeCountY);
+    staticLighting.probeCountZ = j.value("probeCountZ", staticLighting.probeCountZ);
+    staticLighting.probeSamples = j.value("probeSamples", staticLighting.probeSamples);
+    staticLighting.reflectionProbeIntensity = j.value("reflectionProbeIntensity", staticLighting.reflectionProbeIntensity);
+    staticLighting.reflectionProbeBlendSharpness = j.value("reflectionProbeBlendSharpness", staticLighting.reflectionProbeBlendSharpness);
+    staticLighting.reflectionProbeFilterStrength = j.value("reflectionProbeFilterStrength", staticLighting.reflectionProbeFilterStrength);
+    staticLighting.specularOcclusionStrength = j.value("specularOcclusionStrength", staticLighting.specularOcclusionStrength);
+    staticLighting.reflectionProbeMaxBlendCount = j.value("reflectionProbeMaxBlendCount", staticLighting.reflectionProbeMaxBlendCount);
+    if (j.contains("probeBoundsMin")) {
+        staticLighting.probeBoundsMin = JsonToVec3(j["probeBoundsMin"], staticLighting.probeBoundsMin);
+    }
+    if (j.contains("probeBoundsMax")) {
+        staticLighting.probeBoundsMax = JsonToVec3(j["probeBoundsMax"], staticLighting.probeBoundsMax);
+    }
+    staticLighting.autoUnwrap = j.value("autoUnwrap", staticLighting.autoUnwrap);
+    staticLighting.unwrapPadding = j.value("unwrapPadding", staticLighting.unwrapPadding);
+    staticLighting.outputDirectory = j.value("outputDirectory", staticLighting.outputDirectory);
+    staticLighting.bakeManifestPath = j.value("bakeManifestPath", staticLighting.bakeManifestPath);
+    staticLighting.probeDataPath = j.value("probeDataPath", staticLighting.probeDataPath);
+    staticLighting.lastBakeHash = j.value("lastBakeHash", staticLighting.lastBakeHash);
+    return staticLighting;
+}
+
+json SerializeStaticLightingAtlasRecord(const StaticLightingAtlasRecord& atlas) {
+    json j = {
+        {"index", atlas.index},
+        {"width", atlas.width},
+        {"height", atlas.height},
+        {"rendererCount", atlas.rendererCount}
+    };
+    if (!atlas.lightmapPath.empty()) {
+        j["lightmap"] = SerializeProjectPathRef(atlas.lightmapPath);
+    }
+    if (!atlas.directionalLightmapPath.empty()) {
+        j["directionalLightmap"] = SerializeProjectPathRef(atlas.directionalLightmapPath);
+    }
+    if (!atlas.shadowmaskPath.empty()) {
+        j["shadowmask"] = SerializeProjectPathRef(atlas.shadowmaskPath);
+    }
+    if (!atlas.expectedLightmapPath.empty()) {
+        j["expectedLightmap"] = SerializeProjectPathRef(atlas.expectedLightmapPath);
+    }
+    if (!atlas.expectedDirectionalLightmapPath.empty()) {
+        j["expectedDirectionalLightmap"] = SerializeProjectPathRef(atlas.expectedDirectionalLightmapPath);
+    }
+    if (!atlas.expectedShadowmaskPath.empty()) {
+        j["expectedShadowmask"] = SerializeProjectPathRef(atlas.expectedShadowmaskPath);
+    }
+    return j;
+}
+
+StaticLightingAtlasRecord DeserializeStaticLightingAtlasRecord(const json& j) {
+    StaticLightingAtlasRecord atlas;
+    if (!j.is_object()) {
+        return atlas;
+    }
+    atlas.index = j.value("index", atlas.index);
+    atlas.width = j.value("width", atlas.width);
+    atlas.height = j.value("height", atlas.height);
+    atlas.rendererCount = j.value("rendererCount", atlas.rendererCount);
+    if (j.contains("lightmap")) {
+        atlas.lightmapPath = ResolveTextureEntryPath(j["lightmap"]);
+    }
+    if (j.contains("directionalLightmap")) {
+        atlas.directionalLightmapPath = ResolveTextureEntryPath(j["directionalLightmap"]);
+    }
+    if (j.contains("shadowmask")) {
+        atlas.shadowmaskPath = ResolveTextureEntryPath(j["shadowmask"]);
+    }
+    if (j.contains("expectedLightmap")) {
+        atlas.expectedLightmapPath = ResolveTextureEntryPath(j["expectedLightmap"]);
+    }
+    if (j.contains("expectedDirectionalLightmap")) {
+        atlas.expectedDirectionalLightmapPath = ResolveTextureEntryPath(j["expectedDirectionalLightmap"]);
+    }
+    if (j.contains("expectedShadowmask")) {
+        atlas.expectedShadowmaskPath = ResolveTextureEntryPath(j["expectedShadowmask"]);
+    }
+    return atlas;
+}
+
+json SerializeStaticLightingRendererRecord(const StaticLightingRendererRecord& renderer) {
+    json j = {
+        {"entityUUID", renderer.entityUUID},
+        {"entityName", renderer.entityName},
+        {"staticGeometry", renderer.staticGeometry},
+        {"contributeGI", renderer.contributeGI},
+        {"receiveGI", renderer.receiveGI},
+        {"lightmapIndex", renderer.lightmapIndex},
+        {"lightmapUVChannel", renderer.lightmapUVChannel},
+        {"lightmapScaleOffset", Vec4ToJson(renderer.lightmapScaleOffset)}
+    };
+    if (!renderer.lightmapPath.empty()) {
+        j["lightmap"] = SerializeProjectPathRef(renderer.lightmapPath);
+    }
+    if (!renderer.directionalLightmapPath.empty()) {
+        j["directionalLightmap"] = SerializeProjectPathRef(renderer.directionalLightmapPath);
+    }
+    if (!renderer.shadowmaskPath.empty()) {
+        j["shadowmask"] = SerializeProjectPathRef(renderer.shadowmaskPath);
+    }
+    return j;
+}
+
+StaticLightingRendererRecord DeserializeStaticLightingRendererRecord(const json& j) {
+    StaticLightingRendererRecord renderer;
+    if (!j.is_object()) {
+        return renderer;
+    }
+    renderer.entityUUID = j.value("entityUUID", renderer.entityUUID);
+    renderer.entityName = j.value("entityName", renderer.entityName);
+    renderer.staticGeometry = j.value("staticGeometry", renderer.staticGeometry);
+    renderer.contributeGI = j.value("contributeGI", renderer.contributeGI);
+    renderer.receiveGI = j.value("receiveGI", renderer.receiveGI);
+    renderer.lightmapIndex = j.value("lightmapIndex", renderer.lightmapIndex);
+    renderer.lightmapUVChannel = j.value("lightmapUVChannel", renderer.lightmapUVChannel);
+    if (j.contains("lightmapScaleOffset")) {
+        renderer.lightmapScaleOffset = JsonToVec4(j["lightmapScaleOffset"], renderer.lightmapScaleOffset);
+    }
+    if (j.contains("lightmap")) {
+        renderer.lightmapPath = ResolveTextureEntryPath(j["lightmap"]);
+    }
+    if (j.contains("directionalLightmap")) {
+        renderer.directionalLightmapPath = ResolveTextureEntryPath(j["directionalLightmap"]);
+    }
+    if (j.contains("shadowmask")) {
+        renderer.shadowmaskPath = ResolveTextureEntryPath(j["shadowmask"]);
+    }
+    return renderer;
+}
+
+json SerializeStaticLightingManifestJson(const StaticLightingManifest& manifest) {
+    json j = {
+        {"version", manifest.version},
+        {"sceneName", manifest.sceneName},
+        {"scenePath", MakeProjectRelativePath(manifest.scenePath)},
+        {"generatedAtUTC", manifest.generatedAtUTC},
+        {"bakeHash", manifest.bakeHash},
+        {"settings", SerializeStaticLightingSettings(manifest.settings)}
+    };
+
+    json atlases = json::array();
+    for (const auto& atlas : manifest.atlases) {
+        atlases.push_back(SerializeStaticLightingAtlasRecord(atlas));
+    }
+    j["atlases"] = atlases;
+
+    json renderers = json::array();
+    for (const auto& renderer : manifest.renderers) {
+        renderers.push_back(SerializeStaticLightingRendererRecord(renderer));
+    }
+    j["renderers"] = renderers;
+
+    return j;
 }
 
 struct EmbeddedTextureInfo {
@@ -1185,6 +1585,9 @@ std::string ResolveTextureEntryPath(const json& entry) {
         if (entry.contains("path")) {
             std::string stored = entry.value("path", std::string());
             if (!stored.empty()) {
+                if (entry.value("projectRelative", false)) {
+                    return ResolveProjectPath(stored);
+                }
                 return db.resolvePath(stored);
             }
         }
@@ -1496,6 +1899,9 @@ bool DeserializeSceneRoot(Scene* scene, const json& root, const std::string& sce
         if (s.contains("quality")) {
             sceneSettings.quality = DeserializeQualitySettings(s["quality"]);
         }
+        if (s.contains("staticLighting")) {
+            sceneSettings.staticLighting = DeserializeStaticLightingSettings(s["staticLighting"]);
+        }
     }
     scene->setSettings(sceneSettings);
 
@@ -1574,11 +1980,27 @@ bool SceneSerializer::SaveScene(Scene* scene, const std::string& path) {
     if (!scene) {
         return false;
     }
+    if (ShouldPersistStaticLightingManifest(scene)) {
+        SceneSettings updatedSettings = scene->getSettings();
+        std::string manifestPath = SceneSerializer::ResolveStaticLightingManifestPath(scene, path);
+        if (!manifestPath.empty()) {
+            updatedSettings.staticLighting.bakeManifestPath = MakeProjectRelativePath(manifestPath);
+            scene->setSettings(updatedSettings);
+        }
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
     std::ofstream out(path);
     if (!out.is_open()) {
         return false;
     }
     out << SerializeScene(scene, path);
+    if (!out.good()) {
+        return false;
+    }
+    if (ShouldPersistStaticLightingManifest(scene)) {
+        return SceneSerializer::SaveStaticLightingManifest(scene, path);
+    }
     return true;
 }
 
@@ -1859,6 +2281,28 @@ void ApplyEntityComponents(Entity* entity,
             }
             meshRenderer->setBakedVertexColors(bakedColors);
             meshRenderer->setUseBakedVertexLighting(!bakedColors.empty());
+        }
+        if (r.contains("staticLighting") && r["staticLighting"].is_object()) {
+            MeshRenderer::StaticLightingData staticLighting = meshRenderer->getStaticLighting();
+            const json& sl = r["staticLighting"];
+            staticLighting.staticGeometry = sl.value("staticGeometry", staticLighting.staticGeometry);
+            staticLighting.contributeGI = sl.value("contributeGI", staticLighting.contributeGI);
+            staticLighting.receiveGI = sl.value("receiveGI", staticLighting.receiveGI);
+            staticLighting.lightmapIndex = sl.value("lightmapIndex", staticLighting.lightmapIndex);
+            staticLighting.lightmapUVChannel = sl.value("lightmapUVChannel", staticLighting.lightmapUVChannel);
+            if (sl.contains("lightmapScaleOffset")) {
+                staticLighting.lightmapScaleOffset = JsonToVec4(sl["lightmapScaleOffset"], staticLighting.lightmapScaleOffset);
+            }
+            if (sl.contains("lightmap")) {
+                staticLighting.lightmapPath = ResolveTextureEntryPath(sl["lightmap"]);
+            }
+            if (sl.contains("directionalLightmap")) {
+                staticLighting.directionalLightmapPath = ResolveTextureEntryPath(sl["directionalLightmap"]);
+            }
+            if (sl.contains("shadowmask")) {
+                staticLighting.shadowmaskPath = ResolveTextureEntryPath(sl["shadowmask"]);
+            }
+            meshRenderer->setStaticLighting(staticLighting);
         }
     }
 
@@ -2259,7 +2703,13 @@ void ApplyEntityComponents(Entity* entity,
             light->setCascadeSplits(splits);
         }
         light->setVolumetric(l.value("volumetric", light->getVolumetric()));
-        light->setBakeToVertexLighting(l.value("bakeToVertexLighting", light->getBakeToVertexLighting()));
+        bool contributeToStaticBake = l.value(
+            "contributeToStaticBake",
+            l.value("bakeToVertexLighting", light->getContributeToStaticBake())
+        );
+        light->setContributeToStaticBake(contributeToStaticBake);
+        light->setMobility(static_cast<Light::Mobility>(l.value("mobility", static_cast<int>(light->getMobility()))));
+        light->setShadowmaskChannel(l.value("shadowmaskChannel", light->getShadowmaskChannel()));
     }
 
     if (components.contains("Decal")) {
@@ -2435,6 +2885,36 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 if (auto mesh = renderer->getMesh()) {
                     components["MeshRenderer"]["mesh"] = SerializeMeshData(*mesh);
                 }
+            }
+            if (renderer->hasStaticLightingData()) {
+                const auto& staticLighting = renderer->getStaticLighting();
+                json staticLightingJson = {
+                    {"staticGeometry", staticLighting.staticGeometry},
+                    {"contributeGI", staticLighting.contributeGI},
+                    {"receiveGI", staticLighting.receiveGI},
+                    {"lightmapIndex", staticLighting.lightmapIndex},
+                    {"lightmapUVChannel", staticLighting.lightmapUVChannel},
+                    {"lightmapScaleOffset", Vec4ToJson(staticLighting.lightmapScaleOffset)}
+                };
+                if (!staticLighting.lightmapPath.empty()) {
+                    json ref = SerializeAssetPath(staticLighting.lightmapPath, "texture", options.embedRuntimePayloads);
+                    if (!ref.is_null() && !ref.empty()) {
+                        staticLightingJson["lightmap"] = ref;
+                    }
+                }
+                if (!staticLighting.directionalLightmapPath.empty()) {
+                    json ref = SerializeAssetPath(staticLighting.directionalLightmapPath, "texture", options.embedRuntimePayloads);
+                    if (!ref.is_null() && !ref.empty()) {
+                        staticLightingJson["directionalLightmap"] = ref;
+                    }
+                }
+                if (!staticLighting.shadowmaskPath.empty()) {
+                    json ref = SerializeAssetPath(staticLighting.shadowmaskPath, "texture", options.embedRuntimePayloads);
+                    if (!ref.is_null() && !ref.empty()) {
+                        staticLightingJson["shadowmask"] = ref;
+                    }
+                }
+                components["MeshRenderer"]["staticLighting"] = staticLightingJson;
             }
         }
 
@@ -2752,7 +3232,9 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 {"cascadeCount", light->getCascadeCount()},
                 {"cascadeSplits", json::array({light->getCascadeSplits()[0], light->getCascadeSplits()[1], light->getCascadeSplits()[2], light->getCascadeSplits()[3]})},
                 {"volumetric", light->getVolumetric()},
-                {"bakeToVertexLighting", light->getBakeToVertexLighting()}
+                {"contributeToStaticBake", light->getContributeToStaticBake()},
+                {"mobility", static_cast<int>(light->getMobility())},
+                {"shadowmaskChannel", light->getShadowmaskChannel()}
             };
         }
 
@@ -2856,11 +3338,18 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
         settings.environment = EnvironmentFromRenderer(renderer);
         scene->setSettings(settings);
     }
+    if (!scenePath.empty() && ShouldPersistStaticLightingManifest(scene)) {
+        std::string manifestPath = SceneSerializer::ResolveStaticLightingManifestPath(scene, scenePath);
+        if (!manifestPath.empty()) {
+            settings.staticLighting.bakeManifestPath = MakeProjectRelativePath(manifestPath);
+        }
+    }
     json sceneSettings;
     sceneSettings["environment"] = SerializeEnvironmentSettings(settings.environment, options.embedRuntimePayloads);
     sceneSettings["fog"] = SerializeFogSettings(settings.fog);
     sceneSettings["postProcess"] = SerializePostProcessSettings(settings.postProcess);
     sceneSettings["quality"] = SerializeQualitySettings(settings.quality);
+    sceneSettings["staticLighting"] = SerializeStaticLightingSettings(settings.staticLighting);
     root["sceneSettings"] = sceneSettings;
 
     return root;
@@ -2929,6 +3418,165 @@ bool SceneSerializer::DeserializeSceneBinary(Scene* scene, const std::vector<uin
         return false;
     }
     return DeserializeSceneRoot(scene, root, scenePath);
+}
+
+std::string SceneSerializer::ResolveStaticLightingManifestPath(Scene* scene, const std::string& scenePath) {
+    if (!scene) {
+        return "";
+    }
+
+    const SceneStaticLightingSettings& settings = scene->getSettings().staticLighting;
+    if (!settings.bakeManifestPath.empty()) {
+        return ResolveProjectPath(settings.bakeManifestPath);
+    }
+
+    std::filesystem::path outputDir = ResolveStaticLightingOutputDirectory(settings);
+    std::string sceneStem = ResolveSceneStem(scene, scenePath);
+    return NormalizePathString((outputDir / (sceneStem + ".lightmaps.json")).string());
+}
+
+StaticLightingManifest SceneSerializer::BuildStaticLightingManifest(Scene* scene, const std::string& scenePath) {
+    StaticLightingManifest manifest;
+    if (!scene) {
+        return manifest;
+    }
+
+    manifest.sceneName = scene->getName();
+    manifest.scenePath = scenePath.empty() ? std::string() : MakeProjectRelativePath(scenePath);
+    manifest.generatedAtUTC = FormatUTCNowISO8601();
+    manifest.settings = scene->getSettings().staticLighting;
+    manifest.settings.outputDirectory = MakeProjectRelativePath(ResolveStaticLightingOutputDirectory(manifest.settings));
+    manifest.settings.bakeManifestPath = MakeProjectRelativePath(SceneSerializer::ResolveStaticLightingManifestPath(scene, scenePath));
+    manifest.bakeHash = manifest.settings.lastBakeHash;
+
+    std::map<int, size_t> atlasByIndex;
+
+    for (const auto& entityHandle : scene->getAllEntities()) {
+        Entity* entity = entityHandle.get();
+        if (!entity) {
+            continue;
+        }
+
+        auto* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || !renderer->hasStaticLightingData()) {
+            continue;
+        }
+
+        const auto& staticLighting = renderer->getStaticLighting();
+        StaticLightingRendererRecord rendererRecord;
+        rendererRecord.entityUUID = entity->getUUID().toString();
+        rendererRecord.entityName = entity->getName();
+        rendererRecord.staticGeometry = staticLighting.staticGeometry;
+        rendererRecord.contributeGI = staticLighting.contributeGI;
+        rendererRecord.receiveGI = staticLighting.receiveGI;
+        rendererRecord.lightmapIndex = staticLighting.lightmapIndex;
+        rendererRecord.lightmapUVChannel = staticLighting.lightmapUVChannel;
+        rendererRecord.lightmapScaleOffset = staticLighting.lightmapScaleOffset;
+        rendererRecord.lightmapPath = staticLighting.lightmapPath;
+        rendererRecord.directionalLightmapPath = staticLighting.directionalLightmapPath;
+        rendererRecord.shadowmaskPath = staticLighting.shadowmaskPath;
+        manifest.renderers.push_back(rendererRecord);
+
+        if (staticLighting.lightmapIndex < 0) {
+            continue;
+        }
+
+        size_t atlasRecordIndex = 0;
+        auto atlasIt = atlasByIndex.find(staticLighting.lightmapIndex);
+        if (atlasIt == atlasByIndex.end()) {
+            StaticLightingAtlasRecord atlas;
+            atlas.index = staticLighting.lightmapIndex;
+            atlas.width = manifest.settings.atlasSize;
+            atlas.height = manifest.settings.atlasSize;
+            atlas.expectedLightmapPath = BuildStaticLightingArtifactPath(scene, scenePath, atlas.index, "_light.png");
+            if (manifest.settings.directionalLightmaps) {
+                atlas.expectedDirectionalLightmapPath = BuildStaticLightingArtifactPath(scene, scenePath, atlas.index, "_dir.png");
+            }
+            if (manifest.settings.shadowmask) {
+                atlas.expectedShadowmaskPath = BuildStaticLightingArtifactPath(scene, scenePath, atlas.index, "_shadowmask.png");
+            }
+            manifest.atlases.push_back(atlas);
+            atlasRecordIndex = manifest.atlases.size() - 1;
+            atlasByIndex[staticLighting.lightmapIndex] = atlasRecordIndex;
+        } else {
+            atlasRecordIndex = atlasIt->second;
+        }
+
+        StaticLightingAtlasRecord& atlas = manifest.atlases[atlasRecordIndex];
+        atlas.rendererCount += 1;
+        if (!staticLighting.lightmapPath.empty()) {
+            atlas.lightmapPath = staticLighting.lightmapPath;
+        }
+        if (!staticLighting.directionalLightmapPath.empty()) {
+            atlas.directionalLightmapPath = staticLighting.directionalLightmapPath;
+        }
+        if (!staticLighting.shadowmaskPath.empty()) {
+            atlas.shadowmaskPath = staticLighting.shadowmaskPath;
+        }
+    }
+
+    return manifest;
+}
+
+bool SceneSerializer::SaveStaticLightingManifest(Scene* scene, const std::string& scenePath) {
+    if (!scene) {
+        return false;
+    }
+
+    std::string manifestPath = ResolveStaticLightingManifestPath(scene, scenePath);
+    if (manifestPath.empty()) {
+        return false;
+    }
+
+    StaticLightingManifest manifest = BuildStaticLightingManifest(scene, scenePath);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(manifestPath).parent_path(), ec);
+
+    std::ofstream out(manifestPath);
+    if (!out.is_open()) {
+        return false;
+    }
+    out << SerializeStaticLightingManifestJson(manifest).dump(2);
+    return out.good();
+}
+
+bool SceneSerializer::LoadStaticLightingManifest(const std::string& manifestPath, StaticLightingManifest& outManifest) {
+    outManifest = StaticLightingManifest();
+    if (manifestPath.empty()) {
+        return false;
+    }
+
+    std::ifstream in(manifestPath);
+    if (!in.is_open()) {
+        return false;
+    }
+
+    json root = json::parse(in, nullptr, false);
+    if (root.is_discarded() || !root.is_object()) {
+        return false;
+    }
+
+    outManifest.version = root.value("version", outManifest.version);
+    outManifest.sceneName = root.value("sceneName", outManifest.sceneName);
+    outManifest.scenePath = ResolveProjectPath(root.value("scenePath", std::string()));
+    outManifest.generatedAtUTC = root.value("generatedAtUTC", outManifest.generatedAtUTC);
+    outManifest.bakeHash = root.value("bakeHash", outManifest.bakeHash);
+    if (root.contains("settings")) {
+        outManifest.settings = DeserializeStaticLightingSettings(root["settings"]);
+    }
+
+    if (root.contains("atlases") && root["atlases"].is_array()) {
+        for (const auto& entry : root["atlases"]) {
+            outManifest.atlases.push_back(DeserializeStaticLightingAtlasRecord(entry));
+        }
+    }
+    if (root.contains("renderers") && root["renderers"].is_array()) {
+        for (const auto& entry : root["renderers"]) {
+            outManifest.renderers.push_back(DeserializeStaticLightingRendererRecord(entry));
+        }
+    }
+
+    return true;
 }
 
 std::vector<Entity*> SceneSerializer::DuplicateEntities(Scene* scene, const std::vector<Entity*>& entities) {

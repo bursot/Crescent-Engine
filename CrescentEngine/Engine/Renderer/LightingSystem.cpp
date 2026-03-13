@@ -15,6 +15,13 @@ namespace Crescent {
 
 namespace {
 
+constexpr uint32_t kLightFlagSoftShadows = 1u << 0u;
+constexpr uint32_t kLightFlagContactShadows = 1u << 1u;
+constexpr uint32_t kLightFlagVolumetric = 1u << 2u;
+constexpr uint32_t kLightFlagBakedDirect = 1u << 3u;
+constexpr uint32_t kLightMobilityShift = 4u;
+constexpr uint32_t kLightShadowmaskShift = 6u;
+
 std::array<float, 4> BuildCascadeSplitDistances(const Light* light, uint8_t cascadeCount) {
     std::array<float, 4> authoredSplits = light
         ? light->getCascadeSplits()
@@ -174,7 +181,7 @@ void LightingSystem::gatherLights(Scene* scene, Camera* camera) {
         if (!light) {
             continue;
         }
-        if (light->getBakeToVertexLighting()) {
+        if (light->getContributeToStaticBake() && light->getMobility() == Light::Mobility::Static) {
             continue;
         }
         
@@ -557,9 +564,12 @@ void LightingSystem::fillGPUBuffers() {
         gpu.misc = Math::Vector4(innerCos, outerCos, areaSize.x, areaSize.y);
         
         uint32_t flags = 0;
-        if (prepared.light->getSoftShadows()) flags |= 1u;
-        if (prepared.light->getContactShadows()) flags |= 2u;
-        if (prepared.light->getVolumetric()) flags |= 4u;
+        if (prepared.light->getSoftShadows()) flags |= kLightFlagSoftShadows;
+        if (prepared.light->getContactShadows()) flags |= kLightFlagContactShadows;
+        if (prepared.light->getVolumetric()) flags |= kLightFlagVolumetric;
+        if (prepared.light->getContributeToStaticBake()) flags |= kLightFlagBakedDirect;
+        flags |= (static_cast<uint32_t>(prepared.light->getMobility()) & 0x3u) << kLightMobilityShift;
+        flags |= (static_cast<uint32_t>(prepared.light->getShadowmaskChannel() + 1) & 0x7u) << kLightShadowmaskShift;
         
         float shadowIdx = prepared.shadowStart == UINT32_MAX ? -1.0f : static_cast<float>(prepared.shadowStart);
         float shadowCount = static_cast<float>(prepared.shadowCount);

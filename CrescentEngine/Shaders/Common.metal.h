@@ -93,7 +93,35 @@ struct MaterialUniforms {
 struct MeshUniforms {
     float4 boundsCenter; // xyz center, w unused
     float4 boundsSize;   // xyz size, w unused
-    float4 flags;        // x billboard enabled, yzw unused
+    float4 flags;        // x billboard enabled, y vertex-baked, z static lightmap, w unused
+    float4 lightmapScaleOffset; // xy scale, zw offset in atlas UV space
+};
+
+struct ProbeVolumeUniforms {
+    float4 boundsMin;
+    float4 boundsMax;
+    float4 gridCounts; // xyz counts, w enabled
+    float4 featureParams; // x diffuse probes, y local reflections, z reflection intensity, w box projection
+    float4 blendParams; // x blend sharpness, y max blend count, z occlusion enabled, w specular occlusion strength
+    float4 reflectionParams; // x roughness filter strength
+};
+
+struct ProbeAmbientCubeData {
+    float4 px;
+    float4 nx;
+    float4 py;
+    float4 ny;
+    float4 pz;
+    float4 nz;
+    float4 specularPx;
+    float4 specularNx;
+    float4 specularPy;
+    float4 specularNy;
+    float4 specularPz;
+    float4 specularNz;
+    float4 positionAndValidity;
+    float4 visibility0;
+    float4 visibility1;
 };
 
 struct LightData {
@@ -117,7 +145,7 @@ struct LightGPUData {
     float4 directionType;   // xyz view-space dir, w type
     float4 colorIntensity;  // rgb color, w intensity
     float4 misc;            // x cosInner, y cosOuter, z areaX, w areaY
-    float4 shadowCookie;    // x shadowIdx, y cookieIdx, z iesIdx, w flags
+    float4 shadowCookie;    // x shadowIdx, y cookieIdx, z shadowCount/iesIdx, w packed flags
 };
 
 struct ShadowGPUData {

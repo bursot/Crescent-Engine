@@ -1080,17 +1080,25 @@ class EditorState: ObservableObject {
         dockCollapsed = false
         dockTab = .console
         showConsole = true
-        addLog(.info, "Baking vertex lighting...")
+        addLog(.info, "Baking static lighting...")
 
-        let result = CrescentEngineBridge.shared().bakeSceneVertexLighting() as? [String: Any] ?? [:]
-        let meshCount = (result["bakedMeshCount"] as? NSNumber)?.intValue ?? 0
-        let vertexCount = (result["bakedVertexCount"] as? NSNumber)?.intValue ?? 0
+        let result = CrescentEngineBridge.shared().bakeSceneStaticLighting() as? [String: Any] ?? [:]
+        let atlasCount = (result["atlasCount"] as? NSNumber)?.intValue ?? 0
+        let rendererCount = (result["bakedRendererCount"] as? NSNumber)?.intValue ?? 0
+        let texelCount = (result["bakedTexelCount"] as? NSNumber)?.intValue ?? 0
         let lightCount = (result["bakedLightCount"] as? NSNumber)?.intValue ?? 0
+        let staticGeometryCount = (result["staticGeometryRendererCount"] as? NSNumber)?.intValue ?? 0
+        let layoutRendererCount = (result["layoutRendererCount"] as? NSNumber)?.intValue ?? 0
+        let layoutSkippedCount = (result["layoutSkippedRendererCount"] as? NSNumber)?.intValue ?? 0
+        let generatedUVRendererCount = (result["generatedUVRendererCount"] as? NSNumber)?.intValue ?? 0
+        let reusedUVRendererCount = (result["reusedUVRendererCount"] as? NSNumber)?.intValue ?? 0
 
         if lightCount == 0 {
-            addLog(.warning, "No lights are marked 'Bake To Vertex Lighting'.")
+            addLog(.warning, "No lights are marked to contribute to static bake.")
+        } else if atlasCount == 0 || rendererCount == 0 {
+            addLog(.warning, "Static bake produced no output. Static meshes: \(staticGeometryCount), layout-ready: \(layoutRendererCount), skipped: \(layoutSkippedCount), reused UVs: \(reusedUVRendererCount), generated UVs: \(generatedUVRendererCount). Mark a mesh as Material > Static Lighting > Static Geometry.")
         } else {
-            addLog(.info, "Baked \(meshCount) meshes, \(vertexCount) vertices from \(lightCount) baked lights.")
+            addLog(.info, "Baked \(atlasCount) atlases for \(rendererCount) renderers from \(lightCount) static lights (\(texelCount) texels).")
         }
 
         refreshEntityList()

@@ -2301,6 +2301,12 @@ struct MaterialInspector: View {
     @State private var materialAssetName: String = ""
     @State private var showMaterialImporter: Bool = false
     @State private var isEnginePlane: Bool = false
+    @State private var hasStaticLightingControls: Bool = false
+    @State private var staticGeometry: Bool = false
+    @State private var contributeGI: Bool = true
+    @State private var receiveGI: Bool = true
+    @State private var meshCastsShadows: Bool = true
+    @State private var meshReceiveShadows: Bool = true
     
     private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
@@ -2632,6 +2638,73 @@ struct MaterialInspector: View {
                         if offset.count > 1 { offset[1] = newVal }
                         sendScalar(property: "offsetY", value: newVal)
                     }), range: -5...5, step: 0.05, tint: .gray, onChange: { _ in })
+            }
+
+            if hasStaticLightingControls {
+                Divider()
+                    .overlay(EditorTheme.panelStroke)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Static Lighting")
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
+                        .foregroundColor(EditorTheme.textPrimary)
+
+                    Toggle(isOn: Binding(
+                        get: { staticGeometry },
+                        set: { newVal in
+                            staticGeometry = newVal
+                            pushMeshRendererInfo(["staticGeometry": newVal])
+                        })) {
+                        Text("Static Geometry")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+
+                    Text("Only static geometry is included in bake layout and baked lightmaps.")
+                        .font(EditorTheme.font(size: 10, weight: .regular))
+                        .foregroundColor(EditorTheme.textMuted)
+
+                    Toggle(isOn: Binding(
+                        get: { contributeGI },
+                        set: { newVal in
+                            contributeGI = newVal
+                            pushMeshRendererInfo(["contributeGI": newVal])
+                        })) {
+                        Text("Contribute GI")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+                    .disabled(!staticGeometry)
+
+                    Toggle(isOn: Binding(
+                        get: { receiveGI },
+                        set: { newVal in
+                            receiveGI = newVal
+                            pushMeshRendererInfo(["receiveGI": newVal])
+                        })) {
+                        Text("Receive GI")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+                    .disabled(!staticGeometry)
+
+                    Toggle(isOn: Binding(
+                        get: { meshCastsShadows },
+                        set: { newVal in
+                            meshCastsShadows = newVal
+                            pushMeshRendererInfo(["castsShadows": newVal])
+                        })) {
+                        Text("Cast Mesh Shadows")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+
+                    Toggle(isOn: Binding(
+                        get: { meshReceiveShadows },
+                        set: { newVal in
+                            meshReceiveShadows = newVal
+                            pushMeshRendererInfo(["receiveShadows": newVal])
+                        })) {
+                        Text("Receive Mesh Shadows")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    }
+                }
             }
             
             if isEnginePlane {
@@ -2965,6 +3038,17 @@ struct MaterialInspector: View {
             }
             texturePaths = mapped
         }
+
+        if let rendererInfo = bridge.getMeshRendererInfo(uuid: entityUUID) as? [String: Any], !rendererInfo.isEmpty {
+            hasStaticLightingControls = true
+            staticGeometry = (rendererInfo["staticGeometry"] as? NSNumber)?.boolValue ?? staticGeometry
+            contributeGI = (rendererInfo["contributeGI"] as? NSNumber)?.boolValue ?? contributeGI
+            receiveGI = (rendererInfo["receiveGI"] as? NSNumber)?.boolValue ?? receiveGI
+            meshCastsShadows = (rendererInfo["castsShadows"] as? NSNumber)?.boolValue ?? meshCastsShadows
+            meshReceiveShadows = (rendererInfo["receiveShadows"] as? NSNumber)?.boolValue ?? meshReceiveShadows
+        } else {
+            hasStaticLightingControls = false
+        }
     }
 
     private func saveMaterialAsset() {
@@ -3016,6 +3100,13 @@ struct MaterialInspector: View {
             return Array(selectedUUIDs)
         }
         return [entityUUID]
+    }
+
+    private func pushMeshRendererInfo(_ info: [String: Any]) {
+        let bridge = CrescentEngineBridge.shared()
+        for uuid in targetUUIDs() {
+            _ = bridge.setMeshRendererInfo(uuid: uuid, info: info)
+        }
     }
     
     private func colorFrom(_ values: [Float]) -> Color {

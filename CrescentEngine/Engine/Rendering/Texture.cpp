@@ -29,6 +29,7 @@
 #include <vector>
 #include <iostream>
 #include <vector>
+#include <unordered_map>
 
 #define BASISD_SUPPORT_KTX2 1
 #define BASISD_SUPPORT_KTX2_ZSTD 0
@@ -80,6 +81,18 @@ bool isTextureMemDebugEnabled() {
     const char* flag = std::getenv("CRESCENT_TEX_MEM_DEBUG");
     return flag && *flag && std::string(flag) != "0";
 }
+
+struct TextureDebugRecord {
+    std::string path;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t mipLevels = 0;
+    uint64_t approximateBytes = 0;
+    bool srgb = true;
+};
+
+std::mutex g_liveTextureRegistryMutex;
+std::unordered_map<const Crescent::Texture2D*, TextureDebugRecord> g_liveTextureRegistry;
 
 std::string ReadGuidFromMetaSidecar(const std::string& sourcePath) {
     if (sourcePath.empty()) {
@@ -299,6 +312,17 @@ uint64_t ComputeRGBA8MipChainBytes(uint32_t width, uint32_t height) {
     return total;
 }
 
+uint64_t ComputeMipChainBytes(uint32_t width, uint32_t height, uint32_t bytesPerPixel) {
+    uint64_t total = 0;
+    uint32_t levels = ComputeMipLevels(width, height);
+    for (uint32_t level = 0; level < levels; ++level) {
+        uint32_t w = std::max(1u, width >> level);
+        uint32_t h = std::max(1u, height >> level);
+        total += static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * static_cast<uint64_t>(bytesPerPixel);
+    }
+    return total;
+}
+
 void LogTextureMemory(const std::string& label, uint32_t width, uint32_t height, uint32_t levels, uint64_t bytes) {
     if (!isTextureMemDebugEnabled()) {
         return;
@@ -470,10 +494,17 @@ Texture2D::Texture2D()
     : m_Texture(nullptr)
     , m_Width(0)
     , m_Height(0)
+    , m_MipLevelCount(1)
+    , m_ApproximateBytes(0)
     , m_ColorSpace(ColorSpace::SRGB) {
+    updateDebugRegistry();
 }
 
 Texture2D::~Texture2D() {
+    {
+        std::lock_guard<std::mutex> lock(g_liveTextureRegistryMutex);
+        g_liveTextureRegistry.erase(this);
+    }
     if (m_Texture) {
         m_Texture->release();
         m_Texture = nullptr;
@@ -496,6 +527,69 @@ void Texture2D::setHandle(MTL::Texture* texture) {
         m_Texture->release();
     }
     m_Texture = texture;
+    updateDebugRegistry();
+}
+
+void Texture2D::updateDebugRegistry() const {
+    std::lock_guard<std::mutex> lock(g_liveTextureRegistryMutex);
+    TextureDebugRecord& record = g_liveTextureRegistry[this];
+    record.path = m_Path;
+    record.width = m_Width;
+    record.height = m_Height;
+    record.mipLevels = m_MipLevelCount;
+    record.approximateBytes = m_ApproximateBytes;
+    record.srgb = m_ColorSpace == ColorSpace::SRGB;
+}
+
+TextureLiveStats Texture2D::getLiveStats() {
+    TextureLiveStats stats;
+    std::lock_guard<std::mutex> lock(g_liveTextureRegistryMutex);
+    stats.liveTextureCount = g_liveTextureRegistry.size();
+    for (const auto& entry : g_liveTextureRegistry) {
+        stats.approximateBytes += entry.second.approximateBytes;
+    }
+    return stats;
+}
+
+void Texture2D::logLiveStats(const std::string& reason, size_t maxEntries) {
+    std::vector<TextureDebugRecord> records;
+    TextureLiveStats stats;
+    {
+        std::lock_guard<std::mutex> lock(g_liveTextureRegistryMutex);
+        stats.liveTextureCount = g_liveTextureRegistry.size();
+        records.reserve(g_liveTextureRegistry.size());
+        for (const auto& entry : g_liveTextureRegistry) {
+            stats.approximateBytes += entry.second.approximateBytes;
+            records.push_back(entry.second);
+        }
+    }
+
+    double totalMB = static_cast<double>(stats.approximateBytes) / (1024.0 * 1024.0);
+    std::cerr << "[TextureStats] " << reason
+              << " liveTextures=" << stats.liveTextureCount
+              << " approxBytes=" << stats.approximateBytes
+              << " (~" << std::fixed << std::setprecision(2) << totalMB << " MB)"
+              << std::endl;
+
+    std::sort(records.begin(), records.end(), [](const TextureDebugRecord& a, const TextureDebugRecord& b) {
+        if (a.approximateBytes != b.approximateBytes) {
+            return a.approximateBytes > b.approximateBytes;
+        }
+        return a.path < b.path;
+    });
+
+    const size_t entryCount = std::min(maxEntries, records.size());
+    for (size_t i = 0; i < entryCount; ++i) {
+        const TextureDebugRecord& record = records[i];
+        double mb = static_cast<double>(record.approximateBytes) / (1024.0 * 1024.0);
+        std::cerr << "  [TextureStats] #"<< (i + 1)
+                  << " " << (record.path.empty() ? "<unnamed>" : record.path)
+                  << " " << record.width << "x" << record.height
+                  << " mips=" << record.mipLevels
+                  << " approx=" << std::fixed << std::setprecision(2) << mb << " MB"
+                  << (record.srgb ? " srgb" : " linear")
+                  << std::endl;
+    }
 }
 
 TextureLoader::TextureLoader(MTL::Device* device, MTL::CommandQueue* commandQueue)
@@ -593,6 +687,8 @@ std::shared_ptr<Texture2D> TextureLoader::loadTextureUncompressed(const std::str
     auto tex = std::make_shared<Texture2D>();
     tex->setHandle(texture);
     tex->setDimensions(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+    tex->setMipLevelCount(ComputeMipLevels(static_cast<uint32_t>(width), static_cast<uint32_t>(height)));
+    tex->setApproximateBytes(ComputeRGBA8MipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height)));
     tex->setColorSpace(srgb ? Texture2D::ColorSpace::SRGB : Texture2D::ColorSpace::Linear);
     tex->setPath(path);
 
@@ -855,6 +951,8 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
     auto tex = std::make_shared<Texture2D>();
     tex->setHandle(texture);
     tex->setDimensions(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+    tex->setMipLevelCount(ComputeMipLevels(static_cast<uint32_t>(width), static_cast<uint32_t>(height)));
+    tex->setApproximateBytes(ComputeRGBA8MipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height)));
     tex->setColorSpace(srgb ? Texture2D::ColorSpace::SRGB : Texture2D::ColorSpace::Linear);
     if (!cacheKey.empty()) {
         tex->setPath(cacheKey);
@@ -1095,6 +1193,8 @@ std::shared_ptr<Texture2D> TextureLoader::loadKTX2Texture(const std::string& pat
     auto tex = std::make_shared<Texture2D>();
     tex->setHandle(texture);
     tex->setDimensions(width, height);
+    tex->setMipLevelCount(levels);
+    tex->setApproximateBytes(totalBytes);
     tex->setColorSpace(srgb ? Texture2D::ColorSpace::SRGB : Texture2D::ColorSpace::Linear);
     tex->setPath(cacheKey.empty() ? path : cacheKey);
 
@@ -1151,6 +1251,8 @@ std::shared_ptr<Texture2D> TextureLoader::loadHDRTexture(const std::string& path
     auto tex = std::make_shared<Texture2D>();
     tex->setHandle(texture);
     tex->setDimensions(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+    tex->setMipLevelCount(mipLevels);
+    tex->setApproximateBytes(ComputeMipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height), sizeof(float) * 4u));
     tex->setColorSpace(Texture2D::ColorSpace::Linear);
     tex->setPath(path);
     
@@ -1215,6 +1317,8 @@ std::shared_ptr<Texture2D> TextureLoader::createSolidTexture(float r, float g, f
     auto tex = std::make_shared<Texture2D>();
     tex->setHandle(texture);
     tex->setDimensions(width, height);
+    tex->setMipLevelCount(1);
+    tex->setApproximateBytes(4);
     tex->setColorSpace(srgb ? Texture2D::ColorSpace::SRGB : Texture2D::ColorSpace::Linear);
     tex->setPath("builtin://solid");
     

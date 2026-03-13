@@ -29,12 +29,22 @@ struct LightInspector: View {
     @State private var cascadeCount: Int = 4
     @State private var cascadeSplits: [Float] = [0.08, 0.22, 0.5, 1.0]
     @State private var volumetric: Bool = false
-    @State private var bakeToVertexLighting: Bool = false
+    @State private var contributeToStaticBake: Bool = false
+    @State private var mobility: Int = 2
+    @State private var shadowmaskChannel: Int = -1
     
     private let resOptions = [256, 512, 1024, 2048, 4096]
     private let unitOptions = ["Lumens", "Lux", "Nits"]
     private let falloffOptions = ["Linear", "Inverse Square"]
     private let typeOptions = ["Directional", "Point", "Spot", "Area Rect", "Area Disk", "Emissive Mesh"]
+    private let mobilityOptions = ["Static", "Stationary", "Movable"]
+    private let shadowmaskOptions: [(label: String, value: Int)] = [
+        ("Auto", -1),
+        ("R", 0),
+        ("G", 1),
+        ("B", 2),
+        ("A", 3)
+    ]
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -131,7 +141,21 @@ struct LightInspector: View {
                 }
             }
             Toggle("Volumetric", isOn: Binding(get: { volumetric }, set: { volumetric = $0; push(["volumetric": $0]) }))
-            Toggle("Bake To Vertex Lighting", isOn: Binding(get: { bakeToVertexLighting }, set: { bakeToVertexLighting = $0; push(["bakeToVertexLighting": $0]) }))
+            Picker("Mobility", selection: Binding(get: { mobility }, set: { mobility = $0; push(["mobility": $0]) })) {
+                ForEach(0..<mobilityOptions.count, id: \.self) { idx in
+                    Text(mobilityOptions[idx]).tag(idx)
+                }
+            }
+            .pickerStyle(.segmented)
+            if mobility == 1 {
+                Picker("Shadowmask Channel", selection: Binding(get: { shadowmaskChannel }, set: { shadowmaskChannel = $0; push(["shadowmaskChannel": $0]) })) {
+                    ForEach(shadowmaskOptions, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            Toggle("Contribute To Static Bake", isOn: Binding(get: { contributeToStaticBake }, set: { contributeToStaticBake = $0; push(["contributeToStaticBake": $0]) }))
             
             Divider()
             DebugToggles()
@@ -172,7 +196,11 @@ struct LightInspector: View {
             cascadeSplits = splits.map { $0.floatValue }
         }
         volumetric = (info["volumetric"] as? NSNumber)?.boolValue ?? volumetric
-        bakeToVertexLighting = (info["bakeToVertexLighting"] as? NSNumber)?.boolValue ?? bakeToVertexLighting
+        contributeToStaticBake = (info["contributeToStaticBake"] as? NSNumber)?.boolValue
+            ?? (info["bakeToVertexLighting"] as? NSNumber)?.boolValue
+            ?? contributeToStaticBake
+        mobility = (info["mobility"] as? NSNumber)?.intValue ?? mobility
+        shadowmaskChannel = (info["shadowmaskChannel"] as? NSNumber)?.intValue ?? shadowmaskChannel
     }
     
     func push(_ dict: [String: Any]) {

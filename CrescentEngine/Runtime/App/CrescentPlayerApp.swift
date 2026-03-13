@@ -71,11 +71,11 @@ private enum PlayerCommandLine {
                 return 1
             }
 
-            let stats = bridge.bakeSceneVertexLighting()
-            if let meshCount = stats["bakedMeshCount"] as? NSNumber,
+            let stats = bridge.bakeSceneStaticLighting()
+            if let atlasCount = stats["atlasCount"] as? NSNumber,
                let lightCount = stats["bakedLightCount"] as? NSNumber,
-               let vertexCount = stats["bakedVertexCount"] as? NSNumber {
-                fputs("Baked \(meshCount.intValue) meshes from \(lightCount.intValue) lights (\(vertexCount.intValue) vertices).\n", stdout)
+               let texelCount = stats["bakedTexelCount"] as? NSNumber {
+                fputs("Baked \(atlasCount.intValue) lightmap atlases from \(lightCount.intValue) lights (\(texelCount.intValue) texels).\n", stdout)
             }
 
             guard bridge.saveScene(path: outputScenePath) else {

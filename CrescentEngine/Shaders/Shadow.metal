@@ -13,15 +13,15 @@ struct ShadowVertexInUV {
 
 struct ShadowVertexInSkinned {
     float3 position [[attribute(0)]];
-    uint4 boneIndices [[attribute(6)]];
-    float4 boneWeights [[attribute(7)]];
+    uint4 boneIndices [[attribute(7)]];
+    float4 boneWeights [[attribute(8)]];
 };
 
 struct ShadowVertexInSkinnedUV {
     float3 position [[attribute(0)]];
     float2 texCoord [[attribute(2)]];
-    uint4 boneIndices [[attribute(6)]];
-    float4 boneWeights [[attribute(7)]];
+    uint4 boneIndices [[attribute(7)]];
+    float4 boneWeights [[attribute(8)]];
 };
 
 struct ShadowOut {

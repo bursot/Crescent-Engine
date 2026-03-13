@@ -44,12 +44,12 @@ namespace {
         vd->layouts()->object(0)->setStride(72);
         vd->layouts()->object(0)->setStepFunction(MTL::VertexStepFunctionPerVertex);
         if (skinned) {
-            vd->attributes()->object(6)->setFormat(MTL::VertexFormatUInt4);
-            vd->attributes()->object(6)->setOffset(0);
-            vd->attributes()->object(6)->setBufferIndex(4);
-            vd->attributes()->object(7)->setFormat(MTL::VertexFormatFloat4);
-            vd->attributes()->object(7)->setOffset(sizeof(uint32_t) * 4);
+            vd->attributes()->object(7)->setFormat(MTL::VertexFormatUInt4);
+            vd->attributes()->object(7)->setOffset(0);
             vd->attributes()->object(7)->setBufferIndex(4);
+            vd->attributes()->object(8)->setFormat(MTL::VertexFormatFloat4);
+            vd->attributes()->object(8)->setOffset(sizeof(uint32_t) * 4);
+            vd->attributes()->object(8)->setBufferIndex(4);
             vd->layouts()->object(4)->setStride(sizeof(uint32_t) * 4 + sizeof(float) * 4);
             vd->layouts()->object(4)->setStepFunction(MTL::VertexStepFunctionPerVertex);
         }

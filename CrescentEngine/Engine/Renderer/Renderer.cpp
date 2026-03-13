@@ -412,7 +412,8 @@ struct PostProcessParamsGPU {
 struct TAAParamsGPU {
     Math::Matrix4x4 prevViewProjection;
     Math::Vector4 params0; // texelSize.xy, feedback, historyValid
-    Math::Vector4 params1; // sharpness, padding
+    Math::Vector4 params1; // sharpness, useVelocity, depthThreshold, normalThreshold
+    Math::Vector4 params2; // x specular stability enabled, y strength
 };
 
 struct MotionBlurParamsGPU {
@@ -470,6 +471,34 @@ struct MeshUniformsGPU {
     Math::Vector4 boundsCenter;
     Math::Vector4 boundsSize;
     Math::Vector4 flags;
+    Math::Vector4 lightmapScaleOffset;
+};
+
+struct ProbeVolumeUniformsGPU {
+    Math::Vector4 boundsMin;
+    Math::Vector4 boundsMax;
+    Math::Vector4 gridCounts;
+    Math::Vector4 featureParams;
+    Math::Vector4 blendParams;
+    Math::Vector4 reflectionParams;
+};
+
+struct ProbeAmbientCubeDataGPU {
+    Math::Vector4 px;
+    Math::Vector4 nx;
+    Math::Vector4 py;
+    Math::Vector4 ny;
+    Math::Vector4 pz;
+    Math::Vector4 nz;
+    Math::Vector4 specularPx;
+    Math::Vector4 specularNx;
+    Math::Vector4 specularPy;
+    Math::Vector4 specularNy;
+    Math::Vector4 specularPz;
+    Math::Vector4 specularNz;
+    Math::Vector4 positionAndValidity;
+    Math::Vector4 visibility0;
+    Math::Vector4 visibility1;
 };
 
 struct LightDataGPU {
@@ -601,6 +630,153 @@ static bool SphereInFrustum(const std::array<Math::Vector4, 6>& planes,
     return true;
 }
 
+void Renderer::updateProbeVolume(const SceneStaticLightingSettings& staticLighting) {
+    auto clearProbeVolume = [&]() {
+        if (m_probeVolumeBuffer) {
+            m_probeVolumeBuffer->release();
+            m_probeVolumeBuffer = nullptr;
+        }
+        m_probeVolumePath.clear();
+        m_probeVolumeBoundsMin = Math::Vector4::Zero;
+        m_probeVolumeBoundsMax = Math::Vector4::Zero;
+        m_probeVolumeGridCounts = Math::Vector4::Zero;
+        m_probeVolumeFeatureParams = Math::Vector4::Zero;
+        m_probeVolumeBlendParams = Math::Vector4::Zero;
+        m_probeVolumeReflectionParams = Math::Vector4::Zero;
+    };
+
+    m_probeVolumeFeatureParams = Math::Vector4(
+        staticLighting.probeVolume ? 1.0f : 0.0f,
+        staticLighting.localReflectionProbes ? 1.0f : 0.0f,
+        std::max(0.0f, staticLighting.reflectionProbeIntensity),
+        staticLighting.reflectionProbeBoxProjection ? 1.0f : 0.0f
+    );
+    m_probeVolumeBlendParams = Math::Vector4(
+        Math::Clamp(staticLighting.reflectionProbeBlendSharpness, 1.0f, 8.0f),
+        static_cast<float>(std::max(1, std::min(8, staticLighting.reflectionProbeMaxBlendCount))),
+        staticLighting.reflectionProbeOcclusion ? 1.0f : 0.0f,
+        Math::Clamp(staticLighting.specularOcclusionStrength, 0.0f, 2.0f)
+    );
+    m_probeVolumeReflectionParams = Math::Vector4(
+        Math::Clamp(staticLighting.reflectionProbeFilterStrength, 0.0f, 2.0f),
+        0.0f,
+        0.0f,
+        0.0f
+    );
+
+    if (!m_device || !staticLighting.probeVolume || staticLighting.probeDataPath.empty()) {
+        clearProbeVolume();
+        return;
+    }
+
+    if (m_probeVolumeBuffer && m_probeVolumePath == staticLighting.probeDataPath) {
+        return;
+    }
+
+    struct ProbeVolumeFileHeader {
+        char magic[4];
+        uint32_t version;
+        uint32_t countX;
+        uint32_t countY;
+        uint32_t countZ;
+        float boundsMin[3];
+        float boundsMax[3];
+    };
+    struct ProbeVolumeFileRecord {
+        float ambientCube[6][4];
+        float specularCube[6][4];
+        float positionAndValidity[4];
+        float visibility[2][4];
+    };
+
+    std::filesystem::path probePath(staticLighting.probeDataPath);
+    if (probePath.is_relative()) {
+        probePath = std::filesystem::current_path() / probePath;
+    }
+
+    std::ifstream stream(probePath, std::ios::binary);
+    if (!stream.is_open()) {
+        clearProbeVolume();
+        return;
+    }
+
+    ProbeVolumeFileHeader header{};
+    stream.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!stream.good() ||
+        header.magic[0] != 'C' ||
+        header.magic[1] != 'P' ||
+        header.magic[2] != 'R' ||
+        header.magic[3] != 'B' ||
+        header.version != 3u) {
+        clearProbeVolume();
+        return;
+    }
+
+    size_t probeCount = static_cast<size_t>(header.countX) * static_cast<size_t>(header.countY) * static_cast<size_t>(header.countZ);
+    if (probeCount == 0u) {
+        clearProbeVolume();
+        return;
+    }
+
+    std::vector<ProbeAmbientCubeDataGPU> probes(probeCount);
+    for (size_t index = 0; index < probeCount; ++index) {
+        ProbeVolumeFileRecord record{};
+        stream.read(reinterpret_cast<char*>(&record), sizeof(record));
+        if (!stream.good()) {
+            clearProbeVolume();
+            return;
+        }
+        probes[index].px = Math::Vector4(record.ambientCube[0][0], record.ambientCube[0][1], record.ambientCube[0][2], record.ambientCube[0][3]);
+        probes[index].nx = Math::Vector4(record.ambientCube[1][0], record.ambientCube[1][1], record.ambientCube[1][2], record.ambientCube[1][3]);
+        probes[index].py = Math::Vector4(record.ambientCube[2][0], record.ambientCube[2][1], record.ambientCube[2][2], record.ambientCube[2][3]);
+        probes[index].ny = Math::Vector4(record.ambientCube[3][0], record.ambientCube[3][1], record.ambientCube[3][2], record.ambientCube[3][3]);
+        probes[index].pz = Math::Vector4(record.ambientCube[4][0], record.ambientCube[4][1], record.ambientCube[4][2], record.ambientCube[4][3]);
+        probes[index].nz = Math::Vector4(record.ambientCube[5][0], record.ambientCube[5][1], record.ambientCube[5][2], record.ambientCube[5][3]);
+        probes[index].specularPx = Math::Vector4(record.specularCube[0][0], record.specularCube[0][1], record.specularCube[0][2], record.specularCube[0][3]);
+        probes[index].specularNx = Math::Vector4(record.specularCube[1][0], record.specularCube[1][1], record.specularCube[1][2], record.specularCube[1][3]);
+        probes[index].specularPy = Math::Vector4(record.specularCube[2][0], record.specularCube[2][1], record.specularCube[2][2], record.specularCube[2][3]);
+        probes[index].specularNy = Math::Vector4(record.specularCube[3][0], record.specularCube[3][1], record.specularCube[3][2], record.specularCube[3][3]);
+        probes[index].specularPz = Math::Vector4(record.specularCube[4][0], record.specularCube[4][1], record.specularCube[4][2], record.specularCube[4][3]);
+        probes[index].specularNz = Math::Vector4(record.specularCube[5][0], record.specularCube[5][1], record.specularCube[5][2], record.specularCube[5][3]);
+        probes[index].positionAndValidity = Math::Vector4(record.positionAndValidity[0],
+                                                          record.positionAndValidity[1],
+                                                          record.positionAndValidity[2],
+                                                          record.positionAndValidity[3]);
+        probes[index].visibility0 = Math::Vector4(record.visibility[0][0],
+                                                  record.visibility[0][1],
+                                                  record.visibility[0][2],
+                                                  record.visibility[0][3]);
+        probes[index].visibility1 = Math::Vector4(record.visibility[1][0],
+                                                  record.visibility[1][1],
+                                                  record.visibility[1][2],
+                                                  record.visibility[1][3]);
+    }
+
+    if (m_probeVolumeBuffer) {
+        m_probeVolumeBuffer->release();
+        m_probeVolumeBuffer = nullptr;
+    }
+    m_probeVolumeBuffer = m_device->newBuffer(
+        probes.data(),
+        probes.size() * sizeof(ProbeAmbientCubeDataGPU),
+        MTL::ResourceStorageModeShared
+    );
+    if (!m_probeVolumeBuffer) {
+        clearProbeVolume();
+        return;
+    }
+
+    m_probeVolumePath = probePath.lexically_normal().string();
+    m_probeVolumeBoundsMin = Math::Vector4(header.boundsMin[0], header.boundsMin[1], header.boundsMin[2], 0.0f);
+    m_probeVolumeBoundsMax = Math::Vector4(header.boundsMax[0], header.boundsMax[1], header.boundsMax[2], 0.0f);
+    m_probeVolumeGridCounts = Math::Vector4(
+        static_cast<float>(header.countX),
+        static_cast<float>(header.countY),
+        static_cast<float>(header.countZ),
+        1.0f
+    );
+}
+
 Renderer::Renderer()
     : m_device(nullptr)
     , m_commandQueue(nullptr)
@@ -609,6 +785,8 @@ Renderer::Renderer()
     , m_depthStencilState(nullptr)
     , m_skyboxDepthState(nullptr)
     , m_depthReadState(nullptr)
+    , m_debugGridDepthState(nullptr)
+    , m_debugLineDepthState(nullptr)
     , m_prepassPipelineState(nullptr)
     , m_prepassPipelineSkinned(nullptr)
     , m_prepassPipelineInstanced(nullptr)
@@ -679,6 +857,8 @@ Renderer::Renderer()
     , m_clusterHeaderBuffer(nullptr)
     , m_clusterIndexBuffer(nullptr)
     , m_clusterParamsBuffer(nullptr)
+    , m_probeVolumeBuffer(nullptr)
+    , m_probeVolumeFallbackBuffer(nullptr)
     , m_skinningBuffer(nullptr)
     , m_prevSkinningBuffer(nullptr)
     , m_skinningBufferCapacity(0)
@@ -692,6 +872,13 @@ Renderer::Renderer()
     , m_instanceCullCapacity(0)
     , m_instanceCountCapacity(0)
     , m_instanceIndirectCapacity(0)
+    , m_probeVolumePath()
+    , m_probeVolumeBoundsMin(Math::Vector4::Zero)
+    , m_probeVolumeBoundsMax(Math::Vector4::Zero)
+    , m_probeVolumeGridCounts(Math::Vector4::Zero)
+    , m_probeVolumeFeatureParams(Math::Vector4::Zero)
+    , m_probeVolumeBlendParams(Math::Vector4::Zero)
+    , m_probeVolumeReflectionParams(Math::Vector4::Zero)
     , m_samplerState(nullptr)
     , m_shadowSampler(nullptr)
     , m_linearClampSampler(nullptr)
@@ -783,6 +970,10 @@ bool Renderer::initialize() {
     m_materialUniformBuffer = m_device->newBuffer(sizeof(MaterialUniformsGPU), MTL::ResourceStorageModeShared);
     m_lightUniformBuffer = m_device->newBuffer(sizeof(LightDataGPU), MTL::ResourceStorageModeShared);
     m_environmentUniformBuffer = m_device->newBuffer(sizeof(EnvironmentUniformsGPU), MTL::ResourceStorageModeShared);
+    ProbeAmbientCubeDataGPU zeroProbe{};
+    m_probeVolumeFallbackBuffer = m_device->newBuffer(&zeroProbe,
+                                                      sizeof(ProbeAmbientCubeDataGPU),
+                                                      MTL::ResourceStorageModeShared);
     
     rebuildSamplerState(8);
     
@@ -931,6 +1122,14 @@ void Renderer::buildDepthStencilStates() {
         m_depthReadState->release();
         m_depthReadState = nullptr;
     }
+    if (m_debugGridDepthState) {
+        m_debugGridDepthState->release();
+        m_debugGridDepthState = nullptr;
+    }
+    if (m_debugLineDepthState) {
+        m_debugLineDepthState->release();
+        m_debugLineDepthState = nullptr;
+    }
 
     MTL::DepthStencilDescriptor* depthDescriptor = MTL::DepthStencilDescriptor::alloc()->init();
     
@@ -946,6 +1145,58 @@ void Renderer::buildDepthStencilStates() {
     readDescriptor->setDepthWriteEnabled(false);
     m_depthReadState = m_device->newDepthStencilState(readDescriptor);
     readDescriptor->release();
+
+    MTL::DepthStencilDescriptor* gridDescriptor = MTL::DepthStencilDescriptor::alloc()->init();
+    gridDescriptor->setDepthCompareFunction(MTL::CompareFunctionLess);
+    gridDescriptor->setDepthWriteEnabled(false);
+    m_debugGridDepthState = m_device->newDepthStencilState(gridDescriptor);
+    gridDescriptor->release();
+
+    MTL::DepthStencilDescriptor* lineDescriptor = MTL::DepthStencilDescriptor::alloc()->init();
+    lineDescriptor->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
+    lineDescriptor->setDepthWriteEnabled(false);
+    m_debugLineDepthState = m_device->newDepthStencilState(lineDescriptor);
+    lineDescriptor->release();
+}
+
+std::shared_ptr<Texture2D> Renderer::resolveStaticLightingTexture(const std::string& texturePath, bool srgb) {
+    if (!m_textureLoader || texturePath.empty()) {
+        return nullptr;
+    }
+
+    const std::string cacheKey = (srgb ? "srgb:" : "lin:") + texturePath;
+    auto it = m_staticLightingTextureCache.find(cacheKey);
+    if (it != m_staticLightingTextureCache.end()) {
+        return it->second;
+    }
+
+    std::shared_ptr<Texture2D> texture = m_textureLoader->loadTexture(texturePath, srgb, false);
+    if (texture) {
+        m_staticLightingTextureCache[cacheKey] = texture;
+    }
+    return texture;
+}
+
+void Renderer::invalidateStaticLightingResources() {
+    if (m_textureLoader) {
+        for (const auto& entry : m_staticLightingTextureCache) {
+            const std::string& cacheKey = entry.first;
+            size_t prefixEnd = cacheKey.find(':');
+            if (prefixEnd != std::string::npos && prefixEnd + 1 < cacheKey.size()) {
+                m_textureLoader->invalidateTexture(cacheKey.substr(prefixEnd + 1));
+            }
+        }
+    }
+    m_staticLightingTextureCache.clear();
+
+    if (m_probeVolumeBuffer) {
+        m_probeVolumeBuffer->release();
+        m_probeVolumeBuffer = nullptr;
+    }
+    m_probeVolumePath.clear();
+    m_probeVolumeBoundsMin = Math::Vector4::Zero;
+    m_probeVolumeBoundsMax = Math::Vector4::Zero;
+    m_probeVolumeGridCounts = Math::Vector4::Zero;
 }
 
 void Renderer::buildDebugPipelines() {
@@ -1234,40 +1485,44 @@ void Renderer::buildPrepassPipeline() {
 
         MTL::VertexDescriptor* vertexDescriptor = MTL::VertexDescriptor::alloc()->init();
         vertexDescriptor->attributes()->object(0)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(0)->setOffset(0);
+        vertexDescriptor->attributes()->object(0)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, position)));
         vertexDescriptor->attributes()->object(0)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(1)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(1)->setOffset(12);
+        vertexDescriptor->attributes()->object(1)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, normal)));
         vertexDescriptor->attributes()->object(1)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(2)->setFormat(MTL::VertexFormatFloat2);
-        vertexDescriptor->attributes()->object(2)->setOffset(24);
+        vertexDescriptor->attributes()->object(2)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, texCoord)));
         vertexDescriptor->attributes()->object(2)->setBufferIndex(0);
 
+        vertexDescriptor->attributes()->object(6)->setFormat(MTL::VertexFormatFloat2);
+        vertexDescriptor->attributes()->object(6)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, texCoord1)));
+        vertexDescriptor->attributes()->object(6)->setBufferIndex(0);
+
         vertexDescriptor->attributes()->object(3)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(3)->setOffset(32);
+        vertexDescriptor->attributes()->object(3)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, tangent)));
         vertexDescriptor->attributes()->object(3)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(4)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(4)->setOffset(44);
+        vertexDescriptor->attributes()->object(4)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, bitangent)));
         vertexDescriptor->attributes()->object(4)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(5)->setFormat(MTL::VertexFormatFloat4);
-        vertexDescriptor->attributes()->object(5)->setOffset(56);
+        vertexDescriptor->attributes()->object(5)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, color)));
         vertexDescriptor->attributes()->object(5)->setBufferIndex(0);
 
-        vertexDescriptor->layouts()->object(0)->setStride(72);
+        vertexDescriptor->layouts()->object(0)->setStride(static_cast<NS::UInteger>(sizeof(Vertex)));
         vertexDescriptor->layouts()->object(0)->setStepFunction(MTL::VertexStepFunctionPerVertex);
 
         if (skinned) {
-            vertexDescriptor->attributes()->object(6)->setFormat(MTL::VertexFormatUInt4);
-            vertexDescriptor->attributes()->object(6)->setOffset(0);
-            vertexDescriptor->attributes()->object(6)->setBufferIndex(4);
-
-            vertexDescriptor->attributes()->object(7)->setFormat(MTL::VertexFormatFloat4);
-            vertexDescriptor->attributes()->object(7)->setOffset(sizeof(uint32_t) * 4);
+            vertexDescriptor->attributes()->object(7)->setFormat(MTL::VertexFormatUInt4);
+            vertexDescriptor->attributes()->object(7)->setOffset(0);
             vertexDescriptor->attributes()->object(7)->setBufferIndex(4);
+
+            vertexDescriptor->attributes()->object(8)->setFormat(MTL::VertexFormatFloat4);
+            vertexDescriptor->attributes()->object(8)->setOffset(sizeof(uint32_t) * 4);
+            vertexDescriptor->attributes()->object(8)->setBufferIndex(4);
 
             vertexDescriptor->layouts()->object(4)->setStride(sizeof(uint32_t) * 4 + sizeof(float) * 4);
             vertexDescriptor->layouts()->object(4)->setStepFunction(MTL::VertexStepFunctionPerVertex);
@@ -1418,40 +1673,44 @@ void Renderer::buildVelocityPipelines() {
 
         MTL::VertexDescriptor* vertexDescriptor = MTL::VertexDescriptor::alloc()->init();
         vertexDescriptor->attributes()->object(0)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(0)->setOffset(0);
+        vertexDescriptor->attributes()->object(0)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, position)));
         vertexDescriptor->attributes()->object(0)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(1)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(1)->setOffset(12);
+        vertexDescriptor->attributes()->object(1)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, normal)));
         vertexDescriptor->attributes()->object(1)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(2)->setFormat(MTL::VertexFormatFloat2);
-        vertexDescriptor->attributes()->object(2)->setOffset(24);
+        vertexDescriptor->attributes()->object(2)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, texCoord)));
         vertexDescriptor->attributes()->object(2)->setBufferIndex(0);
 
+        vertexDescriptor->attributes()->object(6)->setFormat(MTL::VertexFormatFloat2);
+        vertexDescriptor->attributes()->object(6)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, texCoord1)));
+        vertexDescriptor->attributes()->object(6)->setBufferIndex(0);
+
         vertexDescriptor->attributes()->object(3)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(3)->setOffset(32);
+        vertexDescriptor->attributes()->object(3)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, tangent)));
         vertexDescriptor->attributes()->object(3)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(4)->setFormat(MTL::VertexFormatFloat3);
-        vertexDescriptor->attributes()->object(4)->setOffset(44);
+        vertexDescriptor->attributes()->object(4)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, bitangent)));
         vertexDescriptor->attributes()->object(4)->setBufferIndex(0);
 
         vertexDescriptor->attributes()->object(5)->setFormat(MTL::VertexFormatFloat4);
-        vertexDescriptor->attributes()->object(5)->setOffset(56);
+        vertexDescriptor->attributes()->object(5)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, color)));
         vertexDescriptor->attributes()->object(5)->setBufferIndex(0);
 
-        vertexDescriptor->layouts()->object(0)->setStride(72);
+        vertexDescriptor->layouts()->object(0)->setStride(static_cast<NS::UInteger>(sizeof(Vertex)));
         vertexDescriptor->layouts()->object(0)->setStepFunction(MTL::VertexStepFunctionPerVertex);
 
         if (skinned) {
-            vertexDescriptor->attributes()->object(6)->setFormat(MTL::VertexFormatUInt4);
-            vertexDescriptor->attributes()->object(6)->setOffset(0);
-            vertexDescriptor->attributes()->object(6)->setBufferIndex(4);
-
-            vertexDescriptor->attributes()->object(7)->setFormat(MTL::VertexFormatFloat4);
-            vertexDescriptor->attributes()->object(7)->setOffset(sizeof(uint32_t) * 4);
+            vertexDescriptor->attributes()->object(7)->setFormat(MTL::VertexFormatUInt4);
+            vertexDescriptor->attributes()->object(7)->setOffset(0);
             vertexDescriptor->attributes()->object(7)->setBufferIndex(4);
+
+            vertexDescriptor->attributes()->object(8)->setFormat(MTL::VertexFormatFloat4);
+            vertexDescriptor->attributes()->object(8)->setOffset(sizeof(uint32_t) * 4);
+            vertexDescriptor->attributes()->object(8)->setBufferIndex(4);
 
             vertexDescriptor->layouts()->object(4)->setStride(sizeof(uint32_t) * 4 + sizeof(float) * 4);
             vertexDescriptor->layouts()->object(4)->setStepFunction(MTL::VertexStepFunctionPerVertex);
@@ -2043,48 +2302,53 @@ MTL::RenderPipelineState* Renderer::getPipelineState(const PipelineStateKey& key
     
     // Position (attribute 0)
     vertexDescriptor->attributes()->object(0)->setFormat(MTL::VertexFormatFloat3);
-    vertexDescriptor->attributes()->object(0)->setOffset(0);
+    vertexDescriptor->attributes()->object(0)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, position)));
     vertexDescriptor->attributes()->object(0)->setBufferIndex(0);
     
     // Normal (attribute 1)
     vertexDescriptor->attributes()->object(1)->setFormat(MTL::VertexFormatFloat3);
-    vertexDescriptor->attributes()->object(1)->setOffset(12);
+    vertexDescriptor->attributes()->object(1)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, normal)));
     vertexDescriptor->attributes()->object(1)->setBufferIndex(0);
     
     // TexCoord (attribute 2)
     vertexDescriptor->attributes()->object(2)->setFormat(MTL::VertexFormatFloat2);
-    vertexDescriptor->attributes()->object(2)->setOffset(24);
+    vertexDescriptor->attributes()->object(2)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, texCoord)));
     vertexDescriptor->attributes()->object(2)->setBufferIndex(0);
+
+    // Lightmap TexCoord (attribute 6)
+    vertexDescriptor->attributes()->object(6)->setFormat(MTL::VertexFormatFloat2);
+    vertexDescriptor->attributes()->object(6)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, texCoord1)));
+    vertexDescriptor->attributes()->object(6)->setBufferIndex(0);
     
     // Tangent (attribute 3)
     vertexDescriptor->attributes()->object(3)->setFormat(MTL::VertexFormatFloat3);
-    vertexDescriptor->attributes()->object(3)->setOffset(32);
+    vertexDescriptor->attributes()->object(3)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, tangent)));
     vertexDescriptor->attributes()->object(3)->setBufferIndex(0);
     
     // Bitangent (attribute 4)
     vertexDescriptor->attributes()->object(4)->setFormat(MTL::VertexFormatFloat3);
-    vertexDescriptor->attributes()->object(4)->setOffset(44);
+    vertexDescriptor->attributes()->object(4)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, bitangent)));
     vertexDescriptor->attributes()->object(4)->setBufferIndex(0);
     
     // Color (attribute 5)
     vertexDescriptor->attributes()->object(5)->setFormat(MTL::VertexFormatFloat4);
-    vertexDescriptor->attributes()->object(5)->setOffset(56);
+    vertexDescriptor->attributes()->object(5)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, color)));
     vertexDescriptor->attributes()->object(5)->setBufferIndex(0);
     
     // Vertex buffer layout (stride = sizeof(Vertex))
-    vertexDescriptor->layouts()->object(0)->setStride(72);
+    vertexDescriptor->layouts()->object(0)->setStride(static_cast<NS::UInteger>(sizeof(Vertex)));
     vertexDescriptor->layouts()->object(0)->setStepFunction(MTL::VertexStepFunctionPerVertex);
 
     if (key.isSkinned) {
-        // Bone indices (attribute 6) - uint4
-        vertexDescriptor->attributes()->object(6)->setFormat(MTL::VertexFormatUInt4);
-        vertexDescriptor->attributes()->object(6)->setOffset(0);
-        vertexDescriptor->attributes()->object(6)->setBufferIndex(4);
-
-        // Bone weights (attribute 7) - float4
-        vertexDescriptor->attributes()->object(7)->setFormat(MTL::VertexFormatFloat4);
-        vertexDescriptor->attributes()->object(7)->setOffset(sizeof(uint32_t) * 4);
+        // Bone indices (attribute 7) - uint4
+        vertexDescriptor->attributes()->object(7)->setFormat(MTL::VertexFormatUInt4);
+        vertexDescriptor->attributes()->object(7)->setOffset(0);
         vertexDescriptor->attributes()->object(7)->setBufferIndex(4);
+
+        // Bone weights (attribute 8) - float4
+        vertexDescriptor->attributes()->object(8)->setFormat(MTL::VertexFormatFloat4);
+        vertexDescriptor->attributes()->object(8)->setOffset(sizeof(uint32_t) * 4);
+        vertexDescriptor->attributes()->object(8)->setBufferIndex(4);
 
         vertexDescriptor->layouts()->object(4)->setStride(sizeof(uint32_t) * 4 + sizeof(float) * 4);
         vertexDescriptor->layouts()->object(4)->setStepFunction(MTL::VertexStepFunctionPerVertex);
@@ -3108,6 +3372,7 @@ void Renderer::renderScene(Scene* scene) {
 
 void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOptions& options) {
     if (!scene) return;
+    updateProbeVolume(scene->getSettings().staticLighting);
 
     // Get main camera
     Camera* camera = cameraOverride ? cameraOverride : Camera::getMainCamera();
@@ -4282,6 +4547,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 meshUniforms.boundsCenter = Math::Vector4(boundsCenter.x, boundsCenter.y, boundsCenter.z, 0.0f);
                 meshUniforms.boundsSize = Math::Vector4(boundsSize.x, boundsSize.y, boundsSize.z, 0.0f);
                 meshUniforms.flags = Math::Vector4(0.0f);
+                meshUniforms.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
                 preEncoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
                 preEncoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
             }
@@ -4467,6 +4733,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     meshUniforms.boundsCenter = Math::Vector4(batch.boundsCenter.x, batch.boundsCenter.y, batch.boundsCenter.z, 0.0f);
                     meshUniforms.boundsSize = Math::Vector4(batch.boundsSize.x, batch.boundsSize.y, batch.boundsSize.z, 0.0f);
                     meshUniforms.flags = Math::Vector4(batch.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                    meshUniforms.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
                     preEncoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
                     preEncoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
                     auto albedoTex = (batch.material && batch.material->getAlbedoTexture()) ? batch.material->getAlbedoTexture() : m_defaultWhiteTexture;
@@ -4649,6 +4916,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     meshUniforms.boundsCenter = Math::Vector4(draw.boundsCenter.x, draw.boundsCenter.y, draw.boundsCenter.z, 0.0f);
                     meshUniforms.boundsSize = Math::Vector4(draw.boundsSize.x, draw.boundsSize.y, draw.boundsSize.z, 0.0f);
                     meshUniforms.flags = Math::Vector4(draw.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                    meshUniforms.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
                     preEncoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
                     preEncoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
                     auto albedoTex = (draw.material && draw.material->getAlbedoTexture()) ? draw.material->getAlbedoTexture() : m_defaultWhiteTexture;
@@ -5069,8 +5337,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     // Create render encoder
     MTL::RenderCommandEncoder* encoder = commandBuffer->renderCommandEncoder(renderPass);
     encoder->setDepthStencilState(m_depthStencilState);
-    encoder->setFrontFacingWinding(MTL::WindingCounterClockwise);  // ✅ CCW is Metal/OpenGL standard
-    encoder->setCullMode(MTL::CullModeBack);  // ✅ Cull back faces
+    encoder->setFrontFacingWinding(MTL::WindingCounterClockwise);
+    encoder->setCullMode(MTL::CullModeBack);  
     
     // Set viewport
     encoder->setViewport(viewport);
@@ -5116,12 +5384,6 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     
     // Render all mesh renderers
     const auto& entities = scene->getAllEntities();
-    
-    static bool firstFrame = true;
-    if (firstFrame) {
-        std::cout << "Starting render loop with " << entities.size() << " entities" << std::endl;
-        firstFrame = false;
-    }
     
     int renderedCount = 0;
     for (const auto& entityPtr : entities) {
@@ -5310,6 +5572,11 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             
             encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
             if (!isSkinned) {
+                const auto& staticLighting = meshRenderer->getStaticLighting();
+                std::shared_ptr<Texture2D> staticLightmapTex = resolveStaticLightingTexture(staticLighting.lightmapPath, true);
+                std::shared_ptr<Texture2D> directionalLightmapTex = resolveStaticLightingTexture(staticLighting.directionalLightmapPath, false);
+                std::shared_ptr<Texture2D> shadowmaskLightmapTex = resolveStaticLightingTexture(staticLighting.shadowmaskPath, false);
+                bool hasStaticLightmap = staticLightmapTex && !staticLighting.lightmapPath.empty();
                 MeshUniformsGPU meshUniforms{};
                 Math::Vector3 boundsCenter = mesh->getBoundsCenter();
                 Math::Vector3 boundsSize = mesh->getBoundsSize();
@@ -5318,11 +5585,21 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 meshUniforms.flags = Math::Vector4(
                     0.0f,
                     meshRenderer->getUseBakedVertexLighting() ? 1.0f : 0.0f,
-                    0.0f,
+                    hasStaticLightmap ? 1.0f : 0.0f,
                     0.0f
                 );
+                meshUniforms.lightmapScaleOffset = hasStaticLightmap
+                    ? staticLighting.lightmapScaleOffset
+                    : Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
                 encoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
                 encoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+                encoder->setFragmentTexture((hasStaticLightmap ? staticLightmapTex : m_defaultBlackTexture) ? (hasStaticLightmap ? staticLightmapTex : m_defaultBlackTexture)->getHandle() : nullptr, 31);
+                encoder->setFragmentTexture((directionalLightmapTex ? directionalLightmapTex : m_defaultHeightTexture) ? (directionalLightmapTex ? directionalLightmapTex : m_defaultHeightTexture)->getHandle() : nullptr, 32);
+                encoder->setFragmentTexture((shadowmaskLightmapTex ? shadowmaskLightmapTex : m_defaultWhiteTexture) ? (shadowmaskLightmapTex ? shadowmaskLightmapTex : m_defaultWhiteTexture)->getHandle() : nullptr, 33);
+            } else {
+                encoder->setFragmentTexture(m_defaultBlackTexture ? m_defaultBlackTexture->getHandle() : nullptr, 31);
+                encoder->setFragmentTexture(m_defaultHeightTexture ? m_defaultHeightTexture->getHandle() : nullptr, 32);
+                encoder->setFragmentTexture(m_defaultWhiteTexture ? m_defaultWhiteTexture->getHandle() : nullptr, 33);
             }
             
             // Bind textures (fall back to engine defaults)
@@ -5434,6 +5711,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         if (m_clusterParamsBuffer) {
             encoder->setFragmentBuffer(m_clusterParamsBuffer, 0, 9);
         }
+        ProbeVolumeUniformsGPU probeUniforms{};
+        probeUniforms.boundsMin = m_probeVolumeBoundsMin;
+        probeUniforms.boundsMax = m_probeVolumeBoundsMax;
+        probeUniforms.gridCounts = m_probeVolumeGridCounts;
+        probeUniforms.featureParams = m_probeVolumeFeatureParams;
+        probeUniforms.blendParams = m_probeVolumeBlendParams;
+        probeUniforms.reflectionParams = m_probeVolumeReflectionParams;
+        encoder->setFragmentBytes(&probeUniforms, sizeof(ProbeVolumeUniformsGPU), 10);
+        MTL::Buffer* probeBuffer = m_probeVolumeBuffer ? m_probeVolumeBuffer : m_probeVolumeFallbackBuffer;
+        encoder->setFragmentBuffer(probeBuffer, 0, 11);
         encoder->setCullMode(resolveCullMode(material.get()));
         
         // Draw
@@ -5590,6 +5877,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 meshUniforms.boundsCenter = Math::Vector4(batch.boundsCenter.x, batch.boundsCenter.y, batch.boundsCenter.z, 0.0f);
                 meshUniforms.boundsSize = Math::Vector4(batch.boundsSize.x, batch.boundsSize.y, batch.boundsSize.z, 0.0f);
                 meshUniforms.flags = Math::Vector4(batch.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                meshUniforms.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
                 encoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
                 encoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
 
@@ -5630,6 +5918,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 encoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 28);
                 encoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 29);
                 encoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 30);
+                encoder->setFragmentTexture(m_defaultBlackTexture ? m_defaultBlackTexture->getHandle() : nullptr, 31);
+                encoder->setFragmentTexture(m_defaultHeightTexture ? m_defaultHeightTexture->getHandle() : nullptr, 32);
+                encoder->setFragmentTexture(m_defaultWhiteTexture ? m_defaultWhiteTexture->getHandle() : nullptr, 33);
 
                 if (m_hasIBL && m_iblIrradiance && m_iblPrefiltered && m_iblBRDFLUT) {
                     encoder->setFragmentTexture(m_iblIrradiance, 8);
@@ -5673,6 +5964,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             if (m_shadowSampler) {
                 encoder->setFragmentSamplerState(m_shadowSampler, 2);
             }
+            ProbeVolumeUniformsGPU probeUniforms{};
+            probeUniforms.boundsMin = m_probeVolumeBoundsMin;
+            probeUniforms.boundsMax = m_probeVolumeBoundsMax;
+            probeUniforms.gridCounts = m_probeVolumeGridCounts;
+            probeUniforms.featureParams = m_probeVolumeFeatureParams;
+            probeUniforms.blendParams = m_probeVolumeBlendParams;
+            probeUniforms.reflectionParams = m_probeVolumeReflectionParams;
+            encoder->setFragmentBytes(&probeUniforms, sizeof(ProbeVolumeUniformsGPU), 10);
+            MTL::Buffer* probeBuffer = m_probeVolumeBuffer ? m_probeVolumeBuffer : m_probeVolumeFallbackBuffer;
+            encoder->setFragmentBuffer(probeBuffer, 0, 11);
             if (m_clusterHeaderBuffer) {
                 encoder->setFragmentBuffer(m_clusterHeaderBuffer, 0, 7);
             }
@@ -5836,6 +6137,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 meshUniforms.boundsCenter = Math::Vector4(draw.boundsCenter.x, draw.boundsCenter.y, draw.boundsCenter.z, 0.0f);
                 meshUniforms.boundsSize = Math::Vector4(draw.boundsSize.x, draw.boundsSize.y, draw.boundsSize.z, 0.0f);
                 meshUniforms.flags = Math::Vector4(draw.isBillboard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+                meshUniforms.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
                 encoder->setVertexBytes(&matUniforms, sizeof(MaterialUniformsGPU), 3);
                 encoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
 
@@ -5876,6 +6178,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 encoder->setFragmentTexture(terrainLayer0OrmTex ? terrainLayer0OrmTex->getHandle() : nullptr, 28);
                 encoder->setFragmentTexture(terrainLayer1OrmTex ? terrainLayer1OrmTex->getHandle() : nullptr, 29);
                 encoder->setFragmentTexture(terrainLayer2OrmTex ? terrainLayer2OrmTex->getHandle() : nullptr, 30);
+                encoder->setFragmentTexture(m_defaultBlackTexture ? m_defaultBlackTexture->getHandle() : nullptr, 31);
+                encoder->setFragmentTexture(m_defaultHeightTexture ? m_defaultHeightTexture->getHandle() : nullptr, 32);
+                encoder->setFragmentTexture(m_defaultWhiteTexture ? m_defaultWhiteTexture->getHandle() : nullptr, 33);
 
                 if (m_hasIBL && m_iblIrradiance && m_iblPrefiltered && m_iblBRDFLUT) {
                     encoder->setFragmentTexture(m_iblIrradiance, 8);
@@ -5919,6 +6224,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             if (m_shadowSampler) {
                 encoder->setFragmentSamplerState(m_shadowSampler, 2);
             }
+            ProbeVolumeUniformsGPU probeUniforms{};
+            probeUniforms.boundsMin = m_probeVolumeBoundsMin;
+            probeUniforms.boundsMax = m_probeVolumeBoundsMax;
+            probeUniforms.gridCounts = m_probeVolumeGridCounts;
+            probeUniforms.featureParams = m_probeVolumeFeatureParams;
+            probeUniforms.blendParams = m_probeVolumeBlendParams;
+            probeUniforms.reflectionParams = m_probeVolumeReflectionParams;
+            encoder->setFragmentBytes(&probeUniforms, sizeof(ProbeVolumeUniformsGPU), 10);
+            MTL::Buffer* probeBuffer = m_probeVolumeBuffer ? m_probeVolumeBuffer : m_probeVolumeFallbackBuffer;
+            encoder->setFragmentBuffer(probeBuffer, 0, 11);
             if (m_clusterHeaderBuffer) {
                 encoder->setFragmentBuffer(m_clusterHeaderBuffer, 0, 7);
             }
@@ -5946,15 +6261,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         }
     }
     
-    static int frameCount = 0;
-    if (frameCount++ < 3) {
-        std::cout << "Frame " << frameCount << ": Rendered " << renderedCount << " meshes" << std::endl;
-    }
-    
     // === DEBUG RENDERING ===
     // NOTE: Wire/gizmo now drawn by Engine::render() BEFORE this function
     // Only selected entities get wireframe - drawn in Engine, not here!
-    static bool debugRenderLogOnce = true;
     if (m_debugRenderer && camera) {
         #ifdef DEBUG
         if (m_lightingSystem && (m_debugDrawCascades || m_debugDrawPointFrusta || m_debugDrawShadowAtlas)) {
@@ -5970,65 +6279,28 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         );
         
         // Render grid (disable depth write, always pass depth test)
-        static bool gridLogOnce = true;
         if (m_debugRenderer->isGridEnabled() && m_debugGridPipelineState && m_debugRenderer->getGridVertexCount() > 0) {
-            if (gridLogOnce) {
-                std::cout << "  Rendering grid with " << m_debugRenderer->getGridVertexCount() << " vertices" << std::endl;
-                gridLogOnce = false;
-            }
-            
-            // Create depth stencil state for grid (render behind meshes only)
-            MTL::DepthStencilDescriptor* debugDepthDesc = MTL::DepthStencilDescriptor::alloc()->init();
-            debugDepthDesc->setDepthCompareFunction(MTL::CompareFunctionLess);  // ✅ Grid only visible where NO mesh
-            debugDepthDesc->setDepthWriteEnabled(false);  // Don't write to depth buffer
-            MTL::DepthStencilState* debugDepthState = m_device->newDepthStencilState(debugDepthDesc);
-            debugDepthDesc->release();
-            
             encoder->setRenderPipelineState(m_debugGridPipelineState);
-            encoder->setDepthStencilState(debugDepthState);
-            encoder->setCullMode(MTL::CullModeNone);  // ✅ CRITICAL: Grid visible from both sides!
+            encoder->setDepthStencilState(m_debugGridDepthState);
+            encoder->setCullMode(MTL::CullModeNone);  
             encoder->setVertexBuffer((MTL::Buffer*)m_debugRenderer->getGridBuffer(), 0, 0);
             encoder->setVertexBuffer((MTL::Buffer*)m_debugRenderer->getUniformBuffer(), 0, 1);
             encoder->setFragmentBuffer((MTL::Buffer*)m_debugRenderer->getUniformBuffer(), 0, 1);
             encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), 
                                    NS::UInteger(m_debugRenderer->getGridVertexCount()));
-            
-            debugDepthState->release();
-        } else {
-            if (gridLogOnce) {
-                std::cout << "  Grid NOT rendered - enabled:" << m_debugRenderer->isGridEnabled() 
-                         << " pipeline:" << (m_debugGridPipelineState ? "YES" : "NO")
-                         << " vertices:" << m_debugRenderer->getGridVertexCount() << std::endl;
-                gridLogOnce = false;
-            }
         }
         
         // Render debug lines (disable depth write, always pass depth test)
         if (m_debugRenderer->getLineCount() > 0 && m_debugLinePipelineState) {
-            static bool logLineRenderOnce = true;
-            if (logLineRenderOnce) {
-                std::cout << "  Rendering " << m_debugRenderer->getLineCount() << " debug lines" << std::endl;
-                logLineRenderOnce = false;
-            }
-            
-            // Create depth stencil state for debug lines (avoid z-fighting)
-            MTL::DepthStencilDescriptor* debugDepthDesc = MTL::DepthStencilDescriptor::alloc()->init();
-            debugDepthDesc->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
-            debugDepthDesc->setDepthWriteEnabled(false);  // Don't write to depth buffer
-            MTL::DepthStencilState* debugDepthState = m_device->newDepthStencilState(debugDepthDesc);
-            debugDepthDesc->release();
-            
             encoder->setRenderPipelineState(m_debugLinePipelineState);
-            encoder->setDepthStencilState(debugDepthState);
+            encoder->setDepthStencilState(m_debugLineDepthState);
             encoder->setDepthBias(-1.0f, -1.0f, -1.0f);
-            encoder->setCullMode(MTL::CullModeNone);  // ✅ CRITICAL: Lines visible from all angles!
+            encoder->setCullMode(MTL::CullModeNone);  
             encoder->setVertexBuffer((MTL::Buffer*)m_debugRenderer->getLineBuffer(), 0, 0);
             encoder->setVertexBuffer((MTL::Buffer*)m_debugRenderer->getUniformBuffer(), 0, 1);
             encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), 
                                    NS::UInteger(m_debugRenderer->getLineCount()));
             encoder->setDepthBias(0.0f, 0.0f, 0.0f);
-            
-            debugDepthState->release();
         }
     }
     
@@ -6258,6 +6530,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         );
         float useVelocity = runVelocity ? 1.0f : 0.0f;
         taaParams.params1 = Math::Vector4(sharpness, useVelocity, 0.04f, 0.55f);
+        taaParams.params2 = Math::Vector4(
+            post.taaSpecularStability ? 1.0f : 0.0f,
+            Math::Clamp(post.taaSpecularStabilityStrength, 0.0f, 2.0f),
+            0.0f,
+            0.0f
+        );
 
         MTL::RenderPassDescriptor* taaPass = MTL::RenderPassDescriptor::alloc()->init();
         taaPass->colorAttachments()->object(0)->setTexture(m_taaCurrentTexture);
@@ -7260,6 +7538,14 @@ void Renderer::shutdown() {
         m_clusterParamsBuffer->release();
         m_clusterParamsBuffer = nullptr;
     }
+    if (m_probeVolumeBuffer) {
+        m_probeVolumeBuffer->release();
+        m_probeVolumeBuffer = nullptr;
+    }
+    if (m_probeVolumeFallbackBuffer) {
+        m_probeVolumeFallbackBuffer->release();
+        m_probeVolumeFallbackBuffer = nullptr;
+    }
     if (m_skinningBuffer) {
         m_skinningBuffer->release();
         m_skinningBuffer = nullptr;
@@ -7327,6 +7613,7 @@ void Renderer::shutdown() {
     m_colorGradingLUT.reset();
     m_colorGradingNeutralLUT.reset();
     m_colorGradingLUTPath.clear();
+    m_staticLightingTextureCache.clear();
     m_textureLoader.reset();
     
     // Release library

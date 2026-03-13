@@ -14,6 +14,7 @@ struct Vertex {
     Math::Vector3 position;
     Math::Vector3 normal;
     Math::Vector2 texCoord;
+    Math::Vector2 texCoord1;
     Math::Vector3 tangent;
     Math::Vector3 bitangent;
     Math::Vector4 color;
@@ -22,6 +23,7 @@ struct Vertex {
         : position(Math::Vector3::Zero)
         , normal(Math::Vector3::Up)
         , texCoord(Math::Vector2::Zero)
+        , texCoord1(Math::Vector2::Zero)
         , tangent(Math::Vector3::Right)
         , bitangent(Math::Vector3::Forward)
         , color(Math::Vector4::One) {}

@@ -41,6 +41,7 @@
 #include <atomic>
 #include <dispatch/dispatch.h>
 #include <iostream>
+#include <iomanip>
 #include <mutex>
 #include <fstream>
 #include <string>
@@ -159,6 +160,112 @@ static std::string SanitizeFilename(std::string name) {
         return "Material";
     }
     return name;
+}
+
+struct SceneTextureReferenceStats {
+    size_t entityCount = 0;
+    size_t materialCount = 0;
+    size_t textureReferenceCount = 0;
+    size_t uniqueTextureCount = 0;
+};
+
+static void AccumulateTextureReference(const std::shared_ptr<Texture2D>& texture,
+                                      std::unordered_set<const Texture2D*>& uniqueTextures,
+                                      size_t& referenceCount) {
+    if (!texture) {
+        return;
+    }
+    referenceCount += 1;
+    uniqueTextures.insert(texture.get());
+}
+
+static void AccumulateMaterialTextureReferences(const std::shared_ptr<Material>& material,
+                                               std::unordered_set<const Texture2D*>& uniqueTextures,
+                                               size_t& referenceCount) {
+    if (!material) {
+        return;
+    }
+    AccumulateTextureReference(material->getAlbedoTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getNormalTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getMetallicTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getRoughnessTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getAOTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getEmissionTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getORMTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getHeightTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getOpacityTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainControlTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer0Texture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer1Texture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer2Texture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer0NormalTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer1NormalTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer2NormalTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer0ORMTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer1ORMTexture(), uniqueTextures, referenceCount);
+    AccumulateTextureReference(material->getTerrainLayer2ORMTexture(), uniqueTextures, referenceCount);
+}
+
+static SceneTextureReferenceStats GatherSceneTextureReferenceStats(Scene* scene) {
+    SceneTextureReferenceStats stats;
+    if (!scene) {
+        return stats;
+    }
+
+    std::unordered_set<const Texture2D*> uniqueTextures;
+    for (const auto& entry : scene->getAllEntities()) {
+        Entity* entity = entry.get();
+        if (!entity) {
+            continue;
+        }
+        stats.entityCount += 1;
+
+        if (auto* renderer = entity->getComponent<MeshRenderer>()) {
+            const auto& materials = renderer->getMaterials();
+            stats.materialCount += materials.size();
+            for (const auto& material : materials) {
+                AccumulateMaterialTextureReferences(material, uniqueTextures, stats.textureReferenceCount);
+            }
+        }
+        if (auto* skinned = entity->getComponent<SkinnedMeshRenderer>()) {
+            const auto& materials = skinned->getMaterials();
+            stats.materialCount += materials.size();
+            for (const auto& material : materials) {
+                AccumulateMaterialTextureReferences(material, uniqueTextures, stats.textureReferenceCount);
+            }
+        }
+        if (auto* instanced = entity->getComponent<InstancedMeshRenderer>()) {
+            const auto& materials = instanced->getMaterials();
+            stats.materialCount += materials.size();
+            for (const auto& material : materials) {
+                AccumulateMaterialTextureReferences(material, uniqueTextures, stats.textureReferenceCount);
+            }
+        }
+        if (auto* decal = entity->getComponent<Decal>()) {
+            AccumulateTextureReference(decal->getAlbedoTexture(), uniqueTextures, stats.textureReferenceCount);
+            AccumulateTextureReference(decal->getNormalTexture(), uniqueTextures, stats.textureReferenceCount);
+            AccumulateTextureReference(decal->getORMTexture(), uniqueTextures, stats.textureReferenceCount);
+            AccumulateTextureReference(decal->getMaskTexture(), uniqueTextures, stats.textureReferenceCount);
+        }
+    }
+
+    stats.uniqueTextureCount = uniqueTextures.size();
+    return stats;
+}
+
+static void LogSceneTextureDiagnostics(Scene* scene, const std::string& reason) {
+    SceneTextureReferenceStats sceneStats = GatherSceneTextureReferenceStats(scene);
+    TextureLiveStats liveStats = Texture2D::getLiveStats();
+    double sceneMB = static_cast<double>(liveStats.approximateBytes) / (1024.0 * 1024.0);
+    std::cerr << "[SceneTextureStats] " << reason
+              << " entities=" << sceneStats.entityCount
+              << " materials=" << sceneStats.materialCount
+              << " sceneTextureRefs=" << sceneStats.textureReferenceCount
+              << " sceneUniqueTextures=" << sceneStats.uniqueTextureCount
+              << " liveTextures=" << liveStats.liveTextureCount
+              << " approxLiveTextureMB=" << std::fixed << std::setprecision(2) << sceneMB
+              << std::endl;
+    Texture2D::logLiveStats(reason, 8);
 }
 
 static std::string SerializeTexturePath(const std::shared_ptr<Texture2D>& tex, AssetDatabase& db) {
@@ -2146,7 +2253,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     [self performAsync:^{
         Crescent::Scene* scene = Crescent::SceneManager::getInstance().getActiveScene();
         if (!scene) return;
-        
+
+        LogSceneTextureDiagnostics(scene, "before_delete");
         std::vector<std::string> toDelete;
         toDelete.reserve(uuids.count);
         for (NSString* uuid in uuids) {
@@ -2154,6 +2262,10 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         }
         Crescent::SceneCommands::destroyEntitiesByUUID(scene, toDelete);
         Crescent::SelectionSystem::clearSelection();
+        if (_engine && _engine->getRenderer()) {
+            _engine->getRenderer()->invalidateStaticLightingResources();
+        }
+        LogSceneTextureDiagnostics(scene, "after_delete");
     }];
 }
 
@@ -3373,17 +3485,67 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
-- (NSDictionary *)bakeSceneVertexLighting {
+- (NSDictionary *)bakeSceneStaticLighting {
     return (NSDictionary *)[self performSyncObject:^id{
         Scene* scene = SceneManager::getInstance().getActiveScene();
         if (!scene) {
             return @{};
         }
-        SceneCommands::VertexLightBakeStats stats = SceneCommands::bakeVertexLighting(scene);
+        SceneCommands::StaticLightmapBakeStats stats = SceneCommands::bakeStaticLightmaps(scene);
+        if (_engine && _engine->getRenderer()) {
+            _engine->getRenderer()->invalidateStaticLightingResources();
+        }
         return @{
-            @"bakedMeshCount": @(stats.bakedMeshCount),
-            @"bakedVertexCount": @(stats.bakedVertexCount),
-            @"bakedLightCount": @(stats.bakedLightCount)
+            @"atlasCount": @(stats.atlasCount),
+            @"bakedRendererCount": @(stats.bakedRendererCount),
+            @"bakedTexelCount": @(stats.bakedTexelCount),
+            @"bakedLightCount": @(stats.bakedLightCount),
+            @"staticGeometryRendererCount": @(stats.staticGeometryRendererCount),
+            @"layoutRendererCount": @(stats.layoutRendererCount),
+            @"layoutSkippedRendererCount": @(stats.layoutSkippedRendererCount),
+            @"generatedUVRendererCount": @(stats.generatedUVRendererCount),
+            @"reusedUVRendererCount": @(stats.reusedUVRendererCount)
+        };
+    }];
+}
+
+- (NSDictionary *)buildSceneStaticLightingLayout {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return @{};
+        }
+        SceneCommands::StaticLightingLayoutStats stats = SceneCommands::buildStaticLightingLayout(scene);
+        return @{
+            @"rendererCount": @(stats.rendererCount),
+            @"atlasCount": @(stats.atlasCount),
+            @"generatedUVRendererCount": @(stats.generatedUVRendererCount),
+            @"reusedUVRendererCount": @(stats.reusedUVRendererCount),
+            @"skippedRendererCount": @(stats.skippedRendererCount)
+        };
+    }];
+}
+
+- (NSDictionary *)bakeSceneStaticLightmaps {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return @{};
+        }
+        SceneCommands::StaticLightmapBakeStats stats = SceneCommands::bakeStaticLightmaps(scene);
+        if (_engine && _engine->getRenderer()) {
+            _engine->getRenderer()->invalidateStaticLightingResources();
+        }
+        return @{
+            @"atlasCount": @(stats.atlasCount),
+            @"bakedRendererCount": @(stats.bakedRendererCount),
+            @"bakedLightCount": @(stats.bakedLightCount),
+            @"bakedTexelCount": @(stats.bakedTexelCount),
+            @"staticGeometryRendererCount": @(stats.staticGeometryRendererCount),
+            @"layoutRendererCount": @(stats.layoutRendererCount),
+            @"layoutSkippedRendererCount": @(stats.layoutSkippedRendererCount),
+            @"generatedUVRendererCount": @(stats.generatedUVRendererCount),
+            @"reusedUVRendererCount": @(stats.reusedUVRendererCount)
         };
     }];
 }
@@ -4419,6 +4581,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"ssrThickness": @(settings.postProcess.ssrThickness),
             @"taa": @(settings.postProcess.taa),
             @"taaSharpness": @(settings.postProcess.taaSharpness),
+            @"taaSpecularStability": @(settings.postProcess.taaSpecularStability),
+            @"taaSpecularStabilityStrength": @(settings.postProcess.taaSpecularStabilityStrength),
             @"fxaa": @(settings.postProcess.fxaa),
             @"motionBlur": @(settings.postProcess.motionBlur),
             @"motionBlurStrength": @(settings.postProcess.motionBlurStrength),
@@ -4438,11 +4602,30 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"textureQuality": @(settings.quality.textureQuality)
         };
 
+        NSDictionary* staticLighting = @{
+            @"enabled": @(settings.staticLighting.enabled),
+            @"mode": @(settings.staticLighting.mode),
+            @"atlasSize": @(settings.staticLighting.atlasSize),
+            @"maxAtlasCount": @(settings.staticLighting.maxAtlasCount),
+            @"texelsPerUnit": @(settings.staticLighting.texelsPerUnit),
+            @"samplesPerTexel": @(settings.staticLighting.samplesPerTexel),
+            @"indirectBounces": @(settings.staticLighting.indirectBounces),
+            @"denoise": @(settings.staticLighting.denoise),
+            @"directionalLightmaps": @(settings.staticLighting.directionalLightmaps),
+            @"shadowmask": @(settings.staticLighting.shadowmask),
+            @"autoUnwrap": @(settings.staticLighting.autoUnwrap),
+            @"unwrapPadding": @(settings.staticLighting.unwrapPadding),
+            @"outputDirectory": [NSString stringWithUTF8String:settings.staticLighting.outputDirectory.c_str()],
+            @"bakeManifestPath": [NSString stringWithUTF8String:settings.staticLighting.bakeManifestPath.c_str()],
+            @"lastBakeHash": [NSString stringWithUTF8String:settings.staticLighting.lastBakeHash.c_str()]
+        };
+
         return @{
             @"environment": environment,
             @"fog": fog,
             @"postProcess": postProcess,
-            @"quality": quality
+            @"quality": quality,
+            @"staticLighting": staticLighting
         };
     }];
 }
@@ -4580,6 +4763,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             if (post[@"ssrThickness"]) updated.postProcess.ssrThickness = [post[@"ssrThickness"] floatValue];
             if (post[@"taa"]) updated.postProcess.taa = [post[@"taa"] boolValue];
             if (post[@"taaSharpness"]) updated.postProcess.taaSharpness = [post[@"taaSharpness"] floatValue];
+            if (post[@"taaSpecularStability"]) updated.postProcess.taaSpecularStability = [post[@"taaSpecularStability"] boolValue];
+            if (post[@"taaSpecularStabilityStrength"]) updated.postProcess.taaSpecularStabilityStrength = [post[@"taaSpecularStabilityStrength"] floatValue];
             if (post[@"fxaa"]) updated.postProcess.fxaa = [post[@"fxaa"] boolValue];
             if (post[@"motionBlur"]) updated.postProcess.motionBlur = [post[@"motionBlur"] boolValue];
             if (post[@"motionBlurStrength"]) updated.postProcess.motionBlurStrength = [post[@"motionBlurStrength"] floatValue];
@@ -4598,8 +4783,108 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             if (quality[@"lodBias"]) updated.quality.lodBias = [quality[@"lodBias"] floatValue];
             if (quality[@"textureQuality"]) updated.quality.textureQuality = [quality[@"textureQuality"] intValue];
         }
+        if (settings[@"staticLighting"] && [settings[@"staticLighting"] isKindOfClass:[NSDictionary class]]) {
+            NSDictionary* staticLighting = settings[@"staticLighting"];
+            if (staticLighting[@"enabled"]) updated.staticLighting.enabled = [staticLighting[@"enabled"] boolValue];
+            if (staticLighting[@"mode"]) updated.staticLighting.mode = [staticLighting[@"mode"] intValue];
+            if (staticLighting[@"atlasSize"]) updated.staticLighting.atlasSize = [staticLighting[@"atlasSize"] intValue];
+            if (staticLighting[@"maxAtlasCount"]) updated.staticLighting.maxAtlasCount = [staticLighting[@"maxAtlasCount"] intValue];
+            if (staticLighting[@"texelsPerUnit"]) updated.staticLighting.texelsPerUnit = [staticLighting[@"texelsPerUnit"] floatValue];
+            if (staticLighting[@"samplesPerTexel"]) updated.staticLighting.samplesPerTexel = [staticLighting[@"samplesPerTexel"] intValue];
+            if (staticLighting[@"indirectBounces"]) updated.staticLighting.indirectBounces = [staticLighting[@"indirectBounces"] intValue];
+            if (staticLighting[@"denoise"]) updated.staticLighting.denoise = [staticLighting[@"denoise"] boolValue];
+            if (staticLighting[@"directionalLightmaps"]) updated.staticLighting.directionalLightmaps = [staticLighting[@"directionalLightmaps"] boolValue];
+            if (staticLighting[@"shadowmask"]) updated.staticLighting.shadowmask = [staticLighting[@"shadowmask"] boolValue];
+            if (staticLighting[@"autoUnwrap"]) updated.staticLighting.autoUnwrap = [staticLighting[@"autoUnwrap"] boolValue];
+            if (staticLighting[@"unwrapPadding"]) updated.staticLighting.unwrapPadding = [staticLighting[@"unwrapPadding"] intValue];
+            if (staticLighting[@"outputDirectory"]) {
+                NSString* path = staticLighting[@"outputDirectory"];
+                if ([path isKindOfClass:[NSString class]]) {
+                    updated.staticLighting.outputDirectory = [path UTF8String];
+                }
+            }
+            if (staticLighting[@"bakeManifestPath"]) {
+                NSString* path = staticLighting[@"bakeManifestPath"];
+                if ([path isKindOfClass:[NSString class]]) {
+                    updated.staticLighting.bakeManifestPath = [path UTF8String];
+                }
+            }
+            if (staticLighting[@"lastBakeHash"]) {
+                NSString* value = staticLighting[@"lastBakeHash"];
+                if ([value isKindOfClass:[NSString class]]) {
+                    updated.staticLighting.lastBakeHash = [value UTF8String];
+                }
+            }
+        }
         scene->setSettings(updated);
         scene->applySettings();
+    }];
+}
+
+// MARK: - Mesh Renderer / Static Lighting
+
+- (NSDictionary *)getMeshRendererInfo:(NSString *)uuid {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return @{};
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) return @{};
+        MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || entity->getComponent<SkinnedMeshRenderer>() || entity->getComponent<InstancedMeshRenderer>()) {
+            return @{};
+        }
+
+        const auto& staticLighting = renderer->getStaticLighting();
+        return @{
+            @"castsShadows": @(renderer->getCastShadows()),
+            @"receiveShadows": @(renderer->getReceiveShadows()),
+            @"staticGeometry": @(staticLighting.staticGeometry),
+            @"contributeGI": @(staticLighting.contributeGI),
+            @"receiveGI": @(staticLighting.receiveGI),
+            @"lightmapIndex": @(staticLighting.lightmapIndex)
+        };
+    }];
+}
+
+- (BOOL)setMeshRendererInfo:(NSString *)uuid info:(NSDictionary *)info {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, [uuid UTF8String]);
+        if (!entity) return NO;
+        MeshRenderer* renderer = entity->getComponent<MeshRenderer>();
+        if (!renderer || entity->getComponent<SkinnedMeshRenderer>() || entity->getComponent<InstancedMeshRenderer>()) {
+            return NO;
+        }
+
+        if (NSNumber* castsShadows = info[@"castsShadows"]) {
+            renderer->setCastShadows(castsShadows.boolValue);
+        }
+        if (NSNumber* receiveShadows = info[@"receiveShadows"]) {
+            renderer->setReceiveShadows(receiveShadows.boolValue);
+        }
+        if (info[@"staticGeometry"] || info[@"contributeGI"] || info[@"receiveGI"]) {
+            MeshRenderer::StaticLightingData staticLighting = renderer->getStaticLighting();
+            if (NSNumber* staticGeometry = info[@"staticGeometry"]) {
+                bool isStatic = staticGeometry.boolValue;
+                staticLighting.staticGeometry = isStatic;
+                if (!isStatic) {
+                    staticLighting.lightmapIndex = -1;
+                    staticLighting.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
+                    staticLighting.lightmapPath.clear();
+                    staticLighting.directionalLightmapPath.clear();
+                    staticLighting.shadowmaskPath.clear();
+                }
+            }
+            if (NSNumber* contributeGI = info[@"contributeGI"]) {
+                staticLighting.contributeGI = contributeGI.boolValue;
+            }
+            if (NSNumber* receiveGI = info[@"receiveGI"]) {
+                staticLighting.receiveGI = receiveGI.boolValue;
+            }
+            renderer->setStaticLighting(staticLighting);
+        }
+        return YES;
     }];
 }
 
@@ -4693,7 +4978,9 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         dict[@"cookieIndex"] = @(light->getCookieIndex());
         dict[@"iesIndex"] = @(light->getIESProfileIndex());
         dict[@"volumetric"] = @(light->getVolumetric());
-        dict[@"bakeToVertexLighting"] = @(light->getBakeToVertexLighting());
+        dict[@"contributeToStaticBake"] = @(light->getContributeToStaticBake());
+        dict[@"mobility"] = @(static_cast<int>(light->getMobility()));
+        dict[@"shadowmaskChannel"] = @(light->getShadowmaskChannel());
         return dict;
     }];
 }
@@ -4791,8 +5078,17 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         if (NSNumber* vol = info[@"volumetric"]) {
             light->setVolumetric(vol.boolValue);
         }
-        if (NSNumber* bake = info[@"bakeToVertexLighting"]) {
-            light->setBakeToVertexLighting(bake.boolValue);
+        if (NSNumber* bake = info[@"contributeToStaticBake"]) {
+            light->setContributeToStaticBake(bake.boolValue);
+        } else if (NSNumber* legacyBake = info[@"bakeToVertexLighting"]) {
+            light->setContributeToStaticBake(legacyBake.boolValue);
+        }
+        if (NSNumber* mobility = info[@"mobility"]) {
+            int clamped = std::max(0, std::min(2, mobility.intValue));
+            light->setMobility(static_cast<Light::Mobility>(clamped));
+        }
+        if (NSNumber* channel = info[@"shadowmaskChannel"]) {
+            light->setShadowmaskChannel(channel.intValue);
         }
         return YES;
     }];

@@ -13,6 +13,11 @@ namespace MTL {
 
 namespace Crescent {
 
+struct TextureLiveStats {
+    size_t liveTextureCount = 0;
+    uint64_t approximateBytes = 0;
+};
+
 // Simple 2D texture wrapper that owns a Metal texture handle
 class Texture2D {
 public:
@@ -34,15 +39,26 @@ public:
     bool isSRGB() const { return m_ColorSpace == ColorSpace::SRGB; }
     bool isEditableRGBA8() const;
     
-    void setDimensions(uint32_t width, uint32_t height) { m_Width = width; m_Height = height; }
-    void setColorSpace(ColorSpace space) { m_ColorSpace = space; }
-    void setPath(const std::string& path) { m_Path = path; }
+    void setDimensions(uint32_t width, uint32_t height) { m_Width = width; m_Height = height; updateDebugRegistry(); }
+    void setColorSpace(ColorSpace space) { m_ColorSpace = space; updateDebugRegistry(); }
+    void setPath(const std::string& path) { m_Path = path; updateDebugRegistry(); }
     const std::string& getPath() const { return m_Path; }
+    uint32_t getMipLevelCount() const { return m_MipLevelCount; }
+    void setMipLevelCount(uint32_t mipLevelCount) { m_MipLevelCount = mipLevelCount; updateDebugRegistry(); }
+    uint64_t getApproximateBytes() const { return m_ApproximateBytes; }
+    void setApproximateBytes(uint64_t approximateBytes) { m_ApproximateBytes = approximateBytes; updateDebugRegistry(); }
+
+    static TextureLiveStats getLiveStats();
+    static void logLiveStats(const std::string& reason, size_t maxEntries = 8);
     
 private:
+    void updateDebugRegistry() const;
+
     MTL::Texture* m_Texture;
     uint32_t m_Width;
     uint32_t m_Height;
+    uint32_t m_MipLevelCount;
+    uint64_t m_ApproximateBytes;
     ColorSpace m_ColorSpace;
     std::string m_Path;
 };

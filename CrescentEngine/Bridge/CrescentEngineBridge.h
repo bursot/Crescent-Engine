@@ -132,7 +132,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)loadTextureForEntityAllMaterials:(NSString *)uuid slot:(NSString *)slot path:(NSString *)path NS_SWIFT_NAME(loadTextureForEntityAllMaterials(_:slot:path:));
 - (void)clearTextureForEntityAllMaterials:(NSString *)uuid slot:(NSString *)slot NS_SWIFT_NAME(clearTextureForEntityAllMaterials(_:slot:));
 - (BOOL)bakeImpostorAtlasForEntity:(NSString *)uuid rows:(NSInteger)rows cols:(NSInteger)cols tileSize:(NSInteger)tileSize NS_SWIFT_NAME(bakeImpostorAtlas(forEntity:rows:cols:tileSize:));
-- (NSDictionary *)bakeSceneVertexLighting NS_SWIFT_NAME(bakeSceneVertexLighting());
+- (NSDictionary *)buildSceneStaticLightingLayout NS_SWIFT_NAME(buildSceneStaticLightingLayout());
+- (NSDictionary *)bakeSceneStaticLightmaps NS_SWIFT_NAME(bakeSceneStaticLightmaps());
+- (NSDictionary *)bakeSceneStaticLighting NS_SWIFT_NAME(bakeSceneStaticLighting());
 
 // Material assets
 - (NSString *)createMaterialAssetFromEntity:(NSString *)uuid name:(NSString *)name NS_SWIFT_NAME(createMaterialAssetFromEntity(_:name:));
@@ -200,6 +202,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setProjectSettings:(NSDictionary *)settings NS_SWIFT_NAME(setProjectSettings(settings:));
 - (NSDictionary *)getSceneSettings NS_SWIFT_NAME(getSceneSettings());
 - (void)setSceneSettings:(NSDictionary *)settings NS_SWIFT_NAME(setSceneSettings(settings:));
+
+// Mesh Renderer / Static Lighting
+- (NSDictionary *)getMeshRendererInfo:(NSString *)uuid NS_SWIFT_NAME(getMeshRendererInfo(uuid:));
+- (BOOL)setMeshRendererInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setMeshRendererInfo(uuid:info:));
 
 // Animation / Skinned Mesh
 - (NSDictionary *)getSkinnedMeshInfo:(NSString *)uuid NS_SWIFT_NAME(getSkinnedMeshInfo(uuid:));

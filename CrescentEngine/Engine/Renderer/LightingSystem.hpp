@@ -19,7 +19,7 @@ struct LightGPUData {
     Math::Vector4 directionType;   // xyz = view-space direction, w = type (int)
     Math::Vector4 colorIntensity;  // rgb = linear color, w = intensity
     Math::Vector4 misc;            // x = cosInner, y = cosOuter, z = areaX, w = areaY
-    Math::Vector4 shadowCookie;    // x = shadowIdx, y = cookieIdx, z = iesIdx, w = flags (soft/contact/volumetric)
+    Math::Vector4 shadowCookie;    // x = shadowIdx, y = cookieIdx, z = shadowCount/iesIdx, w = packed flags
 };
 
 // GPU shadow entry per cascade/light

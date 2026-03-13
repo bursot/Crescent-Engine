@@ -37,6 +37,18 @@ Mesh::~Mesh() {
 
 void Mesh::setVertices(const std::vector<Vertex>& vertices) {
     m_Vertices = vertices;
+    bool hasSecondaryUV = false;
+    for (const auto& vertex : m_Vertices) {
+        if (std::abs(vertex.texCoord1.x) > 0.0001f || std::abs(vertex.texCoord1.y) > 0.0001f) {
+            hasSecondaryUV = true;
+            break;
+        }
+    }
+    if (!hasSecondaryUV) {
+        for (auto& vertex : m_Vertices) {
+            vertex.texCoord1 = vertex.texCoord;
+        }
+    }
     calculateBounds();
     if (m_VertexBuffer) {
         static_cast<MTL::Buffer*>(m_VertexBuffer)->release();
