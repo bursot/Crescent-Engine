@@ -97,6 +97,7 @@ Light* Light::CreatePointLight(const Math::Vector3& color,
     light->setColor(color);
     light->setIntensity(intensity);
     light->setRange(range);
+    light->setShadowRange(0.02f, range);
     
     return light;
 }
@@ -112,6 +113,7 @@ Light* Light::CreateSpotLight(float spotAngle,
     light->setColor(color);
     light->setIntensity(intensity);
     light->setRange(range);
+    light->setShadowRange(0.02f, range);
     
     return light;
 }

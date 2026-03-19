@@ -49,6 +49,27 @@ struct ShadowFoliageParams {
 struct ShadowObjectUniforms {
     float4x4 viewProj;
     float4x4 modelMatrix;
+    float4 pointLightPosNear;
+    float4 pointFarParams;
+};
+
+struct PointShadowOut {
+    float4 position [[position]];
+    float3 worldPos;
+    float3 lightPos;
+    float2 nearFar;
+};
+
+struct PointShadowOutUV {
+    float4 position [[position]];
+    float2 uv;
+    float3 worldPos;
+    float3 lightPos;
+    float2 nearFar;
+};
+
+struct PointShadowDepthOut {
+    float depth [[depth(any)]];
 };
 
 inline void shadowAlphaClip(float alpha, float cutoff) {
@@ -348,23 +369,46 @@ vertex ShadowOut shadow_spot_vertex_cutout_skinned(ShadowVertexInSkinnedUV in [[
 vertex float4 shadow_point_vertex(ShadowVertexIn in [[stage_in]],
                                   constant ShadowObjectUniforms& object [[buffer(1)]],
                                   constant ShadowFoliageParams& foliage [[buffer(3)]]) {
-    return shadowObjectVertex(in.position, object, foliage);
+    float3 worldPos = (object.modelMatrix * float4(in.position, 1.0)).xyz;
+    worldPos = applyWindOffsetShadow(worldPos, foliage);
+    return object.viewProj * float4(worldPos, 1.0);
 }
 
-vertex ShadowOut shadow_point_vertex_cutout(ShadowVertexInUV in [[stage_in]],
-                                            constant ShadowObjectUniforms& object [[buffer(1)]],
-                                            constant ShadowFoliageParams& foliage [[buffer(3)]]) {
-    ShadowOut out;
-    out.position = shadowObjectVertex(in.position, object, foliage);
-    out.uv = in.texCoord;
+vertex PointShadowOut shadow_point_vertex_depth(ShadowVertexIn in [[stage_in]],
+                                                constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    PointShadowOut out;
+    float3 worldPos = (object.modelMatrix * float4(in.position, 1.0)).xyz;
+    worldPos = applyWindOffsetShadow(worldPos, foliage);
+    out.position = object.viewProj * float4(worldPos, 1.0);
+    out.worldPos = worldPos;
+    out.lightPos = object.pointLightPosNear.xyz;
+    out.nearFar = float2(object.pointLightPosNear.w, object.pointFarParams.x);
     return out;
 }
 
-vertex float4 shadow_point_vertex_instanced(ShadowVertexIn in [[stage_in]],
-                                            constant float4x4& viewProj [[buffer(1)]],
-                                            const device InstanceData* instances [[buffer(2)]],
-                                            constant ShadowFoliageParams& foliage [[buffer(3)]],
-                                            uint instanceId [[instance_id]]) {
+vertex PointShadowOutUV shadow_point_vertex_cutout(ShadowVertexInUV in [[stage_in]],
+                                                   constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                   constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    PointShadowOutUV out;
+    float3 worldPos = (object.modelMatrix * float4(in.position, 1.0)).xyz;
+    worldPos = applyWindOffsetShadow(worldPos, foliage);
+    out.position = object.viewProj * float4(worldPos, 1.0);
+    out.uv = in.texCoord;
+    out.worldPos = worldPos;
+    out.lightPos = object.pointLightPosNear.xyz;
+    out.nearFar = float2(object.pointLightPosNear.w, object.pointFarParams.x);
+    return out;
+}
+
+vertex PointShadowOut shadow_point_vertex_instanced(ShadowVertexIn in [[stage_in]],
+                                                    constant float4x4& viewProj [[buffer(1)]],
+                                                    const device InstanceData* instances [[buffer(2)]],
+                                                    constant ShadowFoliageParams& foliage [[buffer(3)]],
+                                                    constant float4& pointLightPosNear [[buffer(4)]],
+                                                    constant float4& pointFarParams [[buffer(5)]],
+                                                    uint instanceId [[instance_id]]) {
+    PointShadowOut out;
     InstanceData inst = instances[instanceId];
     float3 boundsCenter = foliage.boundsCenter.xyz;
     float3 boundsSize = foliage.boundsSize.xyz;
@@ -388,15 +432,21 @@ vertex float4 shadow_point_vertex_instanced(ShadowVertexIn in [[stage_in]],
         worldPos = (inst.modelMatrix * float4(in.position, 1.0)).xyz;
         worldPos = applyWindOffsetShadow(worldPos, foliage);
     }
-    return viewProj * float4(worldPos, 1.0);
+    out.position = viewProj * float4(worldPos, 1.0);
+    out.worldPos = worldPos;
+    out.lightPos = pointLightPosNear.xyz;
+    out.nearFar = float2(pointLightPosNear.w, pointFarParams.x);
+    return out;
 }
 
-vertex ShadowOut shadow_point_vertex_cutout_instanced(ShadowVertexInUV in [[stage_in]],
-                                                      constant float4x4& viewProj [[buffer(1)]],
-                                                      const device InstanceData* instances [[buffer(2)]],
-                                                      constant ShadowFoliageParams& foliage [[buffer(3)]],
-                                                      uint instanceId [[instance_id]]) {
-    ShadowOut out;
+vertex PointShadowOutUV shadow_point_vertex_cutout_instanced(ShadowVertexInUV in [[stage_in]],
+                                                             constant float4x4& viewProj [[buffer(1)]],
+                                                             const device InstanceData* instances [[buffer(2)]],
+                                                             constant ShadowFoliageParams& foliage [[buffer(3)]],
+                                                             constant float4& pointLightPosNear [[buffer(4)]],
+                                                             constant float4& pointFarParams [[buffer(5)]],
+                                                             uint instanceId [[instance_id]]) {
+    PointShadowOutUV out;
     InstanceData inst = instances[instanceId];
     float3 boundsCenter = foliage.boundsCenter.xyz;
     float3 boundsSize = foliage.boundsSize.xyz;
@@ -422,23 +472,84 @@ vertex ShadowOut shadow_point_vertex_cutout_instanced(ShadowVertexInUV in [[stag
     }
     out.position = viewProj * float4(worldPos, 1.0);
     out.uv = in.texCoord;
+    out.worldPos = worldPos;
+    out.lightPos = pointLightPosNear.xyz;
+    out.nearFar = float2(pointLightPosNear.w, pointFarParams.x);
     return out;
 }
 
-vertex float4 shadow_point_vertex_skinned(ShadowVertexInSkinned in [[stage_in]],
-                                          constant ShadowObjectUniforms& object [[buffer(1)]],
-                                          const device float4x4* bones [[buffer(2)]],
-                                          constant ShadowFoliageParams& foliage [[buffer(3)]]) {
-    return shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
+vertex PointShadowOut shadow_point_vertex_skinned(ShadowVertexInSkinned in [[stage_in]],
+                                                  constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                  const device float4x4* bones [[buffer(2)]],
+                                                  constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    PointShadowOut out;
+    float3 worldPos = (object.modelMatrix * applySkinning(in, bones)).xyz;
+    worldPos = applyWindOffsetShadow(worldPos, foliage);
+    out.position = object.viewProj * float4(worldPos, 1.0);
+    out.worldPos = worldPos;
+    out.lightPos = object.pointLightPosNear.xyz;
+    out.nearFar = float2(object.pointLightPosNear.w, object.pointFarParams.x);
+    return out;
 }
 
-vertex ShadowOut shadow_point_vertex_cutout_skinned(ShadowVertexInSkinnedUV in [[stage_in]],
-                                                    constant ShadowObjectUniforms& object [[buffer(1)]],
-                                                    const device float4x4* bones [[buffer(2)]],
-                                                    constant ShadowFoliageParams& foliage [[buffer(3)]]) {
-    ShadowOut out;
-    out.position = shadowObjectVertex(applySkinning(in, bones).xyz, object, foliage);
+vertex PointShadowOutUV shadow_point_vertex_cutout_skinned(ShadowVertexInSkinnedUV in [[stage_in]],
+                                                           constant ShadowObjectUniforms& object [[buffer(1)]],
+                                                           const device float4x4* bones [[buffer(2)]],
+                                                           constant ShadowFoliageParams& foliage [[buffer(3)]]) {
+    PointShadowOutUV out;
+    float3 worldPos = (object.modelMatrix * applySkinning(in, bones)).xyz;
+    worldPos = applyWindOffsetShadow(worldPos, foliage);
+    out.position = object.viewProj * float4(worldPos, 1.0);
     out.uv = in.texCoord;
+    out.worldPos = worldPos;
+    out.lightPos = object.pointLightPosNear.xyz;
+    out.nearFar = float2(object.pointLightPosNear.w, object.pointFarParams.x);
+    return out;
+}
+
+fragment PointShadowDepthOut shadow_point_fragment(PointShadowOut in [[stage_in]]) {
+    PointShadowDepthOut out;
+    float nearP = in.nearFar.x;
+    float farP = in.nearFar.y;
+    float dist = length(in.worldPos - in.lightPos);
+    out.depth = saturate((dist - nearP) / max(farP - nearP, 1e-5));
+    return out;
+}
+
+fragment PointShadowDepthOut shadow_point_fragment_cutout(PointShadowOutUV in [[stage_in]],
+                                                          constant ShadowMaterial& material [[buffer(0)]],
+                                                          texture2d<float> albedoMap [[texture(0)]],
+                                                          texture2d<float> opacityMap [[texture(1)]],
+                                                          sampler alphaSampler [[sampler(0)]]) {
+    if (material.alphaParams.z >= 0.5) {
+        float2 uv = in.uv * material.uvTilingOffset.xy + material.uvTilingOffset.zw;
+        float alpha = material.albedo.a;
+        if (material.alphaParams.y > 0.5) {
+            float2 texSize = float2(albedoMap.get_width(), albedoMap.get_height());
+            float2 duvDx = dfdx(uv) * texSize;
+            float2 duvDy = dfdy(uv) * texSize;
+            float footprint = max(length(duvDx), length(duvDy));
+            float mipLevel = clamp(log2(max(footprint, 1.0)), 0.0, 4.0);
+            float shadowMip = max(mipLevel - 0.35, 0.0);
+            alpha *= albedoMap.sample(alphaSampler, uv, level(shadowMip)).a;
+            float cutoffScale = mix(1.0, 0.80, saturate(mipLevel / 4.0));
+            float cutoff = material.alphaParams.x * cutoffScale;
+            if (material.alphaParams.w > 0.5) {
+                alpha *= opacityMap.sample(alphaSampler, uv, level(shadowMip)).r;
+            }
+            shadowAlphaClip(alpha, cutoff);
+        } else {
+            if (material.alphaParams.w > 0.5) {
+                alpha *= opacityMap.sample(alphaSampler, uv).r;
+            }
+            shadowAlphaClip(alpha, material.alphaParams.x);
+        }
+    }
+    PointShadowDepthOut out;
+    float nearP = in.nearFar.x;
+    float farP = in.nearFar.y;
+    float dist = length(in.worldPos - in.lightPos);
+    out.depth = saturate((dist - nearP) / max(farP - nearP, 1e-5));
     return out;
 }
 

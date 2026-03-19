@@ -27,6 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSDictionary *)bakeSceneStaticLightmaps NS_SWIFT_NAME(bakeSceneStaticLightmaps());
 - (NSDictionary *)bakeSceneStaticLighting NS_SWIFT_NAME(bakeSceneStaticLighting());
 - (BOOL)cookEnvironmentMapAtPath:(NSString *)path outputPath:(NSString *)outputPath NS_SWIFT_NAME(cookEnvironmentMap(path:outputPath:));
+- (BOOL)cookStaticLightmapAtPath:(NSString *)path outputPath:(NSString *)outputPath NS_SWIFT_NAME(cookStaticLightmap(path:outputPath:));
 - (BOOL)saveSceneAtPath:(NSString *)path NS_SWIFT_NAME(saveScene(path:));
 - (BOOL)saveCookedRuntimeSceneAtPath:(NSString *)path includeEditorOnly:(BOOL)includeEditorOnly NS_SWIFT_NAME(saveCookedRuntimeScene(path:includeEditorOnly:));
 - (BOOL)loadSceneAtPath:(NSString *)path NS_SWIFT_NAME(loadScene(path:));

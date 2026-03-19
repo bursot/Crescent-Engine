@@ -380,6 +380,7 @@ final class SceneSettingsViewModel: ObservableObject {
     @Published var renderScale: Double = 1.0
     @Published var lodBias: Double = 0.0
     @Published var textureQuality: Int = 2
+    @Published var bakeDirectLighting: Bool = false
     
     private weak var editorState: EditorState?
     private var isLoading = false
@@ -478,6 +479,9 @@ final class SceneSettingsViewModel: ObservableObject {
             lodBias = quality["lodBias"] as? Double ?? lodBias
             textureQuality = quality["textureQuality"] as? Int ?? textureQuality
         }
+        if let staticLighting = dict["staticLighting"] as? [String: Any] {
+            bakeDirectLighting = staticLighting["bakeDirectLighting"] as? Bool ?? bakeDirectLighting
+        }
     }
     
     func apply() {
@@ -556,6 +560,9 @@ final class SceneSettingsViewModel: ObservableObject {
                 "renderScale": renderScale,
                 "lodBias": lodBias,
                 "textureQuality": textureQuality
+            ],
+            "staticLighting": [
+                "bakeDirectLighting": bakeDirectLighting
             ]
         ]
         CrescentEngineBridge.shared().setSceneSettings(settings: info)
@@ -1147,6 +1154,18 @@ private struct SceneSettingsPanel: View {
                     .labelsHidden()
                     .frame(width: 140)
                     .onChange(of: viewModel.textureQuality) { _ in viewModel.apply() }
+                }
+            }
+
+            SettingsGroup(title: "Static Lighting") {
+                SettingsRow(title: "Bake Mode") {
+                    Picker("", selection: $viewModel.bakeDirectLighting) {
+                        Text("Indirect Only").tag(false)
+                        Text("Direct + Indirect").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+                    .onChange(of: viewModel.bakeDirectLighting) { _ in viewModel.apply() }
                 }
             }
         }

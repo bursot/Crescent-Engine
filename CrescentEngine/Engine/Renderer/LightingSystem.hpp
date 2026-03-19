@@ -121,6 +121,7 @@ private:
     uint32_t m_viewportWidth;
     uint32_t m_viewportHeight;
     bool m_debugDrawAtlas;
+    bool m_bakeDirectLighting;
     std::array<uint32_t, 4> m_pointCubeCounts;
     
     std::vector<PreparedLight> m_preparedLights;

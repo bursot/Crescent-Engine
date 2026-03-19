@@ -203,7 +203,7 @@ _NS_INLINE _Ret NS::Object::sendMessage(const void* pObj, SEL selector, _Args...
         _Ret                       ret;
 
         (*pProc)(&ret, pObj, selector, args...);
-
+        e
         return ret;
     }
     else

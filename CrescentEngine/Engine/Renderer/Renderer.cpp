@@ -86,6 +86,29 @@ std::string ToUpper(std::string value) {
     return value;
 }
 
+bool EndsWithIgnoreCase(const std::string& value, const std::string& suffix) {
+    if (suffix.size() > value.size()) {
+        return false;
+    }
+    return std::equal(suffix.rbegin(), suffix.rend(), value.rbegin(), [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+    });
+}
+
+float ResolveStaticLightmapEncodingFlag(const std::string& path) {
+    if (EndsWithIgnoreCase(path, ".exr") || EndsWithIgnoreCase(path, ".hdr")) {
+        return 1.0f;
+    }
+    if (EndsWithIgnoreCase(path, ".ktx2") && path.find("lightmap_rgbm_") != std::string::npos) {
+        return 2.0f;
+    }
+    return 0.0f;
+}
+
+float EncodeStaticLightmapModeFlag(float encodingFlag, bool bakeDirectLighting) {
+    return bakeDirectLighting ? (encodingFlag + 10.0f) : encodingFlag;
+}
+
 bool ParseCubeLUT(const std::string& path, CubeLUTData& out) {
     std::ifstream file(path);
     if (!file.is_open()) {
@@ -5573,7 +5596,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             encoder->setFragmentBytes(&matUniforms, sizeof(MaterialUniformsGPU), 1);
             if (!isSkinned) {
                 const auto& staticLighting = meshRenderer->getStaticLighting();
-                std::shared_ptr<Texture2D> staticLightmapTex = resolveStaticLightingTexture(staticLighting.lightmapPath, true);
+                std::shared_ptr<Texture2D> staticLightmapTex = resolveStaticLightingTexture(staticLighting.lightmapPath, false);
                 std::shared_ptr<Texture2D> directionalLightmapTex = resolveStaticLightingTexture(staticLighting.directionalLightmapPath, false);
                 std::shared_ptr<Texture2D> shadowmaskLightmapTex = resolveStaticLightingTexture(staticLighting.shadowmaskPath, false);
                 bool hasStaticLightmap = staticLightmapTex && !staticLighting.lightmapPath.empty();
@@ -5586,7 +5609,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                     0.0f,
                     meshRenderer->getUseBakedVertexLighting() ? 1.0f : 0.0f,
                     hasStaticLightmap ? 1.0f : 0.0f,
-                    0.0f
+                    EncodeStaticLightmapModeFlag(
+                        ResolveStaticLightmapEncodingFlag(staticLighting.lightmapPath),
+                        scene->getSettings().staticLighting.bakeDirectLighting
+                    )
                 );
                 meshUniforms.lightmapScaleOffset = hasStaticLightmap
                     ? staticLighting.lightmapScaleOffset

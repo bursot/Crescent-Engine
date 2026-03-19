@@ -137,6 +137,7 @@ LightingSystem::LightingSystem()
     , m_viewportWidth(1)
     , m_viewportHeight(1)
     , m_debugDrawAtlas(false)
+    , m_bakeDirectLighting(false)
     , m_pointCubeCounts({0,0,0,0}) {
 }
 
@@ -153,6 +154,7 @@ void LightingSystem::beginFrame(Scene* scene, Camera* camera, uint32_t viewportW
     m_cascades.clear();
     m_shadowAtlas.reset();
     m_pointCubeCounts = {0,0,0,0};
+    m_bakeDirectLighting = scene ? scene->getSettings().staticLighting.bakeDirectLighting : false;
     
     if (!scene || !camera) {
         return;
@@ -181,10 +183,6 @@ void LightingSystem::gatherLights(Scene* scene, Camera* camera) {
         if (!light) {
             continue;
         }
-        if (light->getContributeToStaticBake() && light->getMobility() == Light::Mobility::Static) {
-            continue;
-        }
-        
         Transform* transform = entity->getTransform();
         PreparedLight prepared;
         prepared.light = light;
@@ -387,10 +385,17 @@ void LightingSystem::allocateShadows() {
             prepared.shadowCount = 1;
             
             ShadowGPUData gpuShadow{};
-            gpuShadow.params = Math::Vector4(light->getShadowBias(), light->getShadowNormalBias(), light->getPenumbra(), 3.0f); // type=point cube
-            float nearPlane = std::max(0.01f, light->getRange() * 0.05f);
-            nearPlane = std::min(nearPlane, light->getRange() * 0.5f);
-            gpuShadow.depthRange = Math::Vector4(nearPlane, light->getRange(), static_cast<float>(m_pointCubeCounts[tier]), (float)tier); // cube index in z, tier in w
+            float farPlane = std::min(light->getShadowFarPlane(), light->getRange());
+            farPlane = std::max(farPlane, 0.1f);
+            float nearPlane = std::max(0.01f, light->getShadowNearPlane());
+            nearPlane = std::min(nearPlane, farPlane - 0.05f);
+            float texelWorld = (2.0f * farPlane) / static_cast<float>(res);
+            float depthSpan = std::max(farPlane - nearPlane, 0.1f);
+            float normalizedTexel = texelWorld / depthSpan;
+            float bias = std::max(light->getShadowBias(), normalizedTexel * biasScale * 2.0f);
+            float normalBias = std::max(light->getShadowNormalBias(), normalizedTexel * normalBiasScale * 3.0f);
+            gpuShadow.params = Math::Vector4(bias, normalBias, light->getPenumbra(), 3.0f); // type=point cube
+            gpuShadow.depthRange = Math::Vector4(nearPlane, farPlane, static_cast<float>(m_pointCubeCounts[tier]), (float)tier); // cube index in z, tier in w
             gpuShadow.atlasUV = Math::Vector4((float)res, 0.0f, 0.0f, 0.0f); // store resolution
             m_gpuShadows.push_back(gpuShadow);
             m_pointCubeCounts[tier]++;
@@ -415,6 +420,8 @@ void LightingSystem::allocateShadows() {
             
             Math::Matrix4x4 view;
             Math::Matrix4x4 proj;
+            float shadowNearPlane = std::max(0.01f, light->getShadowNearPlane());
+            float shadowFarPlane = std::max(shadowNearPlane + 0.1f, std::min(light->getShadowFarPlane(), light->getRange()));
             
             float texelWorld = 0.0f;
             if (light->getType() == Light::Type::Spot) {
@@ -424,9 +431,9 @@ void LightingSystem::allocateShadows() {
                 float fov = spotAngleRad * 1.1f; // 10% margin
                 fov = std::min(fov, Math::PI * 0.95f); // Cap at ~171 degrees
                 float aspect = 1.0f;
-                proj = Math::Matrix4x4::Perspective(fov, aspect, 0.01f, light->getRange());
+                proj = Math::Matrix4x4::Perspective(fov, aspect, shadowNearPlane, shadowFarPlane);
                 gpuShadow.params.w = 0.0f; // spot identifier
-                float extent = std::tan(fov * 0.5f) * light->getRange();
+                float extent = std::tan(fov * 0.5f) * shadowFarPlane;
                 texelWorld = (extent * 2.0f) / static_cast<float>(resolution);
             } else {
                 view = Math::Matrix4x4::LookAt(pos, pos + dir, up);
@@ -446,7 +453,7 @@ void LightingSystem::allocateShadows() {
             
             float depthSpan = 1.0f;
             if (light->getType() == Light::Type::Spot) {
-                depthSpan = std::max(0.1f, light->getRange() - 0.01f);
+                depthSpan = std::max(0.1f, shadowFarPlane - shadowNearPlane);
             } else {
                 depthSpan = std::max(0.1f, light->getRange() * 2.0f - 0.01f);
             }
@@ -456,7 +463,16 @@ void LightingSystem::allocateShadows() {
             gpuShadow.params.x = bias;
             gpuShadow.params.y = normalBias;
             gpuShadow.params.z = light->getPenumbra();
-            gpuShadow.depthRange = Math::Vector4(light->getShadowNearPlane(), light->getShadowFarPlane(), texelWorld, static_cast<float>(tile.layer));
+            if (light->getType() == Light::Type::Spot) {
+                gpuShadow.depthRange = Math::Vector4(
+                    shadowNearPlane,
+                    shadowFarPlane,
+                    texelWorld,
+                    static_cast<float>(tile.layer)
+                );
+            } else {
+                gpuShadow.depthRange = Math::Vector4(light->getShadowNearPlane(), light->getShadowFarPlane(), texelWorld, static_cast<float>(tile.layer));
+            }
             
             m_gpuShadows.push_back(gpuShadow);
         }
@@ -567,7 +583,7 @@ void LightingSystem::fillGPUBuffers() {
         if (prepared.light->getSoftShadows()) flags |= kLightFlagSoftShadows;
         if (prepared.light->getContactShadows()) flags |= kLightFlagContactShadows;
         if (prepared.light->getVolumetric()) flags |= kLightFlagVolumetric;
-        if (prepared.light->getContributeToStaticBake()) flags |= kLightFlagBakedDirect;
+        if (m_bakeDirectLighting && prepared.light->getContributeToStaticBake()) flags |= kLightFlagBakedDirect;
         flags |= (static_cast<uint32_t>(prepared.light->getMobility()) & 0x3u) << kLightMobilityShift;
         flags |= (static_cast<uint32_t>(prepared.light->getShadowmaskChannel() + 1) & 0x7u) << kLightShadowmaskShift;
         

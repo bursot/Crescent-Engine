@@ -35,6 +35,7 @@
 - (NSDictionary *)bakeSceneStaticLightmaps { return [[self bridge] bakeSceneStaticLightmaps]; }
 - (NSDictionary *)bakeSceneStaticLighting { return [[self bridge] bakeSceneStaticLighting]; }
 - (BOOL)cookEnvironmentMapAtPath:(NSString *)path outputPath:(NSString *)outputPath { return [[self bridge] cookEnvironmentMap:path outputPath:outputPath]; }
+- (BOOL)cookStaticLightmapAtPath:(NSString *)path outputPath:(NSString *)outputPath { return [[self bridge] cookStaticLightmap:path outputPath:outputPath]; }
 - (BOOL)saveSceneAtPath:(NSString *)path { return [[self bridge] saveSceneAtPath:path]; }
 - (BOOL)saveCookedRuntimeSceneAtPath:(NSString *)path includeEditorOnly:(BOOL)includeEditorOnly {
     return [[self bridge] saveCookedRuntimeSceneAtPath:path includeEditorOnly:includeEditorOnly];

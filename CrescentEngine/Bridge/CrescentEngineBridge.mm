@@ -3856,6 +3856,15 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (BOOL)cookStaticLightmap:(NSString *)path outputPath:(NSString *)outputPath {
+    return [self performSyncBool:^BOOL {
+        if (!path || !outputPath) {
+            return NO;
+        }
+        return CookStaticLightmapToKTX2(path.UTF8String, outputPath.UTF8String) ? YES : NO;
+    }];
+}
+
 - (void)resetEnvironment {
     [self performAsync:^{
         if (_engine && _engine->getRenderer()) {
@@ -4611,6 +4620,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"samplesPerTexel": @(settings.staticLighting.samplesPerTexel),
             @"indirectBounces": @(settings.staticLighting.indirectBounces),
             @"denoise": @(settings.staticLighting.denoise),
+            @"bakeDirectLighting": @(settings.staticLighting.bakeDirectLighting),
             @"directionalLightmaps": @(settings.staticLighting.directionalLightmaps),
             @"shadowmask": @(settings.staticLighting.shadowmask),
             @"autoUnwrap": @(settings.staticLighting.autoUnwrap),
@@ -4793,6 +4803,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             if (staticLighting[@"samplesPerTexel"]) updated.staticLighting.samplesPerTexel = [staticLighting[@"samplesPerTexel"] intValue];
             if (staticLighting[@"indirectBounces"]) updated.staticLighting.indirectBounces = [staticLighting[@"indirectBounces"] intValue];
             if (staticLighting[@"denoise"]) updated.staticLighting.denoise = [staticLighting[@"denoise"] boolValue];
+            if (staticLighting[@"bakeDirectLighting"]) updated.staticLighting.bakeDirectLighting = [staticLighting[@"bakeDirectLighting"] boolValue];
             if (staticLighting[@"directionalLightmaps"]) updated.staticLighting.directionalLightmaps = [staticLighting[@"directionalLightmaps"] boolValue];
             if (staticLighting[@"shadowmask"]) updated.staticLighting.shadowmask = [staticLighting[@"shadowmask"] boolValue];
             if (staticLighting[@"autoUnwrap"]) updated.staticLighting.autoUnwrap = [staticLighting[@"autoUnwrap"] boolValue];
@@ -4989,10 +5000,15 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
     return [self performSyncBool:^BOOL {
         Light* light = GetLightByUUID(uuid.UTF8String);
         if (!light) return NO;
-        auto clampFloat = [](NSNumber* n, float minv, float maxv){ return std::max(minv, std::min(maxv, n.floatValue)); };
+        Light::Type previousType = light->getType();
+        bool typeChanged = false;
+        bool localLightTypeSelected = false;
         
         if (NSNumber* t = info[@"type"]) {
-            light->setType(static_cast<Light::Type>(t.intValue));
+            Light::Type newType = static_cast<Light::Type>(t.intValue);
+            typeChanged = newType != previousType;
+            localLightTypeSelected = newType == Light::Type::Point || newType == Light::Type::Spot;
+            light->setType(newType);
         }
         if (NSNumber* temp = info[@"temperatureK"]) {
             light->setColorTemperature(temp.floatValue);
@@ -5026,6 +5042,14 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         }
         if (NSNumber* sourceLength = info[@"sourceLength"]) {
             light->setSourceLength(sourceLength.floatValue);
+        }
+        if (typeChanged && localLightTypeSelected && !info[@"castsShadows"] && !light->getCastShadows()) {
+            // When artists switch a generic/local light type in the inspector,
+            // default to shadowed practical lights unless they explicitly disabled it.
+            light->setCastShadows(true);
+            if (!info[@"shadowResolution"] && light->getShadowMapResolution() < 512u) {
+                light->setShadowMapResolution(512u);
+            }
         }
         if (NSNumber* cast = info[@"castsShadows"]) {
             light->setCastShadows(cast.boolValue);

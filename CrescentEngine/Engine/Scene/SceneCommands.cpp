@@ -16,6 +16,7 @@
 #include "../Physics/PhysicsWorld.hpp"
 #include "../Rendering/stb_image.h"
 #include "../Rendering/stb_image_write.h"
+#include "../Rendering/tinyexr.h"
 #include <assimp/config.h>
 #include <assimp/Importer.hpp>
 #include <assimp/GltfMaterial.h>
@@ -220,6 +221,34 @@ static Math::Vector3 SRGBToLinear(const Math::Vector3& color) {
     );
 }
 
+static bool WriteEXRImage(const std::string& path,
+                          int width,
+                          int height,
+                          const std::vector<float>& rgbaPixels,
+                          bool saveAsHalf = true) {
+    if (path.empty() || width <= 0 || height <= 0) {
+        return false;
+    }
+    if (rgbaPixels.size() != static_cast<size_t>(width) * static_cast<size_t>(height) * 4u) {
+        return false;
+    }
+    const char* err = nullptr;
+    int result = SaveEXR(rgbaPixels.data(), width, height, 4, saveAsHalf ? 1 : 0, path.c_str(), &err);
+    if (result != TINYEXR_SUCCESS) {
+        std::cerr << "[StaticLighting] Failed to write EXR: " << path;
+        if (err) {
+            std::cerr << " reason: " << err;
+            FreeEXRErrorMessage(err);
+        }
+        std::cerr << std::endl;
+        return false;
+    }
+    if (err) {
+        FreeEXRErrorMessage(err);
+    }
+    return true;
+}
+
 static uint32_t HashUint(uint32_t value) {
     value ^= value >> 16u;
     value *= 0x7feb352du;
@@ -305,6 +334,11 @@ static Math::Vector3 SampleCPUImageRGB(const CPUImageCacheEntry* image,
     Math::Vector3 c0 = c00 * (1.0f - tx) + c10 * tx;
     Math::Vector3 c1 = c01 * (1.0f - tx) + c11 * tx;
     return c0 * (1.0f - ty) + c1 * ty;
+}
+
+static Math::Vector2 TransformMaterialUV(const Material& material, const Math::Vector2& uv) {
+    Math::Vector2 tiledUV(uv.x * material.getUVTiling().x, uv.y * material.getUVTiling().y);
+    return tiledUV + material.getUVOffset();
 }
 
 static float ComputeLuminance(const Math::Vector3& color) {
@@ -730,6 +764,84 @@ static bool TryPackShelfRect(ShelfAtlasState& atlas, int rectWidth, int rectHeig
     return true;
 }
 
+static bool CanPackStaticLightingCandidates(const std::vector<StaticLightingLayoutCandidate>& candidates,
+                                            int atlasSize,
+                                            int padding,
+                                            int maxAtlasCount,
+                                            float resolutionScale) {
+    std::vector<ShelfAtlasState> atlases;
+    atlases.reserve(std::max(maxAtlasCount, 1));
+
+    for (const auto& candidate : candidates) {
+        int scaledInnerResolution = static_cast<int>(std::round(static_cast<float>(candidate.requestedInnerResolution) * resolutionScale));
+        int innerResolution = std::min(std::max(1, scaledInnerResolution), atlasSize - padding * 2);
+        int slotResolution = std::min(atlasSize, innerResolution + padding * 2);
+        if (slotResolution <= padding * 2) {
+            return false;
+        }
+
+        int packedX = 0;
+        int packedY = 0;
+        bool packed = false;
+        for (auto& atlas : atlases) {
+            if (TryPackShelfRect(atlas, slotResolution, slotResolution, packedX, packedY)) {
+                packed = true;
+                break;
+            }
+        }
+
+        if (packed) {
+            continue;
+        }
+
+        if (static_cast<int>(atlases.size()) >= std::max(maxAtlasCount, 1)) {
+            return false;
+        }
+
+        ShelfAtlasState atlas;
+        atlas.atlasIndex = static_cast<int>(atlases.size());
+        atlas.width = atlasSize;
+        atlas.height = atlasSize;
+        if (!TryPackShelfRect(atlas, slotResolution, slotResolution, packedX, packedY)) {
+            return false;
+        }
+        atlases.push_back(atlas);
+    }
+
+    return true;
+}
+
+static float ResolveStaticLightingResolutionScale(const std::vector<StaticLightingLayoutCandidate>& candidates,
+                                                  int atlasSize,
+                                                  int padding,
+                                                  int maxAtlasCount) {
+    if (candidates.empty()) {
+        return 1.0f;
+    }
+
+    constexpr float kMaxResolutionBoost = 4.0f;
+    float low = 1.0f;
+    float high = kMaxResolutionBoost;
+
+    if (!CanPackStaticLightingCandidates(candidates, atlasSize, padding, maxAtlasCount, low)) {
+        return 1.0f;
+    }
+    if (CanPackStaticLightingCandidates(candidates, atlasSize, padding, maxAtlasCount, high)) {
+        return high;
+    }
+
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        float mid = (low + high) * 0.5f;
+        if (CanPackStaticLightingCandidates(candidates, atlasSize, padding, maxAtlasCount, mid)) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+
+    return low;
+}
+
 static Math::Vector2 TransformLightmapUVToAtlas(const Math::Vector2& uv, const Math::Vector4& scaleOffset) {
     return Math::Vector2(
         uv.x * scaleOffset.x + scaleOffset.z,
@@ -903,9 +1015,7 @@ static void ResolveMaterialSample(std::shared_ptr<Material> material,
         return;
     }
 
-    Math::Vector2 tiling = material->getUVTiling();
-    Math::Vector2 tiledUV(uv.x * tiling.x, uv.y * tiling.y);
-    tiledUV += material->getUVOffset();
+    Math::Vector2 tiledUV = TransformMaterialUV(*material, uv);
     const Math::Vector4& albedoValue = material->getAlbedo();
     outAlbedo = ClampColor(Math::Vector3(albedoValue.x, albedoValue.y, albedoValue.z), 1.0f);
     if (std::shared_ptr<Texture2D> albedoTexture = material->getAlbedoTexture()) {
@@ -922,6 +1032,85 @@ static void ResolveMaterialSample(std::shared_ptr<Material> material,
         Math::Vector3 aoSample = SampleCPUImageRGB(LoadCPUImage(aoTexture->getPath()), tiledUV, false);
         outAO *= Math::Clamp(aoSample.x, 0.05f, 1.0f);
     }
+}
+
+static void BuildBakeTangentBasis(const Math::Vector3& geometryNormalWS,
+                                  const Math::Vector3& interpolatedTangentWS,
+                                  const Math::Vector3& interpolatedBitangentWS,
+                                  Math::Vector3& outTangentWS,
+                                  Math::Vector3& outBitangentWS) {
+    Math::Vector3 normalWS = geometryNormalWS.normalized();
+    if (normalWS.lengthSquared() <= Math::EPSILON) {
+        normalWS = Math::Vector3::Up;
+    }
+
+    Math::Vector3 tangentWS = interpolatedTangentWS - normalWS * interpolatedTangentWS.dot(normalWS);
+    if (tangentWS.lengthSquared() <= Math::EPSILON) {
+        Math::Vector3 reference = (std::abs(normalWS.y) < 0.999f) ? Math::Vector3::Up : Math::Vector3::Right;
+        tangentWS = normalWS.cross(reference).normalized();
+        if (tangentWS.lengthSquared() <= Math::EPSILON) {
+            tangentWS = normalWS.cross(Math::Vector3::Forward).normalized();
+        }
+    } else {
+        tangentWS.normalize();
+    }
+
+    float handedness = 1.0f;
+    if (interpolatedBitangentWS.lengthSquared() > Math::EPSILON) {
+        handedness = (normalWS.cross(tangentWS).dot(interpolatedBitangentWS) < 0.0f) ? -1.0f : 1.0f;
+    }
+
+    Math::Vector3 bitangentWS = normalWS.cross(tangentWS).normalized() * handedness;
+    if (bitangentWS.lengthSquared() <= Math::EPSILON) {
+        bitangentWS = tangentWS.cross(normalWS).normalized();
+    }
+
+    outTangentWS = tangentWS.lengthSquared() > Math::EPSILON ? tangentWS : Math::Vector3::Right;
+    outBitangentWS = bitangentWS.lengthSquared() > Math::EPSILON ? bitangentWS : Math::Vector3::Forward;
+}
+
+static Math::Vector3 ResolveBakeShadingNormal(std::shared_ptr<Material> material,
+                                              const Math::Vector2& uv,
+                                              const Math::Vector3& geometryNormalWS,
+                                              const Math::Vector3& interpolatedTangentWS,
+                                              const Math::Vector3& interpolatedBitangentWS) {
+    Math::Vector3 normalWS = geometryNormalWS.normalized();
+    if (normalWS.lengthSquared() <= Math::EPSILON) {
+        return Math::Vector3::Up;
+    }
+
+    if (!material) {
+        return normalWS;
+    }
+
+    std::shared_ptr<Texture2D> normalTexture = material->getNormalTexture();
+    if (!normalTexture) {
+        return normalWS;
+    }
+
+    const CPUImageCacheEntry* image = LoadCPUImage(normalTexture->getPath());
+    if (!image) {
+        return normalWS;
+    }
+
+    Math::Vector3 tangentWS;
+    Math::Vector3 bitangentWS;
+    BuildBakeTangentBasis(normalWS, interpolatedTangentWS, interpolatedBitangentWS, tangentWS, bitangentWS);
+
+    Math::Vector2 tiledUV = TransformMaterialUV(*material, uv);
+    Math::Vector3 tangentNormal = SampleCPUImageRGB(image, tiledUV, false) * 2.0f - Math::Vector3::One;
+    tangentNormal.x *= material->getNormalScale();
+    tangentNormal.y *= material->getNormalScale();
+    if (tangentNormal.lengthSquared() <= Math::EPSILON) {
+        return normalWS;
+    }
+    tangentNormal.normalize();
+
+    Math::Vector3 shadingNormalWS = (tangentWS * tangentNormal.x)
+        + (bitangentWS * tangentNormal.y)
+        + (normalWS * tangentNormal.z);
+    shadingNormalWS.normalize();
+    return shadingNormalWS.lengthSquared() > Math::EPSILON ? shadingNormalWS : normalWS;
 }
 
 static bool IsEmitterTwoSided(const std::shared_ptr<Mesh>& mesh,
@@ -1190,9 +1379,11 @@ static Math::Vector3 BakeLightContribution(const BakedDirectLight& light,
             L = toLight / distance;
             float rangeNorm = (light.range > 0.0f) ? Math::Clamp(distance / light.range, 0.0f, 1.0f) : 0.0f;
             float smoothFalloff = std::pow(std::max(0.0f, 1.0f - std::pow(rangeNorm, 4.0f)), 2.0f);
-            attenuation = smoothFalloff / std::max(distance * distance, 0.25f);
-            if (light.sourceRadius > 0.0f) {
-                attenuation *= 1.0f + light.sourceRadius * 0.25f;
+            attenuation = smoothFalloff / std::max(distance * distance, 0.001f);
+            if (light.type == Light::Type::AreaRect ||
+                light.type == Light::Type::AreaDisk ||
+                light.type == Light::Type::EmissiveMesh) {
+                attenuation *= 1.0f / std::max(distance, 0.1f);
             }
             break;
         }
@@ -1205,7 +1396,7 @@ static Math::Vector3 BakeLightContribution(const BakedDirectLight& light,
             L = toLight / distance;
             float rangeNorm = (light.range > 0.0f) ? Math::Clamp(distance / light.range, 0.0f, 1.0f) : 0.0f;
             float smoothFalloff = std::pow(std::max(0.0f, 1.0f - std::pow(rangeNorm, 4.0f)), 2.0f);
-            attenuation = smoothFalloff / std::max(distance * distance, 0.25f);
+            attenuation = smoothFalloff / std::max(distance * distance, 0.001f);
             float cosTheta = light.directionWS.normalized().dot(-L);
             if (cosTheta <= light.cosOuter) {
                 return Math::Vector3::Zero;
@@ -1223,10 +1414,21 @@ static Math::Vector3 BakeLightContribution(const BakedDirectLight& light,
     }
 
     float scaledIntensity = light.intensity;
-    if (light.type == Light::Type::Directional) {
-        scaledIntensity *= 0.35f;
-    } else {
-        scaledIntensity *= 0.075f;
+    switch (light.type) {
+        case Light::Type::Directional:
+            break;
+        case Light::Type::Point:
+            scaledIntensity = light.intensity / (4.0f * Math::PI);
+            break;
+        case Light::Type::Spot: {
+            float solidAngle = 2.0f * Math::PI * (1.0f - light.cosOuter);
+            scaledIntensity = (solidAngle > Math::EPSILON) ? (light.intensity / solidAngle) : light.intensity;
+            break;
+        }
+        case Light::Type::AreaRect:
+        case Light::Type::AreaDisk:
+        case Light::Type::EmissiveMesh:
+            break;
     }
     return light.color * (scaledIntensity * attenuation * nDotL);
 }
@@ -3360,8 +3562,9 @@ Entity* SceneCommands::createPointLight(Scene* scene, const std::string& name) {
     light->setColor(Math::Vector3(1.0f, 1.0f, 1.0f));
     light->setIntensity(800.0f);
     light->setRange(15.0f);
-    // Point-light shadows are cube maps, so enabling them by default is a 6x shadow-pass hit.
-    light->setCastShadows(false);
+    // Horror / practical-light workflows rely on local-light occlusion,
+    // so keep shadows enabled out of the box with a conservative default.
+    light->setCastShadows(true);
     light->setShadowMapResolution(512);
     
     entity->getTransform()->setPosition(Math::Vector3(0, 3, 0));
@@ -3380,6 +3583,7 @@ Entity* SceneCommands::createSpotLight(Scene* scene, const std::string& name) {
     light->setIntensity(1200.0f);
     light->setRange(20.0f);
     light->setSpotAngle(45.0f);
+    light->setCastShadows(true);
     light->setShadowMapResolution(512);
     
     entity->getTransform()->setPosition(Math::Vector3(0, 5, 0));
@@ -4138,9 +4342,16 @@ SceneCommands::StaticLightingLayoutStats SceneCommands::buildStaticLightingLayou
     atlases.reserve(std::max(staticLightingSettings.maxAtlasCount, 1));
     const int atlasSize = std::max(256, staticLightingSettings.atlasSize);
     const int padding = std::max(1, staticLightingSettings.unwrapPadding);
+    const float resolutionScale = ResolveStaticLightingResolutionScale(
+        candidates,
+        atlasSize,
+        padding,
+        staticLightingSettings.maxAtlasCount
+    );
 
     for (auto& candidate : candidates) {
-        int innerResolution = std::min(candidate.requestedInnerResolution, atlasSize - padding * 2);
+        int scaledInnerResolution = static_cast<int>(std::round(static_cast<float>(candidate.requestedInnerResolution) * resolutionScale));
+        int innerResolution = std::min(std::max(1, scaledInnerResolution), atlasSize - padding * 2);
         int slotResolution = std::min(atlasSize, innerResolution + padding * 2);
         if (slotResolution <= padding * 2) {
             stats.skippedRendererCount += 1;
@@ -4245,7 +4456,7 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
 
     SceneSettings bakeSettings = scene->getSettings();
     bakeSettings.staticLighting.enabled = true;
-    bakeSettings.staticLighting.directionalLightmaps = true;
+    bakeSettings.staticLighting.directionalLightmaps = bakeSettings.staticLighting.bakeDirectLighting;
     bakeSettings.staticLighting.shadowmask = !stationaryShadowmaskLights.empty();
     scene->setSettings(bakeSettings);
     stats.bakedLightCount = markedStaticLightCount;
@@ -4361,6 +4572,8 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
                     const Vertex& v0 = vertices[i0];
                     const Vertex& v1 = vertices[i1];
                     const Vertex& v2 = vertices[i2];
+                    const int materialIndex = ResolveTriangleMaterialIndex(*candidate.mesh, tri);
+                    std::shared_ptr<Material> material = candidate.renderer->getMaterial(static_cast<uint32_t>(std::max(materialIndex, 0)));
 
                     Math::Vector2 uv0 = TransformLightmapUVToAtlas(v0.texCoord1, candidate.staticLighting.lightmapScaleOffset);
                     Math::Vector2 uv1 = TransformLightmapUVToAtlas(v1.texCoord1, candidate.staticLighting.lightmapScaleOffset);
@@ -4390,19 +4603,31 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
                             }
 
                             Math::Vector3 localPos = v0.position * bary.x + v1.position * bary.y + v2.position * bary.z;
+                            Math::Vector2 surfaceUV = v0.texCoord * bary.x + v1.texCoord * bary.y + v2.texCoord * bary.z;
                             Math::Vector3 localNormal = (v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z).normalized();
                             if (localNormal.lengthSquared() <= Math::EPSILON) {
                                 localNormal = Math::Vector3::Up;
                             }
+                            Math::Vector3 localTangent = v0.tangent * bary.x + v1.tangent * bary.y + v2.tangent * bary.z;
+                            Math::Vector3 localBitangent = v0.bitangent * bary.x + v1.bitangent * bary.y + v2.bitangent * bary.z;
 
                             Math::Vector3 positionWS = candidate.worldMatrix.transformPoint(localPos);
-                            Math::Vector3 normalWS = candidate.normalMatrix.transformDirection(localNormal).normalized();
-                            if (normalWS.lengthSquared() <= Math::EPSILON) {
-                                normalWS = candidate.worldMatrix.transformDirection(localNormal).normalized();
+                            Math::Vector3 geometryNormalWS = candidate.normalMatrix.transformDirection(localNormal).normalized();
+                            if (geometryNormalWS.lengthSquared() <= Math::EPSILON) {
+                                geometryNormalWS = candidate.worldMatrix.transformDirection(localNormal).normalized();
                             }
-                            if (normalWS.lengthSquared() <= Math::EPSILON) {
-                                normalWS = Math::Vector3::Up;
+                            if (geometryNormalWS.lengthSquared() <= Math::EPSILON) {
+                                geometryNormalWS = Math::Vector3::Up;
                             }
+                            Math::Vector3 tangentWS = candidate.normalMatrix.transformDirection(localTangent).normalized();
+                            Math::Vector3 bitangentWS = candidate.normalMatrix.transformDirection(localBitangent).normalized();
+                            Math::Vector3 shadingNormalWS = ResolveBakeShadingNormal(
+                                material,
+                                surfaceUV,
+                                geometryNormalWS,
+                                tangentWS,
+                                bitangentWS
+                            );
 
                             Math::Vector3 accumulated = Math::Vector3::Zero;
                             Math::Vector3 indirect = Math::Vector3::Zero;
@@ -4410,11 +4635,11 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
                             float dominantWeight = 0.0f;
                             float referenceNoL = 0.0f;
                             for (const BakedDirectLight& light : bakedLights) {
-                                Math::Vector3 contribution = BakeLightContribution(light, positionWS, normalWS);
+                                Math::Vector3 contribution = BakeLightContribution(light, positionWS, shadingNormalWS);
                                 if (contribution.lengthSquared() <= Math::EPSILON) {
                                     continue;
                                 }
-                                bool visible = IsDirectLightVisible(scene, light, positionWS, normalWS);
+                                bool visible = IsDirectLightVisible(scene, light, positionWS, geometryNormalWS);
                                 if (light.mobility == Light::Mobility::Stationary && light.shadowmaskChannel >= 0) {
                                     size_t shadowmaskIndex = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u
                                         + static_cast<size_t>(light.shadowmaskChannel);
@@ -4424,11 +4649,14 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
                                 if (!visible) {
                                     continue;
                                 }
+                                if (light.mobility == Light::Mobility::Stationary) {
+                                    continue;
+                                }
                                 accumulated += contribution;
 
                                 Math::Vector3 lightDir = Math::Vector3::Zero;
                                 float sampleNoL = 0.0f;
-                                if (ComputeIncidentLightDirection(light, positionWS, normalWS, lightDir, sampleNoL)) {
+                                if (ComputeIncidentLightDirection(light, positionWS, shadingNormalWS, lightDir, sampleNoL)) {
                                     float weight = std::max(ComputeLuminance(contribution), 0.0f);
                                     dominantDirection += lightDir * weight;
                                     dominantWeight += weight;
@@ -4440,7 +4668,7 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
                                     scene,
                                     emissiveSurfaces,
                                     positionWS,
-                                    normalWS,
+                                    shadingNormalWS,
                                     static_cast<uint32_t>((atlasIndex + 1) * 2166136261u)
                                         ^ static_cast<uint32_t>((x + 1) * 16777619u)
                                         ^ static_cast<uint32_t>((y + 1) * 374761393u)
@@ -4480,7 +4708,7 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
                                     bakedLights,
                                     emissiveSurfaces,
                                     positionWS,
-                                    normalWS,
+                                    geometryNormalWS,
                                     sampleSeed,
                                     adaptiveSampleCount
                                 );
@@ -4508,7 +4736,7 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
             }
         }
 
-        std::vector<unsigned char> atlasPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0u);
+        std::vector<float> atlasPixelsHDR(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0.0f);
         std::vector<unsigned char> directionalPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0u);
         std::vector<unsigned char> shadowmaskPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 255u);
         for (size_t pixelIndex = 0; pixelIndex < atlasCoverage.size(); ++pixelIndex) {
@@ -4536,14 +4764,20 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
             if (coverage == 0) {
                 continue;
             }
-            float r = atlasDirectLighting[pixelIndex * 3 + 0] + atlasIndirectLighting[pixelIndex * 3 + 0];
-            float g = atlasDirectLighting[pixelIndex * 3 + 1] + atlasIndirectLighting[pixelIndex * 3 + 1];
-            float b = atlasDirectLighting[pixelIndex * 3 + 2] + atlasIndirectLighting[pixelIndex * 3 + 2];
+            float r = bakeSettings.staticLighting.bakeDirectLighting
+                ? std::max(atlasDirectLighting[pixelIndex * 3 + 0] + atlasIndirectLighting[pixelIndex * 3 + 0], 0.0f)
+                : std::max(atlasIndirectLighting[pixelIndex * 3 + 0], 0.0f);
+            float g = bakeSettings.staticLighting.bakeDirectLighting
+                ? std::max(atlasDirectLighting[pixelIndex * 3 + 1] + atlasIndirectLighting[pixelIndex * 3 + 1], 0.0f)
+                : std::max(atlasIndirectLighting[pixelIndex * 3 + 1], 0.0f);
+            float b = bakeSettings.staticLighting.bakeDirectLighting
+                ? std::max(atlasDirectLighting[pixelIndex * 3 + 2] + atlasIndirectLighting[pixelIndex * 3 + 2], 0.0f)
+                : std::max(atlasIndirectLighting[pixelIndex * 3 + 2], 0.0f);
 
-            atlasPixels[pixelIndex * 4 + 0] = static_cast<unsigned char>(Math::Clamp(std::pow(r / 16.0f, 1.0f / 2.2f), 0.0f, 1.0f) * 255.0f);
-            atlasPixels[pixelIndex * 4 + 1] = static_cast<unsigned char>(Math::Clamp(std::pow(g / 16.0f, 1.0f / 2.2f), 0.0f, 1.0f) * 255.0f);
-            atlasPixels[pixelIndex * 4 + 2] = static_cast<unsigned char>(Math::Clamp(std::pow(b / 16.0f, 1.0f / 2.2f), 0.0f, 1.0f) * 255.0f);
-            atlasPixels[pixelIndex * 4 + 3] = 255u;
+            atlasPixelsHDR[pixelIndex * 4 + 0] = r;
+            atlasPixelsHDR[pixelIndex * 4 + 1] = g;
+            atlasPixelsHDR[pixelIndex * 4 + 2] = b;
+            atlasPixelsHDR[pixelIndex * 4 + 3] = 1.0f;
 
             Math::Vector3 directionalVec(atlasDirectional[pixelIndex * 4 + 0],
                                          atlasDirectional[pixelIndex * 4 + 1],
@@ -4574,7 +4808,7 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
         }
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(lightmapPath).parent_path(), ec);
-        if (stbi_write_png(lightmapPath.c_str(), width, height, 4, atlasPixels.data(), width * 4) == 0) {
+        if (!WriteEXRImage(lightmapPath, width, height, atlasPixelsHDR, true)) {
             continue;
         }
 
@@ -4608,19 +4842,25 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
         }
     }
 
-    if (stats.atlasCount > 0) {
-        BakeProbeVolume(scene, scenePath, bakeSettings, bakedLights, emissiveSurfaces);
-        SceneSettings updatedSettings = scene->getSettings();
-        updatedSettings.staticLighting.enabled = true;
-        updatedSettings.staticLighting.directionalLightmaps = true;
-        updatedSettings.staticLighting.localReflectionProbes = bakeSettings.staticLighting.localReflectionProbes;
-        updatedSettings.staticLighting.shadowmask = !stationaryShadowmaskLights.empty();
-        updatedSettings.staticLighting.lastBakeHash = !stationaryShadowmaskLights.empty()
-            ? "lightmap_directional_gi_shadowmask_probereflections_v10"
-            : "lightmap_directional_gi_probereflections_v10";
-        scene->setSettings(updatedSettings);
-        SceneSerializer::SaveStaticLightingManifest(scene, scenePath);
-    }
+        if (stats.atlasCount > 0) {
+            BakeProbeVolume(scene, scenePath, bakeSettings, bakedLights, emissiveSurfaces);
+            SceneSettings updatedSettings = scene->getSettings();
+            updatedSettings.staticLighting.enabled = true;
+            updatedSettings.staticLighting.directionalLightmaps = bakeSettings.staticLighting.bakeDirectLighting;
+            updatedSettings.staticLighting.localReflectionProbes = bakeSettings.staticLighting.localReflectionProbes;
+            updatedSettings.staticLighting.shadowmask = !stationaryShadowmaskLights.empty();
+            if (bakeSettings.staticLighting.bakeDirectLighting) {
+                updatedSettings.staticLighting.lastBakeHash = !stationaryShadowmaskLights.empty()
+                    ? "lightmap_direct_indirect_shadowmask_hdrlightmap_probereflections_v20"
+                    : "lightmap_direct_indirect_hdrlightmap_probereflections_v20";
+            } else {
+                updatedSettings.staticLighting.lastBakeHash = !stationaryShadowmaskLights.empty()
+                    ? "lightmap_indirect_shadowmask_runtime_direct_hdrlightmap_probereflections_v20"
+                    : "lightmap_indirect_runtime_direct_hdrlightmap_probereflections_v20";
+            }
+            scene->setSettings(updatedSettings);
+            SceneSerializer::SaveStaticLightingManifest(scene, scenePath);
+        }
 
     return stats;
 }

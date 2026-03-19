@@ -19,6 +19,7 @@ MODEL_EXTS = {
 RUNTIME_RAW_ASSET_EXTS = {".hdr", ".exr", ".wav", ".mp3", ".ogg", ".flac", ".ktx", ".ktx2", ".dds", ".cube", ".cmat"}
 KTX2_CACHE_VERSION = "v2a"
 ENV_CACHE_VERSION = "v1"
+STATIC_LIGHTMAP_COOK_VERSION = "v1"
 EMBEDDED_MARKER = "#embedded:"
 FNV64_OFFSET = 14695981039346656037
 FNV64_PRIME = 1099511628211
@@ -109,6 +110,23 @@ def relative_cooked_environment_path(project_root: Path, source_path: Path, proj
     return Path("Library") / "ImportCache" / f"hdri_{stable_hash(key)}_{ENV_CACHE_VERSION}.cenv"
 
 
+def normalize_static_lightmap_key(project_root: Path, source_path: Path) -> str:
+    resolved = source_path.resolve()
+    try:
+        return resolved.relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def relative_cooked_static_lightmap_path(project_root: Path, source_path: Path) -> Path:
+    key = normalize_static_lightmap_key(project_root, source_path)
+    return Path("Library") / "ImportCache" / f"lightmap_rgbm_{stable_hash(key)}_{STATIC_LIGHTMAP_COOK_VERSION}.ktx2"
+
+
+def relative_baked_texture_cache_path(source_path: Path) -> Path:
+    return Path("Library") / "ImportCache" / f"path_{stable_hash(source_path.resolve().as_posix())}_{KTX2_CACHE_VERSION}.ktx2"
+
+
 def collect_environment_refs(scene_files: list[Path], project_root: Path, project_data: dict) -> list[Path]:
     refs: set[Path] = set()
     asset_roots = [project_root / relative for relative in (project_data.get("assetPaths") or [project_data.get("assets", "Assets")])]
@@ -163,30 +181,16 @@ def bake_source_scenes(player_app: Path,
         "bakedLightCount": 0,
     }
 
-    for scene_path in scene_files:
-        baked_output = baked_root / scene_path.relative_to(project_root)
-        baked_output.parent.mkdir(parents=True, exist_ok=True)
-        run(
-            [
-                str(executable),
-                "--bake-scene-lighting",
-                str(project_file),
-                str(scene_path),
-                str(baked_output),
-            ],
-            cwd=project_root,
-        )
-        baked_scene_map[scene_path] = baked_output
-        stats["bakedSceneCount"] += 1
-
+    def scene_bake_stats(scene_path: Path) -> tuple[int, int, int]:
         try:
-            baked_data = json.loads(baked_output.read_text(encoding="utf-8"))
+            scene_data = json.loads(scene_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            continue
+            return 0, 0, 0
 
         scene_baked_lights = 0
+        scene_baked_renderers = 0
         scene_atlas_paths: set[str] = set()
-        for entity in baked_data.get("entities", []):
+        for entity in scene_data.get("entities", []):
             components = entity.get("components", {})
             light = components.get("Light")
             if isinstance(light, dict) and (
@@ -201,23 +205,132 @@ def bake_source_scenes(player_app: Path,
             static_lighting = renderer.get("staticLighting", {})
             if not isinstance(static_lighting, dict):
                 continue
-            lightmap = static_lighting.get("lightmap")
-            lightmap_path = None
-            if isinstance(lightmap, dict):
-                lightmap_path = lightmap.get("path")
-            elif isinstance(lightmap, str):
-                lightmap_path = lightmap
+            lightmap_path = extract_asset_ref(static_lighting.get("lightmap"))
             if not isinstance(lightmap_path, str) or not lightmap_path:
                 continue
 
-            stats["bakedRendererCount"] += 1
+            scene_baked_renderers += 1
             scene_atlas_paths.add(lightmap_path)
 
-        stats["bakedAtlasCount"] += len(scene_atlas_paths)
+        return scene_baked_renderers, len(scene_atlas_paths), scene_baked_lights
 
-        stats["bakedLightCount"] += scene_baked_lights
+    for scene_path in scene_files:
+        baked_output = baked_root / scene_path.relative_to(project_root)
+        baked_output.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                str(executable),
+                "--bake-scene-lighting",
+                str(project_file),
+                str(scene_path),
+                str(baked_output),
+            ],
+            cwd=project_root,
+        )
+        stats["bakedSceneCount"] += 1
+        baked_renderer_count, baked_atlas_count, baked_light_count = scene_bake_stats(baked_output)
+        effective_scene = baked_output
+        if baked_renderer_count == 0 and baked_atlas_count == 0:
+            source_renderer_count, source_atlas_count, source_light_count = scene_bake_stats(scene_path)
+            if source_renderer_count > 0 or source_atlas_count > 0:
+                effective_scene = scene_path
+                baked_renderer_count = source_renderer_count
+                baked_atlas_count = source_atlas_count
+                baked_light_count = source_light_count
+
+        baked_scene_map[scene_path] = effective_scene
+        stats["bakedRendererCount"] += baked_renderer_count
+        stats["bakedAtlasCount"] += baked_atlas_count
+        stats["bakedLightCount"] += baked_light_count
 
     return baked_scene_map, stats
+
+
+def collect_baked_lighting_artifacts(scene_sources: list[Path], project_root: Path) -> tuple[list[Path], list[Path]]:
+    hdr_refs: set[Path] = set()
+    ldr_refs: set[Path] = set()
+    for scene_path in scene_sources:
+        try:
+            scene_data = json.loads(scene_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        for entity in scene_data.get("entities", []):
+            components = entity.get("components", {})
+            renderer = components.get("MeshRenderer")
+            if not isinstance(renderer, dict):
+                continue
+            static_lighting = renderer.get("staticLighting")
+            if not isinstance(static_lighting, dict):
+                continue
+            for key in ("lightmap", "directionalLightmap", "shadowmask"):
+                artifact_ref = extract_asset_ref(static_lighting.get(key))
+                if not artifact_ref:
+                    continue
+                artifact_path = (project_root / artifact_ref).resolve()
+                if not artifact_path.exists():
+                    continue
+                if artifact_path.suffix.lower() in {".exr", ".hdr"}:
+                    hdr_refs.add(artifact_path)
+                elif artifact_path.suffix.lower() in LDR_EXTS:
+                    ldr_refs.add(artifact_path)
+
+    return sorted(hdr_refs), sorted(ldr_refs)
+
+
+def cook_static_lightmaps(player_app: Path,
+                          repo_root: Path,
+                          project_file: Path,
+                          baked_scene_sources: list[Path],
+                          cooked_root: Path) -> dict[Path, Path]:
+    static_lightmaps, ldr_artifacts = collect_baked_lighting_artifacts(baked_scene_sources, project_file.parent)
+    if not static_lightmaps and not ldr_artifacts:
+        return {}
+
+    executable = player_app / "Contents" / "MacOS" / "CrescentPlayer"
+    if not executable.exists():
+        raise FileNotFoundError(f"Cooker executable not found: {executable}")
+
+    project_root = project_file.parent
+    cooked_map: dict[Path, Path] = {}
+    for source_path in static_lightmaps:
+        cooked_relative = relative_cooked_static_lightmap_path(project_root, source_path)
+        cooked_output = cooked_root / cooked_relative
+        cooked_output.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                str(executable),
+                "--cook-static-lightmap",
+                str(project_file),
+                str(source_path),
+                str(cooked_output),
+            ],
+            cwd=project_root,
+        )
+        cooked_map[source_path] = cooked_output
+
+    basisu = basisu_path(repo_root)
+    if ldr_artifacts:
+        if not basisu.exists():
+            raise FileNotFoundError(f"basisu binary not found: {basisu}")
+        for source_path in ldr_artifacts:
+            cooked_relative = relative_baked_texture_cache_path(source_path)
+            cooked_output = cooked_root / cooked_relative
+            cooked_output.parent.mkdir(parents=True, exist_ok=True)
+            run(
+                build_basisu_command(
+                    basisu,
+                    source_path,
+                    cooked_output,
+                    srgb=False,
+                    normal_map=False,
+                    generate_mips=True,
+                ),
+                cwd=project_root,
+            )
+            cooked_map[source_path] = cooked_output
+
+    return cooked_map
 
 
 def cook_runtime_environments(player_app: Path,
@@ -298,6 +411,41 @@ def run(cmd: list[str], cwd: Optional[Path] = None) -> None:
     result = subprocess.run(cmd, cwd=cwd, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"Command failed ({result.returncode}): {' '.join(cmd)}")
+
+
+def basisu_path(repo_root: Path) -> Path:
+    return repo_root / "ThirdParty" / "basisu" / "basisu"
+
+
+def build_basisu_command(basisu: Path,
+                         asset_path: Path,
+                         output_path: Path,
+                         *,
+                         srgb: bool,
+                         normal_map: bool,
+                         generate_mips: bool) -> list[str]:
+    use_uastc = normal_map
+    cmd = [
+        str(basisu),
+        "-ktx2",
+        "-ktx2_no_zstandard",
+        "-uastc" if use_uastc else "-etc1s",
+        "-srgb" if srgb else "-linear",
+    ]
+    if generate_mips:
+        cmd.append("-mipmap")
+    cmd += [
+        "-quality",
+        "128" if use_uastc else "80",
+        "-effort",
+        "5" if use_uastc else "4",
+        "-file",
+        str(asset_path),
+        "-output_file",
+        str(output_path),
+        "-no_status_output",
+    ]
+    return cmd
 
 
 def build_app(repo_root: Path, configuration: str, derived_data: Path) -> Path:
@@ -670,6 +818,15 @@ def package_game(repo_root: Path,
             f"{baked_stats['bakedLightCount']} baked lights across "
             f"{baked_stats['bakedSceneCount']} scenes."
         )
+        cooked_static_lightmaps_root = Path(tmp_dir) / "CookedStaticLightmaps"
+        cooked_static_lightmap_map = cook_static_lightmaps(
+            built_app,
+            repo_root,
+            project_file,
+            list(baked_source_scene_map.values()),
+            cooked_static_lightmaps_root,
+        )
+        print(f"Cooked static lightmaps: {len(cooked_static_lightmap_map)}")
         cooked_scenes_root = Path(tmp_dir) / "CookedScenes"
         cooked_scene_map = cook_runtime_scenes(
             built_app,
@@ -700,7 +857,7 @@ def package_game(repo_root: Path,
         packaged_project_data["textureCookFormat"] = "KTX2_ASTC4x4"
         packaged_project_data["requireCookedScenes"] = bool(cooked_scene_map)
         packaged_project_data["sceneCookFormat"] = "MessagePackEmbeddedMeshV1" if cooked_scene_map else ""
-        packaged_project_data["lightingBakeFormat"] = "LightmapDirectionalShadowmaskProbeTemporalReflections_V15"
+        packaged_project_data["lightingBakeFormat"] = "LightmapRGBMKTX2DirectionalShadowmaskProbeReflections_V18"
         packaged_project_data["requireCookedEnvironmentIBL"] = bool(cooked_environment_map)
         packaged_project_data["environmentCookFormat"] = "CENV_RGBA16F_V1" if cooked_environment_map else ""
         packaged_project_data["cookedScenes"] = cooked_scene_map
@@ -715,6 +872,7 @@ def package_game(repo_root: Path,
             project_root / project_data.get("library", "Library") / "BakedLighting",
             game_data_dir / "Library" / "BakedLighting",
         )
+        copy_tree_if_exists(cooked_static_lightmaps_root / "Library" / "ImportCache", game_data_dir / "Library" / "ImportCache")
         copy_tree_if_exists(cooked_environment_root / "Library" / "ImportCache", game_data_dir / "Library" / "ImportCache")
 
         manifest = build_manifest(game_data_dir, project_data, packaged_startup_scene)

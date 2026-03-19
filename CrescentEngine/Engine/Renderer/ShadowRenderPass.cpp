@@ -18,6 +18,15 @@
 namespace {
 constexpr bool kShadowDebug = false;
 
+inline void ApplyShadowDepthBias(MTL::RenderCommandEncoder* enc) {
+    if (!enc) {
+        return;
+    }
+    // Receiver-side bias alone was not enough; add raster depth bias so
+    // caster and receiver do not fight on the same surface.
+    enc->setDepthBias(2.0f, 2.5f, 0.0f);
+}
+
 inline float ComputeShadowInstanceCullRadius(const Crescent::Math::Vector3& meshSize) {
     // Keep a safety margin so dense-instance casters do not pop while camera/cascade moves.
     float sphereRadius = 0.5f * meshSize.length();
@@ -34,14 +43,14 @@ namespace {
     inline MTL::VertexDescriptor* buildShadowVertexDescriptor(bool skinned, bool includeUV) {
         MTL::VertexDescriptor* vd = MTL::VertexDescriptor::alloc()->init();
         vd->attributes()->object(0)->setFormat(MTL::VertexFormatFloat3);
-        vd->attributes()->object(0)->setOffset(0);
+        vd->attributes()->object(0)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, position)));
         vd->attributes()->object(0)->setBufferIndex(0);
         if (includeUV) {
             vd->attributes()->object(2)->setFormat(MTL::VertexFormatFloat2);
-            vd->attributes()->object(2)->setOffset(24);
+            vd->attributes()->object(2)->setOffset(static_cast<NS::UInteger>(offsetof(Vertex, texCoord)));
             vd->attributes()->object(2)->setBufferIndex(0);
         }
-        vd->layouts()->object(0)->setStride(72);
+        vd->layouts()->object(0)->setStride(static_cast<NS::UInteger>(sizeof(Vertex)));
         vd->layouts()->object(0)->setStepFunction(MTL::VertexStepFunctionPerVertex);
         if (skinned) {
             vd->attributes()->object(7)->setFormat(MTL::VertexFormatUInt4);
@@ -101,6 +110,8 @@ namespace {
     struct ShadowObjectUniformsCPU {
         Math::Matrix4x4 viewProj;
         Math::Matrix4x4 modelMatrix;
+        Math::Vector4 pointLightPosNear;
+        Math::Vector4 pointFarParams;
     };
 
     static std::array<Math::Vector4, 6> extractFrustumPlanes(const Math::Matrix4x4& m) {
@@ -445,11 +456,11 @@ void ShadowRenderPass::buildPipelines() {
     
     buildPipeline("shadow_dir_vertex", &m_dirPipeline, false, false, nullptr);
     buildPipeline("shadow_spot_vertex", &m_spotPipeline, false, false, nullptr);
-    buildPipeline("shadow_point_vertex", &m_pointPipeline, false, false, nullptr);
+    buildPipeline("shadow_point_vertex_depth", &m_pointPipeline, false, false, "shadow_point_fragment");
     buildPipeline("shadow_area_vertex", &m_areaPipeline, false, false, nullptr);
     buildPipeline("shadow_dir_vertex_skinned", &m_dirPipelineSkinned, true, false, nullptr);
     buildPipeline("shadow_spot_vertex_skinned", &m_spotPipelineSkinned, true, false, nullptr);
-    buildPipeline("shadow_point_vertex_skinned", &m_pointPipelineSkinned, true, false, nullptr);
+    buildPipeline("shadow_point_vertex_skinned", &m_pointPipelineSkinned, true, false, "shadow_point_fragment");
     buildPipeline("shadow_area_vertex_skinned", &m_areaPipelineSkinned, true, false, nullptr);
     buildPipeline("shadow_dir_vertex_instanced", &m_dirPipelineInstanced, false, false, nullptr);
     buildPipeline("shadow_spot_vertex_instanced", &m_spotPipelineInstanced, false, false, nullptr);
@@ -458,11 +469,11 @@ void ShadowRenderPass::buildPipelines() {
 
     buildPipeline("shadow_dir_vertex_cutout", &m_dirPipelineCutout, false, true, "shadow_alpha_fragment");
     buildPipeline("shadow_spot_vertex_cutout", &m_spotPipelineCutout, false, true, "shadow_alpha_fragment");
-    buildPipeline("shadow_point_vertex_cutout", &m_pointPipelineCutout, false, true, "shadow_alpha_fragment");
+    buildPipeline("shadow_point_vertex_cutout", &m_pointPipelineCutout, false, true, "shadow_point_fragment_cutout");
     buildPipeline("shadow_area_vertex_cutout", &m_areaPipelineCutout, false, true, "shadow_alpha_fragment");
     buildPipeline("shadow_dir_vertex_cutout_skinned", &m_dirPipelineSkinnedCutout, true, true, "shadow_alpha_fragment");
     buildPipeline("shadow_spot_vertex_cutout_skinned", &m_spotPipelineSkinnedCutout, true, true, "shadow_alpha_fragment");
-    buildPipeline("shadow_point_vertex_cutout_skinned", &m_pointPipelineSkinnedCutout, true, true, "shadow_alpha_fragment");
+    buildPipeline("shadow_point_vertex_cutout_skinned", &m_pointPipelineSkinnedCutout, true, true, "shadow_point_fragment_cutout");
     buildPipeline("shadow_area_vertex_cutout_skinned", &m_areaPipelineSkinnedCutout, true, true, "shadow_alpha_fragment");
     buildPipeline("shadow_dir_vertex_cutout_instanced", &m_dirPipelineInstancedCutout, false, true, "shadow_alpha_fragment");
     buildPipeline("shadow_spot_vertex_cutout_instanced", &m_spotPipelineInstancedCutout, false, true, "shadow_alpha_fragment");
@@ -632,9 +643,9 @@ void ShadowRenderPass::execute(MTL::CommandBuffer* cmdBuffer,
                     Math::Vector3(0,0,1), Math::Vector3(0,0,-1)
                 };
                 static const Math::Vector3 faceUps[6] = {
-                    Math::Vector3(0,1,0), Math::Vector3(0,1,0),
+                    Math::Vector3(0,-1,0), Math::Vector3(0,-1,0),
                     Math::Vector3(0,0,1), Math::Vector3(0,0,-1),
-                    Math::Vector3(0,1,0), Math::Vector3(0,1,0)
+                    Math::Vector3(0,-1,0), Math::Vector3(0,-1,0)
                 };
 
                 for (int face = 0; face < 6; ++face) {
@@ -642,7 +653,9 @@ void ShadowRenderPass::execute(MTL::CommandBuffer* cmdBuffer,
                     Math::Matrix4x4 view = Math::Matrix4x4::LookAt(lightPos, lightPos + faceDirs[face], faceUps[face]);
                     Math::Matrix4x4 proj = Math::Matrix4x4::Perspective(Math::HALF_PI, 1.0f, s.depthRange.x, s.depthRange.y);
                     Math::Matrix4x4 vp = proj * view;
-                    renderInstancedCubeFace(cmdBuffer, cubeTex, cubeIndex * 6 + face, res, vp, m_pointPipelineInstanced, m_pointPipelineInstancedCutout, instancedDraws);
+                    Math::Vector4 pointLightPosNear(lightPos.x, lightPos.y, lightPos.z, s.depthRange.x);
+                    Math::Vector4 pointFarParams(s.depthRange.y, 0.0f, 0.0f, 0.0f);
+                    renderInstancedCubeFace(cmdBuffer, cubeTex, cubeIndex * 6 + face, res, vp, &pointLightPosNear, &pointFarParams, m_pointPipelineInstanced, m_pointPipelineInstancedCutout, instancedDraws);
                 }
             }
         }
@@ -684,6 +697,8 @@ void ShadowRenderPass::renderDirectional(MTL::CommandBuffer* cmdBuffer, Scene* s
         // Set viewport to atlas rect
         MTL::RenderCommandEncoder* enc = cmdBuffer->renderCommandEncoder(rp);
         enc->setDepthStencilState(m_depthState);
+        enc->setFrontFacingWinding(MTL::WindingCounterClockwise);
+        ApplyShadowDepthBias(enc);
         enc->setViewport({double(slice.atlas.x), double(slice.atlas.y), double(slice.atlas.size), double(slice.atlas.size), 0.0, 1.0});
         
         // Iterate meshes
@@ -843,6 +858,8 @@ void ShadowRenderPass::renderLightRange(MTL::CommandBuffer* cmdBuffer,
     
     MTL::RenderCommandEncoder* enc = cmdBuffer->renderCommandEncoder(rp);
     enc->setDepthStencilState(m_depthState);
+    enc->setFrontFacingWinding(MTL::WindingCounterClockwise);
+    ApplyShadowDepthBias(enc);
     enc->setViewport({double(tile.x), double(tile.y), double(tile.size), double(tile.size), 0.0, 1.0});
     
         const auto& entities = scene->getAllEntities();
@@ -982,6 +999,8 @@ void ShadowRenderPass::renderInstancedRange(MTL::CommandBuffer* cmdBuffer,
 
         MTL::RenderCommandEncoder* enc = cmdBuffer->renderCommandEncoder(rp);
         enc->setDepthStencilState(m_depthState);
+        enc->setFrontFacingWinding(MTL::WindingCounterClockwise);
+        ApplyShadowDepthBias(enc);
         enc->setViewport({double(tile.x), double(tile.y), double(tile.size), double(tile.size), 0.0, 1.0});
         enc->setRenderPipelineState(pipeline);
         MTL::RenderPipelineState* currentPipeline = pipeline;
@@ -1132,6 +1151,8 @@ void ShadowRenderPass::renderInstancedRange(MTL::CommandBuffer* cmdBuffer,
 
     MTL::RenderCommandEncoder* enc = cmdBuffer->renderCommandEncoder(rp);
     enc->setDepthStencilState(m_depthState);
+    enc->setFrontFacingWinding(MTL::WindingCounterClockwise);
+    ApplyShadowDepthBias(enc);
     enc->setViewport({double(tile.x), double(tile.y), double(tile.size), double(tile.size), 0.0, 1.0});
     enc->setRenderPipelineState(pipeline);
     MTL::RenderPipelineState* currentPipeline = pipeline;
@@ -1184,6 +1205,8 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
                                                uint32_t slice,
                                                uint32_t resolution,
                                                const Math::Matrix4x4& viewProj,
+                                               const Math::Vector4* pointLightPosNear,
+                                               const Math::Vector4* pointFarParams,
                                                MTL::RenderPipelineState* pipeline,
                                                MTL::RenderPipelineState* pipelineCutout,
                                                const std::vector<InstancedShadowDraw>& instancedDraws) {
@@ -1236,10 +1259,18 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
 
         MTL::RenderCommandEncoder* enc = cmdBuffer->renderCommandEncoder(rp);
         enc->setDepthStencilState(m_depthState);
+        enc->setFrontFacingWinding(MTL::WindingCounterClockwise);
+        ApplyShadowDepthBias(enc);
         enc->setViewport({0.0, 0.0, (double)resolution, (double)resolution, 0.0, 1.0});
         enc->setRenderPipelineState(pipeline);
         MTL::RenderPipelineState* currentPipeline = pipeline;
         enc->setVertexBytes(&viewProj, sizeof(Math::Matrix4x4), 1);
+        if (pointLightPosNear) {
+            enc->setVertexBytes(pointLightPosNear, sizeof(Math::Vector4), 4);
+        }
+        if (pointFarParams) {
+            enc->setVertexBytes(pointFarParams, sizeof(Math::Vector4), 5);
+        }
 
         for (const auto& draw : instancedDraws) {
             if (!draw.mesh || draw.instanceCount == 0 || !draw.instanceBuffer) {
@@ -1381,10 +1412,18 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
 
     MTL::RenderCommandEncoder* enc = cmdBuffer->renderCommandEncoder(rp);
     enc->setDepthStencilState(m_depthState);
+    enc->setFrontFacingWinding(MTL::WindingCounterClockwise);
+    ApplyShadowDepthBias(enc);
     enc->setViewport({0.0, 0.0, (double)resolution, (double)resolution, 0.0, 1.0});
     enc->setRenderPipelineState(pipeline);
     MTL::RenderPipelineState* currentPipeline = pipeline;
     enc->setVertexBytes(&viewProj, sizeof(Math::Matrix4x4), 1);
+    if (pointLightPosNear) {
+        enc->setVertexBytes(pointLightPosNear, sizeof(Math::Vector4), 4);
+    }
+    if (pointFarParams) {
+        enc->setVertexBytes(pointFarParams, sizeof(Math::Vector4), 5);
+    }
 
     outputOffset = 0;
     for (size_t i = 0; i < drawCount; ++i) {
@@ -1434,6 +1473,8 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
     const auto& prepared = lighting.getPreparedLights();
     const auto& shadows = lighting.getGPUShadows();
     if (lights.empty() || shadows.empty()) return;
+    static uint32_t s_pointShadowDebugFrame = 0;
+    ++s_pointShadowDebugFrame;
     
     // Count point lights per tier and track max index per tier
     std::array<uint32_t,4> tierCounts = {0,0,0,0};
@@ -1457,17 +1498,20 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
         if (tierCounts[tier] == 0) continue;
         uint32_t res = presets[tier];
         uint32_t neededCubes = tierMaxCube[tier] + 1;
+        uint32_t neededSlices = neededCubes * 6u;
         if (tier >= (int)m_pointCubeTextures.size()) {
             m_pointCubeTextures.resize(4, nullptr);
         }
         MTL::Texture* tex = m_pointCubeTextures[tier];
-        if (!tex || tex->width() != res || tex->arrayLength() < neededCubes) {
+        if (!tex || tex->width() != res || tex->arrayLength() < neededSlices) {
             if (tex) { tex->release(); }
             MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
-            desc->setTextureType(MTL::TextureTypeCubeArray);
+            desc->setTextureType(MTL::TextureType2DArray);
             desc->setWidth(res);
             desc->setHeight(res);
-            desc->setArrayLength(neededCubes);
+            // Point shadows store six 2D face slices per light so shader-side
+            // face projection matches render-time view matrices exactly.
+            desc->setArrayLength(neededSlices);
             desc->setPixelFormat(MTL::PixelFormatDepth32Float);
             desc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
             desc->setStorageMode(MTL::StorageModePrivate);
@@ -1483,9 +1527,9 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
         Math::Vector3(0,0,1), Math::Vector3(0,0,-1)
     };
     static const Math::Vector3 faceUps[6] = {
-        Math::Vector3(0,1,0), Math::Vector3(0,1,0),
+        Math::Vector3(0,-1,0), Math::Vector3(0,-1,0),
         Math::Vector3(0,0,1), Math::Vector3(0,0,-1),
-        Math::Vector3(0,1,0), Math::Vector3(0,1,0)
+        Math::Vector3(0,-1,0), Math::Vector3(0,-1,0)
     };
     
     for (size_t i = 0; i < prepared.size(); ++i) {
@@ -1501,6 +1545,16 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
         MTL::Texture* cubeTex = (tier < (int)m_pointCubeTextures.size()) ? m_pointCubeTextures[tier] : nullptr;
         if (!cubeTex) continue;
         uint32_t cubeIndex = (uint32_t)std::max(0.0f, s.depthRange.z);
+        if ((s_pointShadowDebugFrame % 120u) == 1u) {
+            std::cout << "[POINT SHADOW DEBUG] light=" << i
+                      << " pos=(" << prepared[i].positionWS.x << ", " << prepared[i].positionWS.y << ", " << prepared[i].positionWS.z << ")"
+                      << " near=" << s.depthRange.x
+                      << " far=" << s.depthRange.y
+                      << " res=" << res
+                      << " tier=" << tier
+                      << " cubeIndex=" << cubeIndex
+                      << std::endl;
+        }
         
         // Clear all faces for this cube
         for (int face = 0; face < 6; ++face) {
@@ -1514,6 +1568,8 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
             
             MTL::RenderCommandEncoder* enc = cmdBuffer->renderCommandEncoder(rp);
             enc->setDepthStencilState(m_depthState);
+            enc->setFrontFacingWinding(MTL::WindingCounterClockwise);
+            ApplyShadowDepthBias(enc);
             enc->setViewport({0.0, 0.0, (double)res, (double)res, 0.0, 1.0});
             MTL::RenderPipelineState* currentPipeline = nullptr;
             
@@ -1522,6 +1578,7 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
             // Cubemap face FOV must be 90 degrees (HALF_PI), not 180!
             Math::Matrix4x4 proj = Math::Matrix4x4::Perspective(Math::HALF_PI, 1.0f, s.depthRange.x, s.depthRange.y);
             Math::Matrix4x4 vp = proj * view;
+            uint32_t faceDrawCount = 0;
             
         const auto& entities = scene->getAllEntities();
         for (const auto& entPtr : entities) {
@@ -1537,6 +1594,8 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
                 ShadowObjectUniformsCPU objectUniforms{};
                 objectUniforms.viewProj = vp;
                 objectUniforms.modelMatrix = model;
+                objectUniforms.pointLightPosNear = Math::Vector4(lightPos.x, lightPos.y, lightPos.z, s.depthRange.x);
+                objectUniforms.pointFarParams = Math::Vector4(s.depthRange.y, 0.0f, 0.0f, 0.0f);
                 enc->setVertexBuffer(static_cast<MTL::Buffer*>(mesh->getVertexBuffer()), 0, 0);
                 SkinnedMeshRenderer* skinned = e->getComponent<SkinnedMeshRenderer>();
                 bool wantsSkin = skinned && skinned->isEnabled() && mesh->hasSkinWeights() && !skinned->getBoneMatrices().empty();
@@ -1578,6 +1637,13 @@ void ShadowRenderPass::renderPointCubes(MTL::CommandBuffer* cmdBuffer, Scene* sc
                                            MTL::IndexTypeUInt32,
                                            static_cast<MTL::Buffer*>(mesh->getIndexBuffer()),
                                            0);
+                ++faceDrawCount;
+            }
+            if ((s_pointShadowDebugFrame % 120u) == 1u) {
+                std::cout << "[POINT SHADOW DEBUG] light=" << i
+                          << " face=" << face
+                          << " drawCount=" << faceDrawCount
+                          << std::endl;
             }
             
             enc->endEncoding();

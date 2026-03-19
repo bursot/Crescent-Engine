@@ -93,7 +93,7 @@ struct MaterialUniforms {
 struct MeshUniforms {
     float4 boundsCenter; // xyz center, w unused
     float4 boundsSize;   // xyz size, w unused
-    float4 flags;        // x billboard enabled, y vertex-baked, z static lightmap, w unused
+    float4 flags;        // x billboard enabled, y vertex-baked, z static lightmap, w lightmap encoding (0 legacy, 1 hdr, 2 rgbm)
     float4 lightmapScaleOffset; // xy scale, zw offset in atlas UV space
 };
 

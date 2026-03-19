@@ -505,6 +505,27 @@ std::string BuildCookedTextureRelativePath(const std::string& path) {
     return "Library/ImportCache/" + guid + "_v2a.ktx2";
 }
 
+std::string BuildCookedStaticLightmapRelativePath(const std::string& path) {
+    if (path.empty()) {
+        return "";
+    }
+
+    std::filesystem::path lightmapPath(path);
+    std::string ext = lightmapPath.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (ext != ".exr" && ext != ".hdr") {
+        return "";
+    }
+
+    std::string normalized = MakeProjectRelativePath(path);
+    if (normalized.empty()) {
+        normalized = lightmapPath.lexically_normal().generic_string();
+    }
+    return "Library/ImportCache/lightmap_rgbm_" + HashRuntimeCookKey(normalized) + "_v1.ktx2";
+}
+
 std::string NormalizeCookedEnvironmentKey(const std::string& path) {
     if (path.empty()) {
         return path;
@@ -1113,6 +1134,7 @@ json SerializeStaticLightingSettings(const SceneStaticLightingSettings& staticLi
         {"samplesPerTexel", staticLighting.samplesPerTexel},
         {"indirectBounces", staticLighting.indirectBounces},
         {"denoise", staticLighting.denoise},
+        {"bakeDirectLighting", staticLighting.bakeDirectLighting},
         {"directionalLightmaps", staticLighting.directionalLightmaps},
         {"shadowmask", staticLighting.shadowmask},
         {"probeVolume", staticLighting.probeVolume},
@@ -1274,6 +1296,7 @@ SceneStaticLightingSettings DeserializeStaticLightingSettings(const json& j) {
     staticLighting.samplesPerTexel = j.value("samplesPerTexel", staticLighting.samplesPerTexel);
     staticLighting.indirectBounces = j.value("indirectBounces", staticLighting.indirectBounces);
     staticLighting.denoise = j.value("denoise", staticLighting.denoise);
+    staticLighting.bakeDirectLighting = j.value("bakeDirectLighting", staticLighting.bakeDirectLighting);
     staticLighting.directionalLightmaps = j.value("directionalLightmaps", staticLighting.directionalLightmaps);
     staticLighting.shadowmask = j.value("shadowmask", staticLighting.shadowmask);
     staticLighting.probeVolume = j.value("probeVolume", staticLighting.probeVolume);
@@ -2303,6 +2326,30 @@ void ApplyEntityComponents(Entity* entity,
                 staticLighting.shadowmaskPath = ResolveTextureEntryPath(sl["shadowmask"]);
             }
             meshRenderer->setStaticLighting(staticLighting);
+            if (sl.contains("lightmapUVs") && sl["lightmapUVs"].is_array()) {
+                if (auto mesh = meshRenderer->getMesh()) {
+                    auto vertices = mesh->getVertices();
+                    const json& lightmapUVs = sl["lightmapUVs"];
+                    if (vertices.size() == lightmapUVs.size()) {
+                        bool valid = true;
+                        for (size_t i = 0; i < vertices.size(); ++i) {
+                            const auto& entry = lightmapUVs[i];
+                            if (!entry.is_array() || entry.size() < 2) {
+                                valid = false;
+                                break;
+                            }
+                            vertices[i].texCoord1 = Math::Vector2(entry[0].get<float>(), entry[1].get<float>());
+                        }
+                        if (valid) {
+                            mesh->setVertices(vertices);
+                            meshRenderer->setMesh(mesh);
+                            if (skinnedRenderer) {
+                                skinnedRenderer->setMesh(mesh);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2897,21 +2944,44 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                     {"lightmapScaleOffset", Vec4ToJson(staticLighting.lightmapScaleOffset)}
                 };
                 if (!staticLighting.lightmapPath.empty()) {
-                    json ref = SerializeAssetPath(staticLighting.lightmapPath, "texture", options.embedRuntimePayloads);
+                    json ref = SerializeAssetPath(staticLighting.lightmapPath, "texture", false);
+                    if (options.embedRuntimePayloads) {
+                        std::string cookedPath = BuildCookedStaticLightmapRelativePath(staticLighting.lightmapPath);
+                        if (!cookedPath.empty()) {
+                            if (!ref.is_object()) {
+                                ref = SerializeProjectPathRef(staticLighting.lightmapPath);
+                            }
+                            if (ref.is_object()) {
+                                ref["cookedPath"] = cookedPath;
+                            }
+                        }
+                    }
                     if (!ref.is_null() && !ref.empty()) {
                         staticLightingJson["lightmap"] = ref;
                     }
                 }
                 if (!staticLighting.directionalLightmapPath.empty()) {
-                    json ref = SerializeAssetPath(staticLighting.directionalLightmapPath, "texture", options.embedRuntimePayloads);
+                    json ref = SerializeAssetPath(staticLighting.directionalLightmapPath, "texture", false);
                     if (!ref.is_null() && !ref.empty()) {
                         staticLightingJson["directionalLightmap"] = ref;
                     }
                 }
                 if (!staticLighting.shadowmaskPath.empty()) {
-                    json ref = SerializeAssetPath(staticLighting.shadowmaskPath, "texture", options.embedRuntimePayloads);
+                    json ref = SerializeAssetPath(staticLighting.shadowmaskPath, "texture", false);
                     if (!ref.is_null() && !ref.empty()) {
                         staticLightingJson["shadowmask"] = ref;
+                    }
+                }
+                if (!options.embedRuntimePayloads) {
+                    if (auto mesh = renderer->getMesh()) {
+                        const auto& vertices = mesh->getVertices();
+                        if (!vertices.empty()) {
+                            json lightmapUVs = json::array();
+                            for (const auto& vertex : vertices) {
+                                lightmapUVs.push_back({vertex.texCoord1.x, vertex.texCoord1.y});
+                            }
+                            staticLightingJson["lightmapUVs"] = lightmapUVs;
+                        }
                     }
                 }
                 components["MeshRenderer"]["staticLighting"] = staticLightingJson;
@@ -3488,7 +3558,7 @@ StaticLightingManifest SceneSerializer::BuildStaticLightingManifest(Scene* scene
             atlas.index = staticLighting.lightmapIndex;
             atlas.width = manifest.settings.atlasSize;
             atlas.height = manifest.settings.atlasSize;
-            atlas.expectedLightmapPath = BuildStaticLightingArtifactPath(scene, scenePath, atlas.index, "_light.png");
+            atlas.expectedLightmapPath = BuildStaticLightingArtifactPath(scene, scenePath, atlas.index, "_light.exr");
             if (manifest.settings.directionalLightmaps) {
                 atlas.expectedDirectionalLightmapPath = BuildStaticLightingArtifactPath(scene, scenePath, atlas.index, "_dir.png");
             }

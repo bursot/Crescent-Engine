@@ -52,6 +52,10 @@ bool isEXRFile(const std::string& path) {
     return endsWithIgnoreCase(path, ".exr");
 }
 
+bool isHDRFile(const std::string& path) {
+    return endsWithIgnoreCase(path, ".hdr");
+}
+
 bool isKTX2File(const std::string& path) {
     return endsWithIgnoreCase(path, ".ktx2");
 }
@@ -213,6 +217,54 @@ MTL::PixelFormat SelectAstcPixelFormat(bool srgb, bool normalMap) {
 
 uint32_t ComputeBlocksX(uint32_t width, uint32_t blockWidth) {
     return (width + blockWidth - 1) / blockWidth;
+}
+
+uint16_t FloatToHalfBits(float value) {
+    __fp16 halfValue = static_cast<__fp16>(value);
+    uint16_t bits = 0;
+    std::memcpy(&bits, &halfValue, sizeof(bits));
+    return bits;
+}
+
+std::vector<uint16_t> ConvertRGBA32FToRGBA16F(const float* rgba, size_t pixelCount) {
+    std::vector<uint16_t> out(pixelCount * 4u, 0u);
+    if (!rgba) {
+        return out;
+    }
+    for (size_t i = 0; i < pixelCount * 4u; ++i) {
+        out[i] = FloatToHalfBits(rgba[i]);
+    }
+    return out;
+}
+
+std::vector<unsigned char> ConvertRGBA32FToRGBM8(const float* rgba, size_t pixelCount, float maxRange) {
+    std::vector<unsigned char> out(pixelCount * 4u, 0u);
+    if (!rgba || maxRange <= 0.0f) {
+        return out;
+    }
+
+    for (size_t i = 0; i < pixelCount; ++i) {
+        const float r = std::max(0.0f, rgba[i * 4u + 0u]);
+        const float g = std::max(0.0f, rgba[i * 4u + 1u]);
+        const float b = std::max(0.0f, rgba[i * 4u + 2u]);
+        const float maxChannel = std::max(r, std::max(g, b));
+
+        if (maxChannel <= 1e-6f) {
+            out[i * 4u + 3u] = 0u;
+            continue;
+        }
+
+        float multiplier = std::ceil(std::min(1.0f, maxChannel / maxRange) * 255.0f) / 255.0f;
+        multiplier = std::max(multiplier, 1.0f / 255.0f);
+        const float invScale = 1.0f / (multiplier * maxRange);
+
+        out[i * 4u + 0u] = static_cast<unsigned char>(std::round(std::clamp(r * invScale, 0.0f, 1.0f) * 255.0f));
+        out[i * 4u + 1u] = static_cast<unsigned char>(std::round(std::clamp(g * invScale, 0.0f, 1.0f) * 255.0f));
+        out[i * 4u + 2u] = static_cast<unsigned char>(std::round(std::clamp(b * invScale, 0.0f, 1.0f) * 255.0f));
+        out[i * 4u + 3u] = static_cast<unsigned char>(std::round(multiplier * 255.0f));
+    }
+
+    return out;
 }
 
 bool ReadFileBytes(const std::string& path, std::vector<uint8_t>& outData) {
@@ -486,6 +538,61 @@ bool EncodeKtx2WithBasisuCLI(const std::string& sourcePath,
         std::cerr << "[TextureLoader] BasisU encode failed (" << result << "): " << sourcePath << std::endl;
     }
     return result == 0;
+}
+
+bool LoadHDRPixelsForCooking(const std::string& sourcePath,
+                             std::vector<float>& outPixels,
+                             int& outWidth,
+                             int& outHeight) {
+    outPixels.clear();
+    outWidth = 0;
+    outHeight = 0;
+
+    if (isEXRFile(sourcePath)) {
+        const char* err = nullptr;
+        float* imageData = nullptr;
+        int width = 0;
+        int height = 0;
+        int ret = LoadEXR(&imageData, &width, &height, sourcePath.c_str(), &err);
+        if (ret != TINYEXR_SUCCESS || !imageData) {
+            std::cerr << "[TextureLoader] Failed to load EXR for static lightmap cook: " << sourcePath;
+            if (err) {
+                std::cerr << " reason: " << err;
+                FreeEXRErrorMessage(err);
+            }
+            std::cerr << std::endl;
+            return false;
+        }
+        if (err) {
+            FreeEXRErrorMessage(err);
+        }
+
+        outWidth = width;
+        outHeight = height;
+        outPixels.assign(imageData, imageData + static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+        std::free(imageData);
+        return true;
+    }
+
+    if (!isHDRFile(sourcePath)) {
+        return false;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    float* imageData = stbi_loadf(sourcePath.c_str(), &width, &height, &channels, 4);
+    if (!imageData) {
+        std::cerr << "[TextureLoader] Failed to load HDR for static lightmap cook: " << sourcePath
+                  << " reason: " << stbi_failure_reason() << std::endl;
+        return false;
+    }
+
+    outWidth = width;
+    outHeight = height;
+    outPixels.assign(imageData, imageData + static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+    stbi_image_free(imageData);
+    return true;
 }
 
 } // namespace
@@ -1046,11 +1153,13 @@ std::shared_ptr<Texture2D> TextureLoader::loadEXRTexture(const std::string& path
         uploadData = flipped.data();
     }
 
+    std::vector<uint16_t> uploadData16 = ConvertRGBA32FToRGBA16F(uploadData, static_cast<size_t>(width) * static_cast<size_t>(height));
+
     MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
     desc->setTextureType(MTL::TextureType2D);
     desc->setWidth(static_cast<NS::UInteger>(width));
     desc->setHeight(static_cast<NS::UInteger>(height));
-    desc->setPixelFormat(MTL::PixelFormatRGBA32Float);
+    desc->setPixelFormat(MTL::PixelFormatRGBA16Float);
     desc->setUsage(MTL::TextureUsageShaderRead);
     desc->setStorageMode(MTL::StorageModeShared);
     uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
@@ -1066,7 +1175,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadEXRTexture(const std::string& path
     }
 
     MTL::Region region = MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height));
-    texture->replaceRegion(region, 0, uploadData, static_cast<NS::UInteger>(rowStride * sizeof(float)));
+    texture->replaceRegion(region, 0, uploadData16.data(), static_cast<NS::UInteger>(rowStride * sizeof(uint16_t)));
     std::free(imageData);
 
     // Generate mip chain for smooth sampling
@@ -1075,6 +1184,8 @@ std::shared_ptr<Texture2D> TextureLoader::loadEXRTexture(const std::string& path
     auto tex = std::make_shared<Texture2D>();
     tex->setHandle(texture);
     tex->setDimensions(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+    tex->setMipLevelCount(mipLevels);
+    tex->setApproximateBytes(ComputeMipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height), sizeof(uint16_t) * 4u));
     tex->setColorSpace(Texture2D::ColorSpace::Linear); // EXR is always linear
     tex->setPath(path);
 
@@ -1222,11 +1333,13 @@ std::shared_ptr<Texture2D> TextureLoader::loadHDRTexture(const std::string& path
         return nullptr;
     }
     
+    std::vector<uint16_t> uploadData16 = ConvertRGBA32FToRGBA16F(data, static_cast<size_t>(width) * static_cast<size_t>(height));
+
     MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
     desc->setTextureType(MTL::TextureType2D);
     desc->setWidth(static_cast<NS::UInteger>(width));
     desc->setHeight(static_cast<NS::UInteger>(height));
-    desc->setPixelFormat(MTL::PixelFormatRGBA32Float);
+    desc->setPixelFormat(MTL::PixelFormatRGBA16Float);
     desc->setUsage(MTL::TextureUsageShaderRead);
     desc->setStorageMode(MTL::StorageModeShared);
     uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
@@ -1242,7 +1355,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadHDRTexture(const std::string& path
     }
     
     MTL::Region region = MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height));
-    texture->replaceRegion(region, 0, data, static_cast<NS::UInteger>(width * 4 * sizeof(float)));
+    texture->replaceRegion(region, 0, uploadData16.data(), static_cast<NS::UInteger>(width * 4 * sizeof(uint16_t)));
     stbi_image_free(data);
     
     // Generate mip chain to allow blurred sampling
@@ -1252,7 +1365,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadHDRTexture(const std::string& path
     tex->setHandle(texture);
     tex->setDimensions(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
     tex->setMipLevelCount(mipLevels);
-    tex->setApproximateBytes(ComputeMipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height), sizeof(float) * 4u));
+    tex->setApproximateBytes(ComputeMipChainBytes(static_cast<uint32_t>(width), static_cast<uint32_t>(height), sizeof(uint16_t) * 4u));
     tex->setColorSpace(Texture2D::ColorSpace::Linear);
     tex->setPath(path);
     
@@ -1328,6 +1441,56 @@ std::shared_ptr<Texture2D> TextureLoader::createSolidTexture(float r, float g, f
 std::shared_ptr<Texture2D> TextureLoader::createFlatNormalTexture() {
     // Flat normal in tangent space = (0.5, 0.5, 1.0)
     return createSolidTexture(0.5f, 0.5f, 1.0f, 1.0f, false);
+}
+
+bool CookStaticLightmapToKTX2(const std::string& sourcePath, const std::string& outputPath) {
+    constexpr float kRGBMRange = 16.0f;
+
+    if (sourcePath.empty() || outputPath.empty()) {
+        return false;
+    }
+
+    std::vector<float> pixels;
+    int width = 0;
+    int height = 0;
+    if (!LoadHDRPixelsForCooking(sourcePath, pixels, width, height) || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    std::vector<unsigned char> rgbmPixels = ConvertRGBA32FToRGBM8(
+        pixels.data(),
+        static_cast<size_t>(width) * static_cast<size_t>(height),
+        kRGBMRange
+    );
+
+    std::filesystem::path cookedPath(outputPath);
+    std::error_code ec;
+    std::filesystem::create_directories(cookedPath.parent_path(), ec);
+
+    std::filesystem::path tempPngPath = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+        tempPngPath = cookedPath.parent_path();
+        ec.clear();
+    }
+    tempPngPath /= "crescent_lightmap_rgbm_" + HashPathStable(cookedPath.lexically_normal().string()) + ".png";
+
+    if (!WriteRGBA8PNG(tempPngPath.string(), rgbmPixels.data(), width, height)) {
+        std::cerr << "[TextureLoader] Failed to write temporary RGBM lightmap: " << tempPngPath << std::endl;
+        return false;
+    }
+
+    bool encoded = EncodeKtx2WithBasisuCLI(
+        tempPngPath.string(),
+        cookedPath.lexically_normal().string(),
+        false,
+        false,
+        false,
+        false,
+        true
+    );
+
+    std::filesystem::remove(tempPngPath, ec);
+    return encoded;
 }
 
 } // namespace Crescent

@@ -42,6 +42,39 @@ private enum PlayerCommandLine {
             return 0
         }
 
+        if arguments[1] == "--cook-static-lightmap" {
+            guard arguments.count >= 5 else {
+                fputs("Usage: CrescentPlayer --cook-static-lightmap <Project.cproj> <SourceLightmap.exr> <OutputLightmap.ktx2>\n", stderr)
+                return 2
+            }
+
+            let projectPath = arguments[2]
+            let sourcePath = arguments[3]
+            let outputPath = arguments[4]
+            let bridge = RuntimeBridge.shared()
+
+            guard bridge.initialize() else {
+                fputs("Failed to initialize runtime bridge for static lightmap cooking.\n", stderr)
+                return 1
+            }
+            defer {
+                bridge.shutdown()
+            }
+
+            guard bridge.openProject(path: projectPath) else {
+                fputs("Failed to open project for static lightmap cooking.\n", stderr)
+                return 1
+            }
+
+            guard bridge.cookStaticLightmap(path: sourcePath, outputPath: outputPath) else {
+                fputs("Failed to cook static lightmap.\n", stderr)
+                return 1
+            }
+
+            fputs("Cooked static lightmap: \(outputPath)\n", stdout)
+            return 0
+        }
+
         if arguments[1] == "--bake-scene-lighting" {
             guard arguments.count >= 5 else {
                 fputs("Usage: CrescentPlayer --bake-scene-lighting <Project.cproj> <SourceScene.cscene> <OutputScene.cscene>\n", stderr)

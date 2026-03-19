@@ -43,6 +43,7 @@ struct VertexOut {
     float billboardFlag;
     float bakedLightingFlag;
     float staticLightmapFlag;
+    float hdrStaticLightmapFlag;
 };
 
 struct PrepassOut {
@@ -425,8 +426,74 @@ inline float hash21(float2 p) {
     return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
 }
 
+constant bool kDebugPointShadowView = false;
+
 inline float2 rotate2(float2 v, float2 r) {
     return float2(v.x * r.x - v.y * r.y, v.x * r.y + v.y * r.x);
+}
+
+inline uint dominantCubeFace(float3 v) {
+    float3 a = abs(v);
+    if (a.x >= a.y && a.x >= a.z) {
+        return (v.x >= 0.0) ? 0u : 1u;
+    }
+    if (a.y >= a.z) {
+        return (v.y >= 0.0) ? 2u : 3u;
+    }
+    return (v.z >= 0.0) ? 4u : 5u;
+}
+
+struct PointShadowProjection {
+    uint face;
+    float2 uv;
+    float forwardDist;
+};
+
+inline PointShadowProjection projectPointShadowFace(float3 toFrag) {
+    PointShadowProjection result;
+    result.face = dominantCubeFace(toFrag);
+
+    float3 forward = float3(0.0);
+    float3 right = float3(0.0);
+    float3 up = float3(0.0);
+
+    switch (result.face) {
+        case 0u:
+            forward = float3(1.0, 0.0, 0.0);
+            right = float3(0.0, 0.0, -1.0);
+            up = float3(0.0, -1.0, 0.0);
+            break;
+        case 1u:
+            forward = float3(-1.0, 0.0, 0.0);
+            right = float3(0.0, 0.0, 1.0);
+            up = float3(0.0, -1.0, 0.0);
+            break;
+        case 2u:
+            forward = float3(0.0, 1.0, 0.0);
+            right = float3(1.0, 0.0, 0.0);
+            up = float3(0.0, 0.0, 1.0);
+            break;
+        case 3u:
+            forward = float3(0.0, -1.0, 0.0);
+            right = float3(1.0, 0.0, 0.0);
+            up = float3(0.0, 0.0, -1.0);
+            break;
+        case 4u:
+            forward = float3(0.0, 0.0, 1.0);
+            right = float3(1.0, 0.0, 0.0);
+            up = float3(0.0, -1.0, 0.0);
+            break;
+        default:
+            forward = float3(0.0, 0.0, -1.0);
+            right = float3(-1.0, 0.0, 0.0);
+            up = float3(0.0, -1.0, 0.0);
+            break;
+    }
+
+    result.forwardDist = max(dot(toFrag, forward), 1e-5);
+    float2 ndc = float2(dot(toFrag, right), dot(toFrag, up)) / result.forwardDist;
+    result.uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    return result;
 }
 
 inline float sampleShadowDepthPCF(depth2d<float> atlas,
@@ -438,6 +505,7 @@ inline float sampleShadowDepthPCF(depth2d<float> atlas,
                                   float2 tileMax,
                                   float2 rot,
                                   float radius) {
+    constexpr sampler shadowDepthSampler(filter::nearest, address::clamp_to_edge);
     float2 texel = 1.0 / float2(atlas.get_width(), atlas.get_height());
     float2 margin = texel * (radius + 1.0);
     float2 minBounds = tileMin + margin;
@@ -449,7 +517,7 @@ inline float sampleShadowDepthPCF(depth2d<float> atlas,
         float2 uvOffset = uv + offset * texel;
         if (uvOffset.x >= minBounds.x && uvOffset.x <= maxBounds.x &&
             uvOffset.y >= minBounds.y && uvOffset.y <= maxBounds.y) {
-            float sampleDepth = atlas.sample(shadowSampler, uvOffset);
+            float sampleDepth = atlas.sample(shadowDepthSampler, uvOffset);
             float w = 1.0 - saturate(length(kPoissonDisk16[i]) * 0.5);
             shadow += ((depth - bias <= sampleDepth) ? 1.0 : 0.0) * w;
             weightSum += w;
@@ -458,15 +526,15 @@ inline float sampleShadowDepthPCF(depth2d<float> atlas,
     return (weightSum > 0.0) ? (shadow / weightSum) : 1.0;
 }
 
-float pcfSample(depth2d<float> atlas,
-                sampler shadowSampler,
-                float2 uv,
-                float depth,
-                float bias,
-                float2 tileMin,
-                float2 tileMax,
-                float2 rot,
-                float radius) {
+float pcfSampleManual(depth2d<float> atlas,
+                      float2 uv,
+                      float depth,
+                      float bias,
+                      float2 tileMin,
+                      float2 tileMax,
+                      float2 rot,
+                      float radius) {
+    constexpr sampler shadowDepthSampler(filter::nearest, address::clamp_to_edge);
     float2 texel = 1.0 / float2(atlas.get_width(), atlas.get_height());
     float shadow = 0.0;
     float weightSum = 0.0;
@@ -482,7 +550,8 @@ float pcfSample(depth2d<float> atlas,
         if (uvOffset.x >= tileMin.x && uvOffset.x <= tileMax.x &&
             uvOffset.y >= tileMin.y && uvOffset.y <= tileMax.y) {
             float w = 1.0 - saturate(length(kPoissonDisk16[i]) * 0.35);
-            shadow += atlas.sample_compare(shadowSampler, uvOffset, depth - bias) * w;
+            float sampleDepth = atlas.sample(shadowDepthSampler, uvOffset);
+            shadow += ((depth - bias <= sampleDepth) ? 1.0 : 0.0) * w;
             weightSum += w;
         }
     }
@@ -500,7 +569,7 @@ float pcssSample(depth2d<float> atlas,
                  float penumbra,
                  float2 rot,
                  float baseRadius) {
-    constexpr sampler shadowDepthSampler(filter::linear, address::clamp_to_edge);
+    constexpr sampler shadowDepthSampler(filter::nearest, address::clamp_to_edge);
     float2 texel = 1.0 / float2(atlas.get_width(), atlas.get_height());
     float searchRadius = max(baseRadius * 2.0, 2.0);
     float2 margin = texel * (searchRadius + 1.0);
@@ -529,7 +598,7 @@ float pcssSample(depth2d<float> atlas,
     float avgBlocker = blockerDepth / blockers;
     float penumbraRatio = saturate((depth - avgBlocker) / max(avgBlocker, 0.0001));
     float radius = clamp(baseRadius + penumbraRatio * penumbra * 24.0, baseRadius, 32.0);
-    return pcfSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, rot, radius);
+    return pcfSampleManual(atlas, uv, depth, bias, tileMin, tileMax, rot, radius);
 }
 
 inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
@@ -544,7 +613,14 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
                                  float baseTexelWorld,
                                  bool isCascade) {
     ShadowGPUData s = shadowData[idx];
-    float4 clip = s.viewProj * float4(pos, 1.0);
+    float3 n = normalize(normalWS);
+    float nDotLPre = saturate(dot(n, normalize(lightDirWS)));
+    float receiverScale = isCascade
+        ? mix(2.4, 0.9, nDotLPre)
+        : mix(3.0, 1.25, nDotLPre);
+    float receiverOffset = max(s.depthRange.z, 1e-4) * receiverScale;
+    float3 samplePos = pos + n * receiverOffset;
+    float4 clip = s.viewProj * float4(samplePos, 1.0);
     float3 ndc = clip.xyz / clip.w;
     // Right-handed projection: X,Y in [-1,1], Z in [0,1]
     if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
@@ -563,11 +639,11 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
         return 1.0;
     }
     float bias = s.params.x;
-    float nDotL = saturate(dot(normalize(normalWS), normalize(lightDirWS)));
+    float nDotL = nDotLPre;
     float slope = 1.0 - nDotL;
     // Keep a small baseline normal-bias even away from grazing angles.
     // This reduces acne/shimmer without requiring extreme inspector values.
-    float normalBiasScale = isCascade ? (0.35 + 0.65 * slope) : (0.2 + 0.8 * slope);
+    float normalBiasScale = isCascade ? (0.65 + 0.75 * slope) : (0.45 + 0.95 * slope);
     bias += s.params.y * normalBiasScale;
 
     float2 rot = float2(1.0, 0.0);
@@ -597,18 +673,18 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
             shadow = sampleShadowDepthPCF(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, float2(1.0, 0.0), 0.0);
         } else {
             float cascadeRadius = clamp(kernelRadius, 0.7, 2.2);
-            shadow = pcfSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, rot, cascadeRadius);
+            shadow = pcfSampleManual(atlas, uv, depth, bias, tileMin, tileMax, rot, cascadeRadius);
         }
     } else if (usePCSSLocal && penumbra > 0.0) {
         shadow = pcssSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, penumbra, rot, kernelRadius);
     } else {
-        shadow = pcfSample(atlas, shadowSampler, uv, depth, bias, tileMin, tileMax, rot, kernelRadius);
+        shadow = pcfSampleManual(atlas, uv, depth, bias, tileMin, tileMax, rot, kernelRadius);
     }
 
     if (useContact) {
         float contactBias = bias * 0.5;
         float contactRadius = 1.0;
-        float contact = pcfSample(atlas, shadowSampler, uv, depth, contactBias, tileMin, tileMax, rot, contactRadius);
+        float contact = pcfSampleManual(atlas, uv, depth, contactBias, tileMin, tileMax, rot, contactRadius);
         float contactStrength = isCascade ? 0.35 : ((s.params.w < 0.5) ? 0.4 : 0.6);
         shadow = min(shadow, mix(1.0, contact, contactStrength));
     }
@@ -696,56 +772,48 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
                         float3 lightPosWS,
                         float3 lightDirWS,
                         float tier,
-                        depthcube_array<float> cube0,
-                        depthcube_array<float> cube1,
-                        depthcube_array<float> cube2,
-                        depthcube_array<float> cube3,
+                        depth2d_array<float> cube0,
+                        depth2d_array<float> cube1,
+                        depth2d_array<float> cube2,
+                        depth2d_array<float> cube3,
                         sampler shadowSampler) {
+    constexpr sampler shadowFaceDepthSampler(filter::nearest, address::clamp_to_edge);
     ShadowGPUData s = shadowData[shadowIdx];
-    float3 toFrag = worldPos - lightPosWS;
-    float3 dir = normalize(toFrag);
-    
-    // For cubemap shadows with perspective projection, we need to convert
-    // linear distance to perspective depth. The dominant axis determines
-    // which face we're sampling, and that axis value approximates view space Z.
-    float3 absDir = abs(toFrag);
-    float maxComp = max(absDir.x, max(absDir.y, absDir.z));
-    
-    // Perspective projection: z_ndc = (far / (near - far)) + (far * near) / (z * (near - far))
-    // Since we're using positive distances, and Metal perspective has m[11] = -1:
     float nearP = s.depthRange.x;
     float farP = s.depthRange.y;
-    float denom = max(farP - nearP, 1e-5);
-    float refDist = max(maxComp, 1e-5);
-    float ref = (farP / denom) - (farP * nearP) / (denom * refDist);
-    ref = saturate(ref);
+    float3 toLight = lightPosWS - worldPos;
+    float nDotL = saturate(dot(normalize(normalWS), normalize(toLight)));
+    float texelWorld = (2.0 * farP) / max(s.atlasUV.x, 1.0);
+    float receiverOffset = texelWorld * mix(4.0, 1.6, nDotL);
+    float3 samplePos = worldPos + normalize(normalWS) * receiverOffset;
+    float3 toFrag = samplePos - lightPosWS;
+    PointShadowProjection proj = projectPointShadowFace(toFrag);
+
+    float ref = saturate((length(toFrag) - nearP) / max(farP - nearP, 1e-5));
     
     float bias = s.params.x;
-    float nDotL = saturate(dot(normalize(normalWS), normalize(lightDirWS)));
     bias += s.params.y * (1.0 - nDotL);
     ref = max(ref - bias, 0.0);
     
     uint cubeIndex = (uint)round(s.depthRange.z);
+    uint slice = cubeIndex * 6u + proj.face;
     int t = (int)round(tier);
-    depthcube_array<float> cubeTex = (t == 1) ? cube1 : (t == 2 ? cube2 : (t == 3 ? cube3 : cube0));
-    
-    // 9-tap angular PCF
+    depth2d_array<float> cubeTex = (t == 1) ? cube1 : (t == 2 ? cube2 : (t == 3 ? cube3 : cube0));
+    float2 texel = 1.0 / float2(cubeTex.get_width(), cubeTex.get_height());
+
+    // 9-tap UV-space PCF on the selected face.
     float shadow = 0.0;
-    float3 up = abs(dir.y) < 0.99 ? float3(0,1,0) : float3(0,0,1);
-    float3 tvec = normalize(cross(up, dir));
-    float3 bvec = cross(dir, tvec);
-    float angleRadius = 0.0035;
     float2 kernelOffsets[9] = {
-        float2(0,0),
-        float2(1,0), float2(-1,0),
-        float2(0,1), float2(0,-1),
-        float2(1,1), float2(-1,1),
-        float2(1,-1), float2(-1,-1)
+        float2(0.0, 0.0),
+        float2(1.0, 0.0), float2(-1.0, 0.0),
+        float2(0.0, 1.0), float2(0.0, -1.0),
+        float2(1.0, 1.0), float2(-1.0, 1.0),
+        float2(1.0, -1.0), float2(-1.0, -1.0)
     };
     for (int i = 0; i < 9; ++i) {
-        float2 k = kernelOffsets[i] * angleRadius;
-        float3 offsetDir = normalize(dir + k.x * tvec + k.y * bvec);
-        shadow += cubeTex.sample_compare(shadowSampler, offsetDir, ref, cubeIndex);
+        float2 uv = clamp(proj.uv + kernelOffsets[i] * texel, texel * 0.5, 1.0 - texel * 0.5);
+        float sampleDepth = cubeTex.sample(shadowFaceDepthSampler, uv, slice);
+        shadow += (ref <= sampleDepth) ? 1.0 : 0.0;
     }
     return shadow / 9.0;
 }
@@ -1010,6 +1078,7 @@ vertex VertexOut vertex_main(
     out.billboardFlag = mesh.flags.x;
     out.bakedLightingFlag = mesh.flags.y;
     out.staticLightmapFlag = mesh.flags.z;
+    out.hdrStaticLightmapFlag = mesh.flags.w;
 
     return out;
 }
@@ -1083,6 +1152,7 @@ vertex VertexOut vertex_main_instanced(
     out.billboardFlag = mesh.flags.x;
     out.bakedLightingFlag = mesh.flags.y;
     out.staticLightmapFlag = mesh.flags.z;
+    out.hdrStaticLightmapFlag = mesh.flags.w;
     return out;
 }
 
@@ -1126,6 +1196,7 @@ vertex VertexOut vertex_skinned(
     out.billboardFlag = 0.0;
     out.bakedLightingFlag = 0.0;
     out.staticLightmapFlag = 0.0;
+    out.hdrStaticLightmapFlag = 0.0;
 
     return out;
 }
@@ -2630,10 +2701,10 @@ fragment float4 fragment_main(
     texturecube<float> prefilteredMap [[texture(9)]],
     texture2d<float> brdfLUT [[texture(10)]],
     depth2d<float> shadowAtlas [[texture(11)]],
-    depthcube_array<float> pointShadowCube0 [[texture(12)]],
-    depthcube_array<float> pointShadowCube1 [[texture(13)]],
-    depthcube_array<float> pointShadowCube2 [[texture(14)]],
-    depthcube_array<float> pointShadowCube3 [[texture(15)]],
+    depth2d_array<float> pointShadowCube0 [[texture(12)]],
+    depth2d_array<float> pointShadowCube1 [[texture(13)]],
+    depth2d_array<float> pointShadowCube2 [[texture(14)]],
+    depth2d_array<float> pointShadowCube3 [[texture(15)]],
     texture2d<float> ormMap [[texture(16)]],
     texture2d<float> ssaoMap [[texture(17)]],
     texture2d<float> decalAlbedoMap [[texture(18)]],
@@ -2911,6 +2982,28 @@ fragment float4 fragment_main(
                 if (type == 1) {
                     float3 lightPosWS = (camera.viewMatrixInverse * float4(Ld.positionRange.xyz, 1.0)).xyz;
                     ShadowGPUData sLocal = shadowData[shadowIdx];
+                    if (kDebugPointShadowView) {
+                        float3 toLight = lightPosWS - in.worldPosition;
+                        float nDotLDbg = saturate(dot(N, normalize(toLight)));
+                        float texelWorldDbg = (2.0 * sLocal.depthRange.y) / max(sLocal.atlasUV.x, 1.0);
+                        float receiverOffsetDbg = texelWorldDbg * mix(2.5, 1.0, nDotLDbg);
+                        float3 samplePosDbg = in.worldPosition + normalize(N) * receiverOffsetDbg;
+                        float3 toFragDbg = samplePosDbg - lightPosWS;
+                        PointShadowProjection projDbg = projectPointShadowFace(toFragDbg);
+                        float nearDbg = sLocal.depthRange.x;
+                        float farDbg = sLocal.depthRange.y;
+                        float refDbg = saturate((length(toFragDbg) - nearDbg) / max(farDbg - nearDbg, 1e-5));
+                        float biasDbg = sLocal.params.x + sLocal.params.y * (1.0 - nDotLDbg);
+                        refDbg = max(refDbg - biasDbg, 0.0);
+                        uint cubeIndexDbg = (uint)round(sLocal.depthRange.z);
+                        uint sliceDbg = cubeIndexDbg * 6u + projDbg.face;
+                        int tierDbg = (int)round(sLocal.depthRange.w);
+                        depth2d_array<float> cubeDbg = (tierDbg == 1) ? pointShadowCube1 : (tierDbg == 2 ? pointShadowCube2 : (tierDbg == 3 ? pointShadowCube3 : pointShadowCube0));
+                        float sampleDepthDbg = cubeDbg.sample(shadowSampler, projDbg.uv, sliceDbg);
+                        float shadowDbg = (refDbg <= sampleDepthDbg) ? 1.0 : 0.0;
+                        float faceDbg = float(projDbg.face) / 5.0;
+                        return float4(refDbg, sampleDepthDbg, faceDbg * 0.85 + shadowDbg * 0.15, 1.0);
+                    }
                     shadow = samplePointShadow(shadowData, shadowIdx, in.worldPosition, N, lightPosWS, LdirWorld, sLocal.depthRange.w, pointShadowCube0, pointShadowCube1, pointShadowCube2, pointShadowCube3, shadowSampler);
                 } else {
                     float viewDepth = max(-viewPos.z, 0.0);
@@ -2918,7 +3011,8 @@ fragment float4 fragment_main(
                 }
             }
 
-            bool bakedStaticReceiver = in.staticLightmapFlag > 0.5 && bakedDirect;
+            bool directBakedLightmap = in.hdrStaticLightmapFlag >= 10.0;
+            bool bakedStaticReceiver = in.staticLightmapFlag > 0.5 && directBakedLightmap && bakedDirect;
             if (bakedStaticReceiver) {
                 if (mobility == 0u) {
                     continue;
@@ -2939,11 +3033,7 @@ fragment float4 fragment_main(
             }
             
             float3 radiance = Ld.colorIntensity.rgb * Ld.colorIntensity.w * attenuation * shadow;
-            if (bakedStaticReceiver && mobility == 1u) {
-                Lo += specular * radiance * NdotL;
-            } else {
-                Lo += (kD * albedo / PI + specular) * radiance * NdotL;
-            }
+            Lo += (kD * albedo / PI + specular) * radiance * NdotL;
         }
     } else {
         // Legacy single directional light
@@ -3076,19 +3166,51 @@ fragment float4 fragment_main(
     }
     if (in.staticLightmapFlag > 0.5) {
         float2 lightmapUV = clamp(in.lightmapTexCoord, float2(0.0), float2(1.0));
-        float3 bakedRadiance = max(staticLightmap.sample(textureSampler, lightmapUV).rgb * 16.0, float3(0.0));
-        float4 directionalSample = directionalStaticLightmap.sample(textureSampler, lightmapUV);
-        float3 dominantVector = directionalSample.rgb * 2.0 - 1.0;
-        float directionality = saturate(length(dominantVector));
-        if (directionality > 0.001) {
-            float3 dominantDirection = dominantVector / directionality;
-            float referenceNoL = max(directionalSample.a, 0.125);
-            float relitNoL = saturate(dot(N, dominantDirection));
-            float directionalFactor = clamp(relitNoL / referenceNoL, 0.0, 2.0);
-            bakedRadiance *= mix(1.0, directionalFactor, directionality);
+        float lightmapEncoding = in.hdrStaticLightmapFlag;
+        bool directBakedLightmap = lightmapEncoding >= 10.0;
+        if (directBakedLightmap) {
+            lightmapEncoding -= 10.0;
         }
+        float3 bakedRadiance = staticLightmap.sample(textureSampler, lightmapUV).rgb;
+        if (lightmapEncoding < 0.5) {
+            bakedRadiance *= 16.0;
+        } else if (lightmapEncoding > 1.5) {
+            float4 rgbmSample = staticLightmap.sample(textureSampler, lightmapUV);
+            bakedRadiance = rgbmSample.rgb * rgbmSample.a * 16.0;
+        }
+        bakedRadiance = max(bakedRadiance, float3(0.0));
         float3 bakedKD = (float3(1.0) - F0) * (1.0 - metallic);
-        bakedDirect += bakedKD * albedo / PI * bakedRadiance;
+        if (directBakedLightmap) {
+            float4 directionalSample = directionalStaticLightmap.sample(textureSampler, lightmapUV);
+            float3 dominantVector = directionalSample.rgb * 2.0 - 1.0;
+            float directionality = saturate(length(dominantVector));
+            float referenceNoL = max(directionalSample.a, 0.05);
+            float3 dominantDirection = float3(0.0, 0.0, 1.0);
+            if (directionality > 0.001) {
+                dominantDirection = dominantVector / directionality;
+                float relitNoL = saturate(dot(N, dominantDirection));
+                float directionalFactor = clamp(relitNoL / referenceNoL, 0.0, 2.0);
+                bakedRadiance *= mix(1.0, directionalFactor, directionality);
+            }
+            bakedDirect += bakedKD * albedo / PI * bakedRadiance * mix(1.0, 1.08, directionality);
+            if (directionality > 0.001) {
+                float bakedNoL = saturate(dot(N, dominantDirection));
+                if (bakedNoL > 0.0) {
+                    float3 bakedIncidentRadiance = bakedRadiance / referenceNoL;
+                    float3 bakedHalf = normalize(V + dominantDirection);
+                    float bakedNDF = DistributionGGX(N, bakedHalf, roughness);
+                    float bakedG = GeometrySmith(N, V, dominantDirection, roughness);
+                    float3 bakedF = fresnelSchlick(max(dot(bakedHalf, V), 0.0), F0);
+                    float3 bakedNumerator = bakedNDF * bakedG * bakedF;
+                    float bakedDenom = 4.0 * max(dot(N, V), 0.0) * max(bakedNoL, 0.0) + 0.001;
+                    float3 bakedSpecular = bakedNumerator / bakedDenom;
+                    float bakedSpecularScale = directionality * mix(2.2, 1.1, roughness);
+                    bakedDirect += bakedSpecular * bakedIncidentRadiance * bakedNoL * bakedSpecularScale;
+                }
+            }
+        } else {
+            bakedDirect += bakedKD * albedo / PI * bakedRadiance;
+        }
     }
 
     // Add emission (unpack from Vector4)

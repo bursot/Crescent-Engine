@@ -148,6 +148,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSDictionary *)getEnvironmentSettings;
 - (BOOL)loadEnvironmentMap:(NSString *)path;
 - (BOOL)cookEnvironmentMap:(NSString *)path outputPath:(NSString *)outputPath NS_SWIFT_NAME(cookEnvironmentMap(path:outputPath:));
+- (BOOL)cookStaticLightmap:(NSString *)path outputPath:(NSString *)outputPath NS_SWIFT_NAME(cookStaticLightmap(path:outputPath:));
 - (void)resetEnvironment;
 - (void)setEnvironmentExposure:(float)ev;
 - (void)setEnvironmentIBLIntensity:(float)intensity;

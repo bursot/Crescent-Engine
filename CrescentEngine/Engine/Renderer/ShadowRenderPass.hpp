@@ -78,6 +78,8 @@ private:
                                  uint32_t slice,
                                  uint32_t resolution,
                                  const Math::Matrix4x4& viewProj,
+                                 const Math::Vector4* pointLightPosNear,
+                                 const Math::Vector4* pointFarParams,
                                  MTL::RenderPipelineState* pipeline,
                                  MTL::RenderPipelineState* pipelineCutout,
                                  const std::vector<InstancedShadowDraw>& instancedDraws);

@@ -96,4 +96,6 @@ private:
     std::unordered_map<std::string, std::weak_ptr<Texture2D>> m_Cache;
 };
 
+bool CookStaticLightmapToKTX2(const std::string& sourcePath, const std::string& outputPath);
+
 } // namespace Crescent

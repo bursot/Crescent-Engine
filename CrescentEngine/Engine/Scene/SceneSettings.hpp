@@ -92,6 +92,7 @@ struct SceneStaticLightingSettings {
     int samplesPerTexel = 256;
     int indirectBounces = 3;
     bool denoise = true;
+    bool bakeDirectLighting = false;
     bool directionalLightmaps = false;
     bool shadowmask = false;
     bool probeVolume = true;
