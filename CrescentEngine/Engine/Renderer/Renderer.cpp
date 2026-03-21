@@ -36,7 +36,9 @@
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
+#define MTLFX_PRIVATE_IMPLEMENTATION
 #include <Metal/Metal.hpp>
+#include <MetalFX/MetalFX.hpp>
 #include <QuartzCore/QuartzCore.hpp>
 
 #include <iostream>
@@ -867,6 +869,13 @@ Renderer::Renderer()
     , m_bloomMipCount(0)
     , m_taaHistoryTexture(nullptr)
     , m_taaCurrentTexture(nullptr)
+    , m_metalFXOutputTexture(nullptr)
+    , m_metalFXTemporalScaler(nullptr)
+    , m_metalFXInputWidth(0)
+    , m_metalFXInputHeight(0)
+    , m_metalFXOutputWidth(0)
+    , m_metalFXOutputHeight(0)
+    , m_metalFXColorFormat(static_cast<int>(MTL::PixelFormatInvalid))
     , m_colorTexture(nullptr)
     , m_msaaColorTexture(nullptr)
     , m_modelUniformBuffer(nullptr)
@@ -2494,6 +2503,7 @@ void Renderer::storeRenderTargetState(RenderTargetState& state) {
     state.bloomMipCount = m_bloomMipCount;
     state.taaHistoryTexture = m_taaHistoryTexture;
     state.taaCurrentTexture = m_taaCurrentTexture;
+    state.metalFXOutputTexture = m_metalFXOutputTexture;
     state.colorTexture = m_colorTexture;
     state.msaaColorTexture = m_msaaColorTexture;
     state.sceneColorFormat = m_sceneColorFormat;
@@ -2542,6 +2552,7 @@ void Renderer::loadRenderTargetState(const RenderTargetState& state) {
     m_bloomMipCount = state.bloomMipCount;
     m_taaHistoryTexture = state.taaHistoryTexture;
     m_taaCurrentTexture = state.taaCurrentTexture;
+    m_metalFXOutputTexture = state.metalFXOutputTexture;
     m_colorTexture = state.colorTexture;
     m_msaaColorTexture = state.msaaColorTexture;
     m_sceneColorFormat = state.sceneColorFormat;
@@ -2610,6 +2621,10 @@ void Renderer::releaseRenderTargetState(RenderTargetState& state) {
     if (state.taaCurrentTexture) {
         state.taaCurrentTexture->release();
         state.taaCurrentTexture = nullptr;
+    }
+    if (state.metalFXOutputTexture) {
+        state.metalFXOutputTexture->release();
+        state.metalFXOutputTexture = nullptr;
     }
     if (state.normalTexture) {
         state.normalTexture->release();
@@ -2751,6 +2766,100 @@ void Renderer::rebuildSamplerState(int anisotropy) {
     samplerDesc->setMaxAnisotropy(clamped);
     m_samplerState = m_device->newSamplerState(samplerDesc);
     samplerDesc->release();
+}
+
+void Renderer::releaseMetalFXResources() {
+    if (m_metalFXTemporalScaler) {
+        m_metalFXTemporalScaler->release();
+        m_metalFXTemporalScaler = nullptr;
+    }
+    m_metalFXInputWidth = 0;
+    m_metalFXInputHeight = 0;
+    m_metalFXOutputWidth = 0;
+    m_metalFXOutputHeight = 0;
+    m_metalFXColorFormat = static_cast<int>(MTL::PixelFormatInvalid);
+}
+
+bool Renderer::ensureMetalFXResources(uint32_t inputWidth,
+                                      uint32_t inputHeight,
+                                      uint32_t outputWidth,
+                                      uint32_t outputHeight,
+                                      int colorFormat) {
+    if (!m_device || inputWidth == 0 || inputHeight == 0 || outputWidth == 0 || outputHeight == 0) {
+        return false;
+    }
+    if (!MTLFX::TemporalScalerDescriptor::supportsDevice(m_device)) {
+        return false;
+    }
+
+    MTL::PixelFormat format = static_cast<MTL::PixelFormat>(colorFormat);
+    bool scalerMismatch = !m_metalFXTemporalScaler
+        || m_metalFXInputWidth != inputWidth
+        || m_metalFXInputHeight != inputHeight
+        || m_metalFXOutputWidth != outputWidth
+        || m_metalFXOutputHeight != outputHeight
+        || m_metalFXColorFormat != colorFormat;
+    if (scalerMismatch) {
+        releaseMetalFXResources();
+
+        MTLFX::TemporalScalerDescriptor* descriptor = MTLFX::TemporalScalerDescriptor::alloc()->init();
+        descriptor->setColorTextureFormat(format);
+        descriptor->setDepthTextureFormat(MTL::PixelFormatDepth32Float);
+        descriptor->setMotionTextureFormat(MTL::PixelFormatRG16Float);
+        descriptor->setOutputTextureFormat(format);
+        descriptor->setInputWidth(inputWidth);
+        descriptor->setInputHeight(inputHeight);
+        descriptor->setOutputWidth(outputWidth);
+        descriptor->setOutputHeight(outputHeight);
+        descriptor->setAutoExposureEnabled(false);
+        descriptor->setInputContentPropertiesEnabled(false);
+        descriptor->setReactiveMaskTextureEnabled(false);
+        descriptor->setRequiresSynchronousInitialization(true);
+        m_metalFXTemporalScaler = descriptor->newTemporalScaler(m_device);
+        descriptor->release();
+
+        if (!m_metalFXTemporalScaler) {
+            releaseMetalFXResources();
+            return false;
+        }
+
+        m_metalFXInputWidth = inputWidth;
+        m_metalFXInputHeight = inputHeight;
+        m_metalFXOutputWidth = outputWidth;
+        m_metalFXOutputHeight = outputHeight;
+        m_metalFXColorFormat = colorFormat;
+        m_taaHistoryValid = false;
+    }
+
+    bool outputMismatch = !m_metalFXOutputTexture
+        || m_metalFXOutputTexture->width() != outputWidth
+        || m_metalFXOutputTexture->height() != outputHeight
+        || m_metalFXOutputTexture->pixelFormat() != format;
+    if (outputMismatch) {
+        if (m_metalFXOutputTexture) {
+            m_metalFXOutputTexture->release();
+            m_metalFXOutputTexture = nullptr;
+        }
+
+        MTL::TextureDescriptor* outputDesc = MTL::TextureDescriptor::alloc()->init();
+        outputDesc->setTextureType(MTL::TextureType2D);
+        outputDesc->setWidth(outputWidth);
+        outputDesc->setHeight(outputHeight);
+        outputDesc->setPixelFormat(format);
+        MTL::TextureUsage usage = m_metalFXTemporalScaler->outputTextureUsage()
+            | MTL::TextureUsageShaderRead
+            | MTL::TextureUsageRenderTarget;
+        outputDesc->setUsage(usage);
+        outputDesc->setStorageMode(MTL::StorageModePrivate);
+        m_metalFXOutputTexture = m_device->newTexture(outputDesc);
+        outputDesc->release();
+        if (!m_metalFXOutputTexture) {
+            releaseMetalFXResources();
+            return false;
+        }
+    }
+
+    return m_metalFXTemporalScaler && m_metalFXOutputTexture;
 }
 
 void Renderer::clearPipelineCache() {
@@ -3233,6 +3342,7 @@ void Renderer::applyQualitySettings(const SceneQualitySettings& quality) {
     const bool anisotropyChanged = quality.anisotropy != m_qualitySettings.anisotropy;
     const bool msaaChanged = msaaSamples != m_msaaSamples;
     const bool renderScaleChanged = std::abs(renderScale - m_qualitySettings.renderScale) > 0.001f;
+    const bool upscalerChanged = clamped.upscaler != m_qualitySettings.upscaler;
     
     m_qualitySettings = clamped;
     
@@ -3258,7 +3368,11 @@ void Renderer::applyQualitySettings(const SceneQualitySettings& quality) {
         m_renderTargetHeight = 0;
     }
 
-    if (msaaChanged || renderScaleChanged) {
+    if (upscalerChanged) {
+        m_taaHistoryValid = false;
+    }
+
+    if (msaaChanged || renderScaleChanged || upscalerChanged) {
         storeRenderTargetState(getRenderTargetState(m_activePool));
         invalidateRenderTargetState(m_sceneTargets, msaaSamples);
         invalidateRenderTargetState(m_gameTargets, msaaSamples);
@@ -3471,7 +3585,12 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     bool colorGradingEnabled = post.enabled && post.colorGrading;
     bool vignetteEnabled = post.enabled && post.vignette && post.vignetteIntensity > 0.0001f;
     bool filmGrainEnabled = post.enabled && post.filmGrain && post.filmGrainIntensity > 0.0001f;
-    bool taaEnabled = allowTemporal && post.enabled && post.taa;
+    bool taaRequested = allowTemporal && post.enabled && post.taa;
+    bool taaEnabled = taaRequested;
+    bool metalFXRequested = allowTemporal
+        && m_activePool == RenderTargetPool::Game
+        && m_qualitySettings.upscaler == 1
+        && renderScale < 0.999f;
     bool ssrEnabled = post.enabled && post.ssr;
     bool motionBlurEnabled = allowTemporal && post.enabled && post.motionBlur;
     bool dofEnabled = post.enabled && post.depthOfField;
@@ -3482,7 +3601,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     }
     bool useOffscreen = bloomEnabled || toneMappingEnabled || colorGradingEnabled
         || vignetteEnabled || filmGrainEnabled
-        || taaEnabled || ssrEnabled || motionBlurEnabled || dofEnabled || fogEnabled
+        || taaRequested || ssrEnabled || motionBlurEnabled || dofEnabled || fogEnabled
         || std::abs(renderScale - 1.0f) > 0.001f;
     bool hdrPost = bloomEnabled || toneMappingEnabled || colorGradingEnabled;
     int desiredColorFormat = hdrPost ? static_cast<int>(MTL::PixelFormatRGBA16Float)
@@ -3505,17 +3624,29 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         return;
     }
 
+    bool metalFXEnabled = false;
+    if (metalFXRequested) {
+        uint32_t outputWidth = static_cast<uint32_t>(std::max(1.0f, std::round(m_viewportWidth)));
+        uint32_t outputHeight = static_cast<uint32_t>(std::max(1.0f, std::round(m_viewportHeight)));
+        metalFXEnabled = ensureMetalFXResources(renderWidth, renderHeight, outputWidth, outputHeight, desiredColorFormat);
+    }
+    if (metalFXEnabled) {
+        taaEnabled = false;
+    }
+
     Math::Matrix4x4 viewMatrix = camera->getViewMatrix();
     Math::Matrix4x4 projectionMatrix = camera->getProjectionMatrix();
     Math::Matrix4x4 projectionMatrixNoJitter = projectionMatrix;
     Math::Matrix4x4 viewProjectionNoJitter = projectionMatrix * viewMatrix;
     const auto frustumPlanes = ExtractFrustumPlanes(viewProjectionNoJitter);
-    if (taaEnabled) {
+    float temporalJitterX = 0.0f;
+    float temporalJitterY = 0.0f;
+    if (taaEnabled || metalFXEnabled) {
         uint32_t jitterIndex = ++m_taaFrameIndex;
-        float jitterX = HaltonSequence(jitterIndex, 2) - 0.5f;
-        float jitterY = HaltonSequence(jitterIndex, 3) - 0.5f;
-        float ndcX = (jitterX * 2.0f) / std::max(1.0f, static_cast<float>(renderWidth));
-        float ndcY = (jitterY * 2.0f) / std::max(1.0f, static_cast<float>(renderHeight));
+        temporalJitterX = HaltonSequence(jitterIndex, 2) - 0.5f;
+        temporalJitterY = HaltonSequence(jitterIndex, 3) - 0.5f;
+        float ndcX = (temporalJitterX * 2.0f) / std::max(1.0f, static_cast<float>(renderWidth));
+        float ndcY = (temporalJitterY * 2.0f) / std::max(1.0f, static_cast<float>(renderHeight));
         projectionMatrix(0, 2) += ndcX;
         projectionMatrix(1, 2) += ndcY;
     } else if (options.updateHistory) {
@@ -5143,7 +5274,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         decalPass->release();
     }
 
-    bool runVelocity = (motionBlurEnabled || taaEnabled) && runPrepass && m_velocityPipelineState && m_velocityTexture && m_depthTexture;
+    bool runVelocity = (motionBlurEnabled || taaEnabled || metalFXEnabled)
+        && runPrepass && m_velocityPipelineState && m_velocityTexture && m_depthTexture;
     if (runVelocity) {
         MTL::RenderPassDescriptor* velocityPass = MTL::RenderPassDescriptor::alloc()->init();
         velocityPass->colorAttachments()->object(0)->setTexture(m_velocityTexture);
@@ -6777,8 +6909,30 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         }
     }
 
+    MTL::Texture* presentSourceTexture = sceneColorForPost;
+    bool useMetalFX = metalFXEnabled && sceneColorForPost && runPrepass
+        && m_depthTexture && m_velocityTexture && m_metalFXTemporalScaler && m_metalFXOutputTexture;
+    if (useMetalFX) {
+        m_metalFXTemporalScaler->setColorTexture(sceneColorForPost);
+        m_metalFXTemporalScaler->setDepthTexture(m_depthTexture);
+        m_metalFXTemporalScaler->setMotionTexture(m_velocityTexture);
+        m_metalFXTemporalScaler->setOutputTexture(m_metalFXOutputTexture);
+        m_metalFXTemporalScaler->setInputContentWidth(renderWidth);
+        m_metalFXTemporalScaler->setInputContentHeight(renderHeight);
+        m_metalFXTemporalScaler->setPreExposure(1.0f);
+        m_metalFXTemporalScaler->setJitterOffsetX(temporalJitterX);
+        m_metalFXTemporalScaler->setJitterOffsetY(temporalJitterY);
+        m_metalFXTemporalScaler->setMotionVectorScaleX(static_cast<float>(renderWidth));
+        m_metalFXTemporalScaler->setMotionVectorScaleY(static_cast<float>(renderHeight));
+        m_metalFXTemporalScaler->setDepthReversed(false);
+        m_metalFXTemporalScaler->setReset(!m_taaHistoryValid);
+        m_metalFXTemporalScaler->encodeToCommandBuffer(commandBuffer);
+        presentSourceTexture = m_metalFXOutputTexture;
+        m_taaHistoryValid = true;
+    }
+
     if (useOffscreen || (useMSAA && !resolveToDrawable)) {
-        if (!m_blitPipelineState || !m_colorTexture) {
+        if (!m_blitPipelineState || !presentSourceTexture) {
             std::cerr << "Blit pass skipped: missing pipeline or source texture\n";
         } else {
             MTL::RenderPassDescriptor* blitPass = MTL::RenderPassDescriptor::alloc()->init();
@@ -6827,7 +6981,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 blitEncoder->setRenderPipelineState(m_bloomCombinePipelineState);
                 blitEncoder->setFragmentBytes(&combineParams, sizeof(BloomCombineParamsGPU), 0);
                 blitEncoder->setFragmentBytes(&postParams, sizeof(PostProcessParamsGPU), 1);
-                blitEncoder->setFragmentTexture(sceneColorForPost, 0);
+                blitEncoder->setFragmentTexture(presentSourceTexture, 0);
                 blitEncoder->setFragmentTexture(m_bloomMipTextures[0], 1);
                 if (lutTexture) {
                     blitEncoder->setFragmentTexture(lutTexture, 2);
@@ -6835,7 +6989,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             } else {
                 blitEncoder->setRenderPipelineState(m_blitPipelineState);
                 blitEncoder->setFragmentBytes(&postParams, sizeof(PostProcessParamsGPU), 0);
-                blitEncoder->setFragmentTexture(sceneColorForPost, 0);
+                blitEncoder->setFragmentTexture(presentSourceTexture, 0);
                 if (lutTexture) {
                     blitEncoder->setFragmentTexture(lutTexture, 1);
                 }
@@ -6860,6 +7014,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
     if (options.updateHistory) {
         if (taaEnabled && !useTAA) {
+            m_taaHistoryValid = false;
+        }
+        if (metalFXEnabled && !useMetalFX) {
             m_taaHistoryValid = false;
         }
         m_prevViewProjection = viewProjection;
@@ -7383,6 +7540,8 @@ void Renderer::renderMeshRenderer(MeshRenderer* renderer, Camera* camera, const 
 }
 
 void Renderer::shutdown() {
+    releaseMetalFXResources();
+
     // Shutdown IBL generator
     if (m_iblGenerator) {
         m_iblGenerator->shutdown();

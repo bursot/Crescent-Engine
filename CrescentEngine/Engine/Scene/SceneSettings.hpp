@@ -81,6 +81,7 @@ struct SceneQualitySettings {
     float renderScale = 1.0f;
     float lodBias = 0.0f;
     int textureQuality = 2;
+    int upscaler = 0; // 0 = Off, 1 = MetalFX Temporal
 };
 
 struct SceneStaticLightingSettings {

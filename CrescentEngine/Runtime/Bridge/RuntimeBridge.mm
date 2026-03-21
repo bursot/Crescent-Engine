@@ -31,6 +31,8 @@
 - (BOOL)openProjectAtPath:(NSString *)path { return [[self bridge] openProjectAtPath:path]; }
 - (NSDictionary *)getProjectSettings { return [[self bridge] getProjectSettings]; }
 - (NSDictionary *)getProjectInfo { return [[self bridge] getProjectInfo]; }
+- (NSDictionary *)getSceneSettings { return [[self bridge] getSceneSettings]; }
+- (void)setSceneSettings:(NSDictionary *)settings { [[self bridge] setSceneSettings:settings]; }
 - (NSDictionary *)buildSceneStaticLightingLayout { return [[self bridge] buildSceneStaticLightingLayout]; }
 - (NSDictionary *)bakeSceneStaticLightmaps { return [[self bridge] bakeSceneStaticLightmaps]; }
 - (NSDictionary *)bakeSceneStaticLighting { return [[self bridge] bakeSceneStaticLighting]; }

@@ -10,6 +10,7 @@ struct QualitySettings: Hashable {
     var renderScale: Double = 1.0
     var lodBias: Double = 0.0
     var textureQuality: Int = 2
+    var upscaler: Int = 0
     
     init() {}
     
@@ -37,6 +38,7 @@ struct QualitySettings: Hashable {
         renderScale = dict["renderScale"] as? Double ?? renderScale
         lodBias = dict["lodBias"] as? Double ?? lodBias
         textureQuality = dict["textureQuality"] as? Int ?? textureQuality
+        upscaler = dict["upscaler"] as? Int ?? upscaler
     }
     
     func toDictionary() -> [String: Any] {
@@ -47,7 +49,8 @@ struct QualitySettings: Hashable {
             "anisotropy": anisotropy,
             "renderScale": renderScale,
             "lodBias": lodBias,
-            "textureQuality": textureQuality
+            "textureQuality": textureQuality,
+            "upscaler": upscaler
         ]
     }
 }
@@ -380,6 +383,7 @@ final class SceneSettingsViewModel: ObservableObject {
     @Published var renderScale: Double = 1.0
     @Published var lodBias: Double = 0.0
     @Published var textureQuality: Int = 2
+    @Published var upscaler: Int = 0
     @Published var bakeDirectLighting: Bool = false
     
     private weak var editorState: EditorState?
@@ -478,6 +482,7 @@ final class SceneSettingsViewModel: ObservableObject {
             renderScale = quality["renderScale"] as? Double ?? renderScale
             lodBias = quality["lodBias"] as? Double ?? lodBias
             textureQuality = quality["textureQuality"] as? Int ?? textureQuality
+            upscaler = quality["upscaler"] as? Int ?? upscaler
         }
         if let staticLighting = dict["staticLighting"] as? [String: Any] {
             bakeDirectLighting = staticLighting["bakeDirectLighting"] as? Bool ?? bakeDirectLighting
@@ -559,7 +564,8 @@ final class SceneSettingsViewModel: ObservableObject {
                 "anisotropy": anisotropy,
                 "renderScale": renderScale,
                 "lodBias": lodBias,
-                "textureQuality": textureQuality
+                "textureQuality": textureQuality,
+                "upscaler": upscaler
             ],
             "staticLighting": [
                 "bakeDirectLighting": bakeDirectLighting
@@ -1155,6 +1161,16 @@ private struct SceneSettingsPanel: View {
                     .frame(width: 140)
                     .onChange(of: viewModel.textureQuality) { _ in viewModel.apply() }
                 }
+
+                SettingsRow(title: "Upscaler") {
+                    Picker("", selection: $viewModel.upscaler) {
+                        Text("Off").tag(0)
+                        Text("MetalFX Temporal").tag(1)
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+                    .onChange(of: viewModel.upscaler) { _ in viewModel.apply() }
+                }
             }
 
             SettingsGroup(title: "Static Lighting") {
@@ -1415,6 +1431,16 @@ private struct QualitySettingsEditor: View {
                 .labelsHidden()
                 .frame(width: 140)
                 .onChange(of: quality.textureQuality) { _ in onChange() }
+            }
+
+            SettingsRow(title: "Upscaler") {
+                Picker("", selection: $quality.upscaler) {
+                    Text("Off").tag(0)
+                    Text("MetalFX Temporal").tag(1)
+                }
+                .labelsHidden()
+                .frame(width: 180)
+                .onChange(of: quality.upscaler) { _ in onChange() }
             }
         }
     }

@@ -22,22 +22,30 @@ struct MetalView: NSViewRepresentable {
     let isActive: Bool
     let drivesLoop: Bool
     let terrainPaintConfig: TerrainPaintConfig
+    let onKeyDownIntercept: ((UInt16) -> Bool)?
     let onEngineReady: (() -> Void)?
 
     init(viewKind: RenderViewKind,
          isActive: Bool,
          drivesLoop: Bool = false,
          terrainPaintConfig: TerrainPaintConfig = TerrainPaintConfig(),
+         onKeyDownIntercept: ((UInt16) -> Bool)? = nil,
          onEngineReady: (() -> Void)? = nil) {
         self.viewKind = viewKind
         self.isActive = isActive
         self.drivesLoop = drivesLoop
         self.terrainPaintConfig = terrainPaintConfig
+        self.onKeyDownIntercept = onKeyDownIntercept
         self.onEngineReady = onEngineReady
     }
     
     func makeCoordinator() -> Coordinator {
-        Coordinator(viewKind: viewKind, drivesLoop: drivesLoop, onEngineReady: onEngineReady)
+        Coordinator(
+            viewKind: viewKind,
+            drivesLoop: drivesLoop,
+            onKeyDownIntercept: onKeyDownIntercept,
+            onEngineReady: onEngineReady
+        )
     }
     
     func makeNSView(context: Context) -> MetalDisplayView {
@@ -107,14 +115,19 @@ struct MetalView: NSViewRepresentable {
         private var isEngineInitialized = false
         private let viewKind: RenderViewKind
         private let drivesLoop: Bool
+        fileprivate let onKeyDownIntercept: ((UInt16) -> Bool)?
         private let onEngineReady: (() -> Void)?
         private var keyDownMonitor: Any?
         private var keyUpMonitor: Any?
         private var flagsChangedMonitor: Any?
 
-        init(viewKind: RenderViewKind, drivesLoop: Bool, onEngineReady: (() -> Void)?) {
+        init(viewKind: RenderViewKind,
+             drivesLoop: Bool,
+             onKeyDownIntercept: ((UInt16) -> Bool)?,
+             onEngineReady: (() -> Void)?) {
             self.viewKind = viewKind
             self.drivesLoop = drivesLoop
+            self.onKeyDownIntercept = onKeyDownIntercept
             self.onEngineReady = onEngineReady
         }
         
@@ -271,6 +284,9 @@ struct MetalView: NSViewRepresentable {
         // MARK: - InputDelegate
         
         func handleKeyDown(_ keyCode: UInt16) {
+            if onKeyDownIntercept?(keyCode) == true {
+                return
+            }
             bridge?.handleKeyDown(keyCode)
         }
         
@@ -708,6 +724,9 @@ class MetalDisplayView: NSView {
     // MARK: - Keyboard Input
     
     override func keyDown(with event: NSEvent) {
+        if coordinator?.onKeyDownIntercept?(event.keyCode) == true {
+            return
+        }
         inputDelegate?.handleKeyDown(event.keyCode)
     }
     

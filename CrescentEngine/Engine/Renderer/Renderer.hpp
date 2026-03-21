@@ -22,6 +22,10 @@ namespace MTL {
     class Texture;
 }
 
+namespace MTLFX {
+    class TemporalScaler;
+}
+
 namespace CA {
     class MetalLayer;
 }
@@ -248,6 +252,12 @@ private:
     std::shared_ptr<Texture2D> resolveStaticLightingTexture(const std::string& texturePath, bool srgb);
     void renderSkybox(MTL::RenderCommandEncoder* encoder, Camera* camera);
     void rebuildSamplerState(int anisotropy);
+    void releaseMetalFXResources();
+    bool ensureMetalFXResources(uint32_t inputWidth,
+                                uint32_t inputHeight,
+                                uint32_t outputWidth,
+                                uint32_t outputHeight,
+                                int colorFormat);
     void ensureRenderTargets(uint32_t width, uint32_t height, uint32_t msaaSamples, int colorFormat);
     void ensureFogVolume(uint32_t width, uint32_t height, int quality);
     void clearPipelineCache();
@@ -296,6 +306,7 @@ private:
         uint32_t bloomMipCount = 0;
         MTL::Texture* taaHistoryTexture = nullptr;
         MTL::Texture* taaCurrentTexture = nullptr;
+        MTL::Texture* metalFXOutputTexture = nullptr;
         MTL::Texture* colorTexture = nullptr;
         MTL::Texture* msaaColorTexture = nullptr;
         int sceneColorFormat = 0;
@@ -396,6 +407,13 @@ private:
     uint32_t m_bloomMipCount;
     MTL::Texture* m_taaHistoryTexture;
     MTL::Texture* m_taaCurrentTexture;
+    MTL::Texture* m_metalFXOutputTexture;
+    MTLFX::TemporalScaler* m_metalFXTemporalScaler;
+    uint32_t m_metalFXInputWidth;
+    uint32_t m_metalFXInputHeight;
+    uint32_t m_metalFXOutputWidth;
+    uint32_t m_metalFXOutputHeight;
+    int m_metalFXColorFormat;
     
     // Offscreen color targets
     MTL::Texture* m_colorTexture;

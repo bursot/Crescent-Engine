@@ -23,6 +23,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)openProjectAtPath:(NSString *)path NS_SWIFT_NAME(openProject(path:));
 - (NSDictionary *)getProjectSettings NS_SWIFT_NAME(getProjectSettings());
 - (NSDictionary *)getProjectInfo NS_SWIFT_NAME(getProjectInfo());
+- (NSDictionary *)getSceneSettings NS_SWIFT_NAME(getSceneSettings());
+- (void)setSceneSettings:(NSDictionary *)settings NS_SWIFT_NAME(setSceneSettings(settings:));
 - (NSDictionary *)buildSceneStaticLightingLayout NS_SWIFT_NAME(buildSceneStaticLightingLayout());
 - (NSDictionary *)bakeSceneStaticLightmaps NS_SWIFT_NAME(bakeSceneStaticLightmaps());
 - (NSDictionary *)bakeSceneStaticLighting NS_SWIFT_NAME(bakeSceneStaticLighting());

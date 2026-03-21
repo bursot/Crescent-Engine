@@ -4942,7 +4942,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
                 @"anisotropy": @(quality.anisotropy),
                 @"renderScale": @(quality.renderScale),
                 @"lodBias": @(quality.lodBias),
-                @"textureQuality": @(quality.textureQuality)
+                @"textureQuality": @(quality.textureQuality),
+                @"upscaler": @(quality.upscaler)
             };
         };
         NSMutableArray* assetPaths = [NSMutableArray array];
@@ -5007,6 +5008,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             if (dict[@"renderScale"]) quality.renderScale = [dict[@"renderScale"] floatValue];
             if (dict[@"lodBias"]) quality.lodBias = [dict[@"lodBias"] floatValue];
             if (dict[@"textureQuality"]) quality.textureQuality = [dict[@"textureQuality"] intValue];
+            if (dict[@"upscaler"]) quality.upscaler = [dict[@"upscaler"] intValue];
             return quality;
         };
         if (settings[@"defaultRenderProfile"]) {
@@ -5203,7 +5205,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             @"anisotropy": @(settings.quality.anisotropy),
             @"renderScale": @(settings.quality.renderScale),
             @"lodBias": @(settings.quality.lodBias),
-            @"textureQuality": @(settings.quality.textureQuality)
+            @"textureQuality": @(settings.quality.textureQuality),
+            @"upscaler": @(settings.quality.upscaler)
         };
 
         NSDictionary* staticLighting = @{
@@ -5387,6 +5390,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             if (quality[@"renderScale"]) updated.quality.renderScale = [quality[@"renderScale"] floatValue];
             if (quality[@"lodBias"]) updated.quality.lodBias = [quality[@"lodBias"] floatValue];
             if (quality[@"textureQuality"]) updated.quality.textureQuality = [quality[@"textureQuality"] intValue];
+            if (quality[@"upscaler"]) updated.quality.upscaler = [quality[@"upscaler"] intValue];
         }
         if (settings[@"staticLighting"] && [settings[@"staticLighting"] isKindOfClass:[NSDictionary class]]) {
             NSDictionary* staticLighting = settings[@"staticLighting"];

@@ -1357,7 +1357,8 @@ json SerializeQualitySettings(const SceneQualitySettings& quality) {
         {"anisotropy", quality.anisotropy},
         {"renderScale", quality.renderScale},
         {"lodBias", quality.lodBias},
-        {"textureQuality", quality.textureQuality}
+        {"textureQuality", quality.textureQuality},
+        {"upscaler", quality.upscaler}
     };
 }
 
@@ -1523,6 +1524,7 @@ SceneQualitySettings DeserializeQualitySettings(const json& j) {
     quality.renderScale = j.value("renderScale", quality.renderScale);
     quality.lodBias = j.value("lodBias", quality.lodBias);
     quality.textureQuality = j.value("textureQuality", quality.textureQuality);
+    quality.upscaler = j.value("upscaler", quality.upscaler);
     return quality;
 }
 
