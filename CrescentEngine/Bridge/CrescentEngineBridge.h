@@ -72,7 +72,10 @@ NS_ASSUME_NONNULL_BEGIN
                                   y:(float)y
                         screenWidth:(float)width
                        screenHeight:(float)height
+                              mode:(NSInteger)mode
                               layer:(NSInteger)layer
+                         sculptTool:(NSInteger)sculptTool
+                    sculptResolution:(NSInteger)sculptResolution
                              radius:(float)radius
                            hardness:(float)hardness
                            strength:(float)strength
@@ -80,13 +83,16 @@ NS_ASSUME_NONNULL_BEGIN
                           maskPreset:(NSInteger)maskPreset
                             maskPath:(NSString * _Nullable)maskPath
                       autoNormalize:(BOOL)autoNormalize
-                             invert:(BOOL)invert NS_SWIFT_NAME(beginTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:maskPreset:maskPath:autoNormalize:invert:));
+                             invert:(BOOL)invert NS_SWIFT_NAME(beginTerrainPaint(entity:x:y:screenWidth:screenHeight:mode:layer:sculptTool:sculptResolution:radius:hardness:strength:spacing:maskPreset:maskPath:autoNormalize:invert:));
 - (void)updateTerrainPaintForEntity:(NSString *)uuid
                                    x:(float)x
                                    y:(float)y
                          screenWidth:(float)width
                         screenHeight:(float)height
+                               mode:(NSInteger)mode
                                layer:(NSInteger)layer
+                          sculptTool:(NSInteger)sculptTool
+                     sculptResolution:(NSInteger)sculptResolution
                               radius:(float)radius
                             hardness:(float)hardness
                             strength:(float)strength
@@ -94,21 +100,23 @@ NS_ASSUME_NONNULL_BEGIN
                            maskPreset:(NSInteger)maskPreset
                              maskPath:(NSString * _Nullable)maskPath
                        autoNormalize:(BOOL)autoNormalize
-                              invert:(BOOL)invert NS_SWIFT_NAME(updateTerrainPaint(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:strength:spacing:maskPreset:maskPath:autoNormalize:invert:));
+                              invert:(BOOL)invert NS_SWIFT_NAME(updateTerrainPaint(entity:x:y:screenWidth:screenHeight:mode:layer:sculptTool:sculptResolution:radius:hardness:strength:spacing:maskPreset:maskPath:autoNormalize:invert:));
 - (void)endTerrainPaint NS_SWIFT_NAME(endTerrainPaint());
 - (void)updateTerrainBrushPreviewForEntity:(NSString *)uuid
                                          x:(float)x
                                          y:(float)y
                                screenWidth:(float)width
                               screenHeight:(float)height
+                                      mode:(NSInteger)mode
                                      layer:(NSInteger)layer
+                               sculptTool:(NSInteger)sculptTool
                                     radius:(float)radius
                                   hardness:(float)hardness
                                  maskPreset:(NSInteger)maskPreset
-                                   maskPath:(NSString * _Nullable)maskPath NS_SWIFT_NAME(updateTerrainBrushPreview(entity:x:y:screenWidth:screenHeight:layer:radius:hardness:maskPreset:maskPath:));
+                                   maskPath:(NSString * _Nullable)maskPath NS_SWIFT_NAME(updateTerrainBrushPreview(entity:x:y:screenWidth:screenHeight:mode:layer:sculptTool:radius:hardness:maskPreset:maskPath:));
 - (void)clearTerrainBrushPreview NS_SWIFT_NAME(clearTerrainBrushPreview());
-- (BOOL)undoTerrainPaintForEntity:(NSString *)uuid NS_SWIFT_NAME(undoTerrainPaint(entity:));
-- (BOOL)redoTerrainPaintForEntity:(NSString *)uuid NS_SWIFT_NAME(redoTerrainPaint(entity:));
+- (BOOL)undoTerrainStrokeForEntity:(NSString *)uuid mode:(NSInteger)mode NS_SWIFT_NAME(undoTerrainStroke(entity:mode:));
+- (BOOL)redoTerrainStrokeForEntity:(NSString *)uuid mode:(NSInteger)mode NS_SWIFT_NAME(redoTerrainStroke(entity:mode:));
 
 // Gizmo controls
 - (void)setGizmoMode:(int)mode; // 0=Translate, 1=Rotate, 2=Scale

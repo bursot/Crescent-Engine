@@ -736,6 +736,33 @@ struct TerrainPaintHistoryState {
     std::vector<std::vector<unsigned char>> redoStack;
 };
 
+enum class TerrainBrushModeCpp : int {
+    Paint = 0,
+    Sculpt = 1
+};
+
+enum class TerrainSculptToolCpp : int {
+    Raise = 0,
+    Smooth = 1,
+    Flatten = 2
+};
+
+struct TerrainSculptStrokeState {
+    bool active = false;
+    std::string entityUUID;
+    float lastU = 0.0f;
+    float lastV = 0.0f;
+    bool hasLastUV = false;
+    float flattenHeight = 0.0f;
+    bool hasFlattenHeight = false;
+};
+
+struct TerrainSculptHistoryState {
+    size_t vertexCount = 0;
+    std::vector<std::vector<float>> undoStack;
+    std::vector<std::vector<float>> redoStack;
+};
+
 struct TerrainBrushMaskImage {
     int width = 0;
     int height = 0;
@@ -752,7 +779,9 @@ struct TerrainBrushMaskSampler {
 struct TerrainBrushPreviewState {
     std::string entityUUID;
     std::shared_ptr<Texture2D> texture;
+    int mode = -1;
     int layer = -1;
+    int sculptTool = -1;
     float hardness = -1.0f;
     int maskPreset = -1;
     std::string maskPath;
@@ -783,6 +812,229 @@ static bool ResolveTerrainPaintTarget(const std::string& entityUUID, TerrainPain
     outTarget.binding = std::move(binding);
     outTarget.mesh = std::move(mesh);
     outTarget.material = std::move(material);
+    return true;
+}
+
+static TerrainBrushModeCpp TerrainBrushModeFromInt(int value) {
+    return value == static_cast<int>(TerrainBrushModeCpp::Sculpt)
+        ? TerrainBrushModeCpp::Sculpt
+        : TerrainBrushModeCpp::Paint;
+}
+
+static TerrainSculptToolCpp TerrainSculptToolFromInt(int value) {
+    switch (value) {
+        case 1: return TerrainSculptToolCpp::Smooth;
+        case 2: return TerrainSculptToolCpp::Flatten;
+        case 0:
+        default:
+            return TerrainSculptToolCpp::Raise;
+    }
+}
+
+static std::shared_ptr<Mesh> CloneMeshForTerrainEditing(const std::shared_ptr<Mesh>& source) {
+    if (!source) {
+        return nullptr;
+    }
+    auto clone = std::make_shared<Mesh>();
+    clone->setName(source->getName());
+    clone->setVertices(source->getVertices());
+    clone->setIndices(source->getIndices());
+    clone->setSubmeshes(source->getSubmeshes());
+    clone->setSkinWeights(source->getSkinWeights());
+    clone->setDoubleSided(source->isDoubleSided());
+    return clone;
+}
+
+static bool EnsureUniqueTerrainMesh(TerrainPaintTarget& target) {
+    if (!target.binding.renderer || !target.mesh) {
+        return false;
+    }
+    if (target.mesh.use_count() <= 2) {
+        return true;
+    }
+    auto clone = CloneMeshForTerrainEditing(target.mesh);
+    if (!clone) {
+        return false;
+    }
+    target.binding.renderer->setMesh(clone);
+    target.mesh = clone;
+    return true;
+}
+
+static bool InferTerrainGridVertexDimensions(const Mesh& mesh,
+                                             uint32_t& outWidthVerts,
+                                             uint32_t& outHeightVerts) {
+    const auto& vertices = mesh.getVertices();
+    if (vertices.size() < 4) {
+        return false;
+    }
+
+    const float firstRowV = vertices.front().texCoord.y;
+    uint32_t widthVerts = 0;
+    while (widthVerts < vertices.size() &&
+           std::abs(vertices[widthVerts].texCoord.y - firstRowV) < 1e-4f) {
+        ++widthVerts;
+    }
+    if (widthVerts < 2 || (vertices.size() % widthVerts) != 0) {
+        return false;
+    }
+
+    uint32_t heightVerts = static_cast<uint32_t>(vertices.size() / widthVerts);
+    if (heightVerts < 2) {
+        return false;
+    }
+
+    outWidthVerts = widthVerts;
+    outHeightVerts = heightVerts;
+    return true;
+}
+
+static bool EnsureTerrainSculptGrid(TerrainPaintTarget& target,
+                                    int requestedResolution) {
+    if (!target.binding.renderer || !target.mesh) {
+        return false;
+    }
+    if (!EnsureUniqueTerrainMesh(target)) {
+        return false;
+    }
+
+    uint32_t widthVerts = 0;
+    uint32_t heightVerts = 0;
+    const bool hasGrid = InferTerrainGridVertexDimensions(*target.mesh, widthVerts, heightVerts);
+    const bool needsPromotion = !hasGrid || widthVerts <= 2 || heightVerts <= 2;
+    if (!needsPromotion) {
+        return true;
+    }
+
+    const Math::Vector3 minB = target.mesh->getBoundsMin();
+    const Math::Vector3 maxB = target.mesh->getBoundsMax();
+    const float width = std::max(maxB.x - minB.x, 0.01f);
+    const float depth = std::max(maxB.z - minB.z, 0.01f);
+    const uint32_t segments = static_cast<uint32_t>(std::clamp(requestedResolution, 8, 256));
+    auto promoted = Mesh::CreatePlane(width, depth, segments, segments);
+    if (!promoted) {
+        return false;
+    }
+    promoted->setName(target.mesh->getName().empty() ? "Terrain" : target.mesh->getName());
+    promoted->setDoubleSided(target.mesh->isDoubleSided());
+    target.binding.renderer->setMesh(promoted);
+    target.mesh = promoted;
+    return true;
+}
+
+static std::vector<float> CaptureTerrainVertexHeights(const std::shared_ptr<Mesh>& mesh) {
+    std::vector<float> heights;
+    if (!mesh) {
+        return heights;
+    }
+    const auto& vertices = mesh->getVertices();
+    heights.reserve(vertices.size());
+    for (const auto& vertex : vertices) {
+        heights.push_back(vertex.position.y);
+    }
+    return heights;
+}
+
+static bool FloatSnapshotEquals(const std::vector<float>& a,
+                                const std::vector<float>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    if (a.empty()) {
+        return true;
+    }
+    return std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
+static void EnsureTerrainSculptHistoryCompatible(TerrainSculptHistoryState& history,
+                                                 const TerrainPaintTarget& target) {
+    const size_t vertexCount = target.mesh ? target.mesh->getVertices().size() : 0;
+    if (history.vertexCount == vertexCount) {
+        return;
+    }
+    history.vertexCount = vertexCount;
+    history.undoStack.clear();
+    history.redoStack.clear();
+}
+
+static void PushTerrainSculptUndoSnapshot(TerrainSculptHistoryState& history,
+                                          const std::vector<float>& heights) {
+    if (heights.empty()) {
+        return;
+    }
+    if (!history.undoStack.empty() && FloatSnapshotEquals(history.undoStack.back(), heights)) {
+        history.redoStack.clear();
+        return;
+    }
+    history.undoStack.push_back(heights);
+    if (history.undoStack.size() > kTerrainPaintUndoLimit) {
+        history.undoStack.erase(history.undoStack.begin());
+    }
+    history.redoStack.clear();
+}
+
+static void PushTerrainSculptRedoSnapshot(TerrainSculptHistoryState& history,
+                                          const std::vector<float>& heights) {
+    if (heights.empty()) {
+        return;
+    }
+    if (!history.redoStack.empty() && FloatSnapshotEquals(history.redoStack.back(), heights)) {
+        return;
+    }
+    history.redoStack.push_back(heights);
+    if (history.redoStack.size() > kTerrainPaintUndoLimit) {
+        history.redoStack.erase(history.redoStack.begin());
+    }
+}
+
+static bool ApplyTerrainVertexHeights(const TerrainPaintTarget& target,
+                                      const std::vector<float>& heights) {
+    if (!target.binding.renderer || !target.mesh) {
+        return false;
+    }
+    auto vertices = target.mesh->getVertices();
+    if (vertices.size() != heights.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        vertices[i].position.y = heights[i];
+    }
+    target.mesh->setVertices(vertices);
+    target.mesh->calculateNormals();
+    target.mesh->calculateTangents();
+    target.binding.renderer->setMesh(target.mesh);
+    return true;
+}
+
+static bool RayIntersectsTriangleLocal(const Math::Vector3& origin,
+                                       const Math::Vector3& direction,
+                                       const Math::Vector3& a,
+                                       const Math::Vector3& b,
+                                       const Math::Vector3& c,
+                                       float& outT) {
+    const Math::Vector3 edge1 = b - a;
+    const Math::Vector3 edge2 = c - a;
+    const Math::Vector3 p = direction.cross(edge2);
+    const float det = edge1.dot(p);
+    if (std::abs(det) < 1e-7f) {
+        return false;
+    }
+    const float invDet = 1.0f / det;
+    const Math::Vector3 t = origin - a;
+    const float u = t.dot(p) * invDet;
+    if (u < 0.0f || u > 1.0f) {
+        return false;
+    }
+    const Math::Vector3 q = t.cross(edge1);
+    const float v = direction.dot(q) * invDet;
+    if (v < 0.0f || (u + v) > 1.0f) {
+        return false;
+    }
+    const float dist = edge2.dot(q) * invDet;
+    if (dist < 0.0f) {
+        return false;
+    }
+    outT = dist;
     return true;
 }
 
@@ -1149,13 +1401,15 @@ static bool EnsureTerrainControlPaintData(TerrainPaintStrokeState& state,
     return true;
 }
 
-static bool ScreenToPlaneUV(const TerrainPaintTarget& target,
-                            float screenX,
-                            float screenY,
-                            float screenWidth,
-                            float screenHeight,
-                            float& outU,
-                            float& outV) {
+static bool ScreenToTerrainUV(const TerrainPaintTarget& target,
+                              float screenX,
+                              float screenY,
+                              float screenWidth,
+                              float screenHeight,
+                              float& outU,
+                              float& outV,
+                              Math::Vector3* outWorldHit = nullptr,
+                              Math::Vector3* outLocalHit = nullptr) {
     if (!target.binding.entity || !target.mesh) {
         return false;
     }
@@ -1175,15 +1429,46 @@ static bool ScreenToPlaneUV(const TerrainPaintTarget& target,
     Math::Matrix4x4 invWorld = world.inversed();
     Math::Vector3 localOrigin = invWorld.transformPoint(ray.origin);
     Math::Vector3 localDir = invWorld.transformDirection(ray.direction);
-    if (std::abs(localDir.y) < 1e-6f) {
-        return false;
-    }
-    float t = -localOrigin.y / localDir.y;
-    if (t < 0.0f) {
-        return false;
+
+    Math::Vector3 localHit;
+    bool hitMesh = false;
+    float bestT = std::numeric_limits<float>::max();
+    const auto& vertices = target.mesh->getVertices();
+    const auto& indices = target.mesh->getIndices();
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const uint32_t i0 = indices[i];
+        const uint32_t i1 = indices[i + 1];
+        const uint32_t i2 = indices[i + 2];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+            continue;
+        }
+        float t = 0.0f;
+        if (!RayIntersectsTriangleLocal(localOrigin,
+                                        localDir,
+                                        vertices[i0].position,
+                                        vertices[i1].position,
+                                        vertices[i2].position,
+                                        t)) {
+            continue;
+        }
+        if (t < bestT) {
+            bestT = t;
+            localHit = localOrigin + localDir * t;
+            hitMesh = true;
+        }
     }
 
-    Math::Vector3 localHit = localOrigin + localDir * t;
+    if (!hitMesh) {
+        if (std::abs(localDir.y) < 1e-6f) {
+            return false;
+        }
+        float t = -localOrigin.y / localDir.y;
+        if (t < 0.0f) {
+            return false;
+        }
+        localHit = localOrigin + localDir * t;
+    }
+
     Math::Vector3 minB = target.mesh->getBoundsMin();
     Math::Vector3 maxB = target.mesh->getBoundsMax();
     if (localHit.x < minB.x || localHit.x > maxB.x || localHit.z < minB.z || localHit.z > maxB.z) {
@@ -1194,6 +1479,12 @@ static bool ScreenToPlaneUV(const TerrainPaintTarget& target,
     float depth = std::max(maxB.z - minB.z, 1e-6f);
     outU = std::clamp((localHit.x - minB.x) / width, 0.0f, 1.0f);
     outV = std::clamp((localHit.z - minB.z) / depth, 0.0f, 1.0f);
+    if (outLocalHit) {
+        *outLocalHit = localHit;
+    }
+    if (outWorldHit) {
+        *outWorldHit = world.transformPoint(localHit);
+    }
     return true;
 }
 
@@ -1205,17 +1496,22 @@ static bool ResolveTerrainPaintTargetAtCursor(const std::string& preferredEntity
                                               TerrainPaintTarget& outTarget,
                                               std::string& outEntityUUID,
                                               float& outU,
-                                              float& outV) {
+                                              float& outV,
+                                              Math::Vector3* outWorldHit = nullptr) {
     if (!preferredEntityUUID.empty()) {
         TerrainPaintTarget preferredTarget;
         float u = 0.0f;
         float v = 0.0f;
+        Math::Vector3 worldHit = Math::Vector3::Zero;
         if (ResolveTerrainPaintTarget(preferredEntityUUID, preferredTarget) &&
-            ScreenToPlaneUV(preferredTarget, screenX, screenY, screenWidth, screenHeight, u, v)) {
+            ScreenToTerrainUV(preferredTarget, screenX, screenY, screenWidth, screenHeight, u, v, &worldHit)) {
             outTarget = std::move(preferredTarget);
             outEntityUUID = preferredEntityUUID;
             outU = u;
             outV = v;
+            if (outWorldHit) {
+                *outWorldHit = worldHit;
+            }
             return true;
         }
     }
@@ -1254,8 +1550,9 @@ static bool ResolveTerrainPaintTargetAtCursor(const std::string& preferredEntity
     TerrainPaintTarget fallbackTarget;
     float u = 0.0f;
     float v = 0.0f;
+    Math::Vector3 worldHit = Math::Vector3::Zero;
     if (!ResolveTerrainPaintTarget(fallbackUUID, fallbackTarget) ||
-        !ScreenToPlaneUV(fallbackTarget, screenX, screenY, screenWidth, screenHeight, u, v)) {
+        !ScreenToTerrainUV(fallbackTarget, screenX, screenY, screenWidth, screenHeight, u, v, &worldHit)) {
         return false;
     }
 
@@ -1263,6 +1560,9 @@ static bool ResolveTerrainPaintTargetAtCursor(const std::string& preferredEntity
     outEntityUUID = fallbackUUID;
     outU = u;
     outV = v;
+    if (outWorldHit) {
+        *outWorldHit = worldHit;
+    }
     return true;
 }
 
@@ -1486,19 +1786,191 @@ static void UploadTerrainPaintTextureIfNeeded(TerrainPaintStrokeState& state,
     state.uploadPending = false;
 }
 
-static Math::Vector3 TerrainUVToWorldPoint(const TerrainPaintTarget& target,
-                                           float u,
-                                           float v) {
-    if (!target.binding.entity || !target.mesh) {
-        return Math::Vector3::Zero;
+static Math::Vector3 TerrainBrushPreviewColor(TerrainBrushModeCpp mode,
+                                              int layer,
+                                              TerrainSculptToolCpp sculptTool) {
+    if (mode == TerrainBrushModeCpp::Paint) {
+        return TerrainLayerPreviewColor(layer);
     }
-    Math::Vector3 minB = target.mesh->getBoundsMin();
-    Math::Vector3 maxB = target.mesh->getBoundsMax();
-    float localX = minB.x + std::clamp(u, 0.0f, 1.0f) * (maxB.x - minB.x);
-    float localZ = minB.z + std::clamp(v, 0.0f, 1.0f) * (maxB.z - minB.z);
-    float localY = (minB.y + maxB.y) * 0.5f;
-    Math::Vector3 localPoint(localX, localY, localZ);
-    return target.binding.entity->getTransform()->getWorldMatrix().transformPoint(localPoint);
+    switch (sculptTool) {
+        case TerrainSculptToolCpp::Smooth: return Math::Vector3(0.42f, 0.78f, 0.96f);
+        case TerrainSculptToolCpp::Flatten: return Math::Vector3(0.92f, 0.86f, 0.58f);
+        case TerrainSculptToolCpp::Raise:
+        default:
+            return Math::Vector3(0.98f, 0.56f, 0.32f);
+    }
+}
+
+static void ApplyTerrainSculptSample(TerrainPaintTarget& target,
+                                     float u,
+                                     float v,
+                                     const TerrainBrushParams& brush,
+                                     const TerrainBrushMaskSampler& maskSampler,
+                                     TerrainSculptToolCpp sculptTool,
+                                     TerrainSculptStrokeState& sculptState,
+                                     bool beginStroke) {
+    if (!target.binding.entity || !target.mesh) {
+        return;
+    }
+
+    auto vertices = target.mesh->getVertices();
+    if (vertices.empty()) {
+        return;
+    }
+
+    uint32_t widthVerts = 0;
+    uint32_t heightVerts = 0;
+    if (!InferTerrainGridVertexDimensions(*target.mesh, widthVerts, heightVerts) ||
+        widthVerts == 0 || heightVerts == 0) {
+        return;
+    }
+
+    const Math::Vector3 minB = target.mesh->getBoundsMin();
+    const Math::Vector3 maxB = target.mesh->getBoundsMax();
+    const float localWidth = std::max(maxB.x - minB.x, 1e-6f);
+    const float localDepth = std::max(maxB.z - minB.z, 1e-6f);
+    const Math::Vector3 scale = target.binding.entity->getTransform()->getScale();
+    const float worldScaleX = std::max(std::abs(scale.x), 1e-4f);
+    const float worldScaleZ = std::max(std::abs(scale.z), 1e-4f);
+    const float localRadiusX = std::max(brush.radius / worldScaleX, 1e-4f);
+    const float localRadiusZ = std::max(brush.radius / worldScaleZ, 1e-4f);
+    const float centerX = minB.x + std::clamp(u, 0.0f, 1.0f) * localWidth;
+    const float centerZ = minB.z + std::clamp(v, 0.0f, 1.0f) * localDepth;
+
+    const std::vector<Vertex> originalVertices = vertices;
+    const float strength = std::clamp(brush.strength, 0.0f, 1.0f);
+    const float signedRaise = brush.invert ? -1.0f : 1.0f;
+    const float displacementScale = std::max(brush.radius * 0.15f, 0.02f) * strength;
+
+    if (sculptTool == TerrainSculptToolCpp::Flatten && beginStroke && !sculptState.hasFlattenHeight) {
+        const size_t centerIndex = static_cast<size_t>(std::round(std::clamp(v, 0.0f, 1.0f) * float(heightVerts - 1))) * widthVerts
+            + static_cast<size_t>(std::round(std::clamp(u, 0.0f, 1.0f) * float(widthVerts - 1)));
+        if (centerIndex < originalVertices.size()) {
+            sculptState.flattenHeight = originalVertices[centerIndex].position.y;
+            sculptState.hasFlattenHeight = true;
+        }
+    }
+
+    for (uint32_t row = 0; row < heightVerts; ++row) {
+        for (uint32_t col = 0; col < widthVerts; ++col) {
+            const size_t index = static_cast<size_t>(row) * widthVerts + col;
+            Vertex& vertex = vertices[index];
+            const Vertex& original = originalVertices[index];
+
+            const float dx = (vertex.position.x - centerX) / localRadiusX;
+            const float dz = (vertex.position.z - centerZ) / localRadiusZ;
+            if (std::max(std::abs(dx), std::abs(dz)) > 1.0f) {
+                continue;
+            }
+
+            const float d = maskSampler.squareDomain
+                ? std::max(std::abs(dx), std::abs(dz))
+                : std::sqrt(dx * dx + dz * dz);
+            if (d > 1.0f) {
+                continue;
+            }
+
+            const float mask = SampleTerrainBrushMask(
+                maskSampler,
+                std::clamp(dx * 0.5f + 0.5f, 0.0f, 1.0f),
+                std::clamp(dz * 0.5f + 0.5f, 0.0f, 1.0f),
+                dx,
+                dz,
+                brush.hardness
+            );
+            if (mask <= 1e-6f) {
+                continue;
+            }
+
+            const float weight = BrushFalloff(d, brush.hardness) * mask;
+            if (weight <= 1e-6f) {
+                continue;
+            }
+
+            switch (sculptTool) {
+                case TerrainSculptToolCpp::Smooth: {
+                    float sum = 0.0f;
+                    float count = 0.0f;
+                    const int rowStart = std::max<int>(0, static_cast<int>(row) - 1);
+                    const int rowEnd = std::min<int>(static_cast<int>(heightVerts) - 1, static_cast<int>(row) + 1);
+                    const int colStart = std::max<int>(0, static_cast<int>(col) - 1);
+                    const int colEnd = std::min<int>(static_cast<int>(widthVerts) - 1, static_cast<int>(col) + 1);
+                    for (int sampleRow = rowStart; sampleRow <= rowEnd; ++sampleRow) {
+                        for (int sampleCol = colStart; sampleCol <= colEnd; ++sampleCol) {
+                            const size_t sampleIndex = static_cast<size_t>(sampleRow) * widthVerts + static_cast<size_t>(sampleCol);
+                            sum += originalVertices[sampleIndex].position.y;
+                            count += 1.0f;
+                        }
+                    }
+                    const float avg = count > 0.0f ? (sum / count) : original.position.y;
+                    const float alpha = std::clamp(weight * strength, 0.0f, 1.0f);
+                    vertex.position.y = original.position.y + (avg - original.position.y) * alpha;
+                    break;
+                }
+                case TerrainSculptToolCpp::Flatten: {
+                    if (!sculptState.hasFlattenHeight) {
+                        break;
+                    }
+                    const float alpha = std::clamp(weight * strength, 0.0f, 1.0f);
+                    vertex.position.y = original.position.y + (sculptState.flattenHeight - original.position.y) * alpha;
+                    break;
+                }
+                case TerrainSculptToolCpp::Raise:
+                default:
+                    vertex.position.y = original.position.y + signedRaise * displacementScale * weight;
+                    break;
+            }
+        }
+    }
+
+    target.mesh->setVertices(vertices);
+    target.mesh->calculateNormals();
+    target.mesh->calculateTangents();
+    target.binding.renderer->setMesh(target.mesh);
+}
+
+static void ApplyTerrainSculptStroke(TerrainSculptStrokeState& sculptState,
+                                     TerrainPaintTarget& target,
+                                     float u,
+                                     float v,
+                                     const TerrainBrushParams& brush,
+                                     const TerrainBrushMaskSampler& maskSampler,
+                                     TerrainSculptToolCpp sculptTool,
+                                     bool beginStroke) {
+    if (beginStroke || !sculptState.hasLastUV) {
+        ApplyTerrainSculptSample(target, u, v, brush, maskSampler, sculptTool, sculptState, true);
+        sculptState.lastU = u;
+        sculptState.lastV = v;
+        sculptState.hasLastUV = true;
+        return;
+    }
+
+    const Math::Vector3 minB = target.mesh->getBoundsMin();
+    const Math::Vector3 maxB = target.mesh->getBoundsMax();
+    const float localWidth = std::max(maxB.x - minB.x, 1e-6f);
+    const float localDepth = std::max(maxB.z - minB.z, 1e-6f);
+    const Math::Vector3 scale = target.binding.entity->getTransform()->getScale();
+    const float worldScaleX = std::max(std::abs(scale.x), 1e-4f);
+    const float worldScaleZ = std::max(std::abs(scale.z), 1e-4f);
+    const float localRadiusX = std::max(brush.radius / worldScaleX, 1e-4f);
+    const float localRadiusZ = std::max(brush.radius / worldScaleZ, 1e-4f);
+    const float radiusUvX = localRadiusX / localWidth;
+    const float radiusUvY = localRadiusZ / localDepth;
+    const float spacingUv = std::max(0.0005f, std::min(radiusUvX, radiusUvY) * std::clamp(brush.spacing, 0.05f, 1.0f));
+    const float du = u - sculptState.lastU;
+    const float dv = v - sculptState.lastV;
+    const float distanceUv = std::sqrt(du * du + dv * dv);
+    const int steps = std::max(1, static_cast<int>(std::ceil(distanceUv / spacingUv)));
+
+    for (int i = 1; i <= steps; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(steps);
+        const float sampleU = sculptState.lastU + du * t;
+        const float sampleV = sculptState.lastV + dv * t;
+        ApplyTerrainSculptSample(target, sampleU, sampleV, brush, maskSampler, sculptTool, sculptState, false);
+    }
+    sculptState.lastU = u;
+    sculptState.lastV = v;
+    sculptState.hasLastUV = true;
 }
 
 static std::shared_ptr<Texture2D> BuildTerrainBrushPreviewTexture(Renderer* renderer,
@@ -1795,6 +2267,8 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     bool _hasPendingMouseDrag;
     TerrainPaintStrokeState _terrainPaintState;
     std::unordered_map<std::string, TerrainPaintHistoryState> _terrainPaintHistory;
+    TerrainSculptStrokeState _terrainSculptState;
+    std::unordered_map<std::string, TerrainSculptHistoryState> _terrainSculptHistory;
     std::unordered_map<std::string, TerrainBrushMaskImage> _terrainMaskCache;
     TerrainBrushPreviewState _terrainBrushPreview;
 }
@@ -2587,12 +3061,28 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     _terrainBrushPreview = TerrainBrushPreviewState{};
 }
 
+- (void)finishActiveTerrainStrokeInternal {
+    if (_terrainPaintState.active) {
+        CommitTerrainPaintState(_terrainPaintState);
+        _terrainPaintState.active = false;
+        _terrainPaintState.hasLastUV = false;
+    }
+    if (_terrainSculptState.active) {
+        _terrainSculptState.active = false;
+        _terrainSculptState.hasLastUV = false;
+        _terrainSculptState.hasFlattenHeight = false;
+    }
+}
+
 - (void)beginTerrainPaintForEntity:(NSString *)uuid
                                   x:(float)x
                                   y:(float)y
                         screenWidth:(float)width
                        screenHeight:(float)height
+                              mode:(NSInteger)mode
                               layer:(NSInteger)layer
+                         sculptTool:(NSInteger)sculptTool
+                    sculptResolution:(NSInteger)sculptResolution
                              radius:(float)radius
                            hardness:(float)hardness
                            strength:(float)strength
@@ -2608,29 +3098,14 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (!SceneManager::getInstance().isSceneView() || SceneManager::getInstance().isPlaying()) {
             return;
         }
+        TerrainBrushModeCpp brushMode = TerrainBrushModeFromInt(static_cast<int>(mode));
+        TerrainSculptToolCpp sculptToolMode = TerrainSculptToolFromInt(static_cast<int>(sculptTool));
         std::string requestedEntityUUID = [uuid UTF8String];
         TerrainPaintTarget target;
         std::string entityUUID;
         float u = 0.0f;
         float v = 0.0f;
         if (!ResolveTerrainPaintTargetAtCursor(requestedEntityUUID, x, y, width, height, target, entityUUID, u, v)) {
-            return;
-        }
-
-        if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
-            if (Renderer* renderer = _engine->getRenderer()) {
-                TerrainPaintTarget previousTarget;
-                if (ResolveTerrainPaintTarget(_terrainPaintState.entityUUID, previousTarget)) {
-                    UploadTerrainPaintTextureIfNeeded(_terrainPaintState, previousTarget, renderer, true);
-                }
-            }
-            CommitTerrainPaintState(_terrainPaintState);
-            _terrainPaintState.active = false;
-            _terrainPaintState.hasLastUV = false;
-        }
-
-        Renderer* renderer = _engine->getRenderer();
-        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
             return;
         }
 
@@ -2650,16 +3125,51 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         TerrainBrushMaskSampler maskSampler;
         ConfigureTerrainBrushMaskSampler(maskSampler, brush, _terrainMaskCache);
 
-        auto& history = _terrainPaintHistory[entityUUID];
-        EnsureTerrainHistoryCompatible(history, _terrainPaintState);
-        PushTerrainUndoSnapshot(history, _terrainPaintState.pixels);
+        if (brushMode == TerrainBrushModeCpp::Paint) {
+            if (_terrainSculptState.active ||
+                (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID)) {
+                [self finishActiveTerrainStrokeInternal];
+            }
 
-        _terrainPaintState.active = true;
-        _terrainPaintState.entityUUID = entityUUID;
-        _terrainPaintState.hasLastUV = false;
+            Renderer* renderer = _engine->getRenderer();
+            if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+                return;
+            }
 
-        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, true);
-        UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, renderer, true);
+            auto& history = _terrainPaintHistory[entityUUID];
+            EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+            PushTerrainUndoSnapshot(history, _terrainPaintState.pixels);
+
+            _terrainPaintState.active = true;
+            _terrainPaintState.entityUUID = entityUUID;
+            _terrainPaintState.hasLastUV = false;
+            _terrainSculptState.active = false;
+
+            ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, true);
+            UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, renderer, true);
+            return;
+        }
+
+        if (_terrainPaintState.active ||
+            (_terrainSculptState.active && _terrainSculptState.entityUUID != entityUUID)) {
+            [self finishActiveTerrainStrokeInternal];
+        }
+
+        if (!EnsureTerrainSculptGrid(target, static_cast<int>(sculptResolution))) {
+            return;
+        }
+
+        auto& history = _terrainSculptHistory[entityUUID];
+        EnsureTerrainSculptHistoryCompatible(history, target);
+        PushTerrainSculptUndoSnapshot(history, CaptureTerrainVertexHeights(target.mesh));
+
+        _terrainSculptState.active = true;
+        _terrainSculptState.entityUUID = entityUUID;
+        _terrainSculptState.hasLastUV = false;
+        _terrainSculptState.hasFlattenHeight = false;
+        _terrainPaintState.active = false;
+
+        ApplyTerrainSculptStroke(_terrainSculptState, target, u, v, brush, maskSampler, sculptToolMode, true);
     }];
 }
 
@@ -2668,7 +3178,10 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
                                    y:(float)y
                          screenWidth:(float)width
                         screenHeight:(float)height
+                               mode:(NSInteger)mode
                                layer:(NSInteger)layer
+                          sculptTool:(NSInteger)sculptTool
+                     sculptResolution:(NSInteger)sculptResolution
                               radius:(float)radius
                             hardness:(float)hardness
                             strength:(float)strength
@@ -2684,32 +3197,14 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (!SceneManager::getInstance().isSceneView() || SceneManager::getInstance().isPlaying()) {
             return;
         }
+        TerrainBrushModeCpp brushMode = TerrainBrushModeFromInt(static_cast<int>(mode));
+        TerrainSculptToolCpp sculptToolMode = TerrainSculptToolFromInt(static_cast<int>(sculptTool));
         std::string requestedEntityUUID = [uuid UTF8String];
         TerrainPaintTarget target;
         std::string entityUUID;
         float u = 0.0f;
         float v = 0.0f;
         if (!ResolveTerrainPaintTargetAtCursor(requestedEntityUUID, x, y, width, height, target, entityUUID, u, v)) {
-            return;
-        }
-
-        bool beginStroke = false;
-        if (!_terrainPaintState.active || _terrainPaintState.entityUUID != entityUUID) {
-            if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
-                if (Renderer* previousRenderer = _engine->getRenderer()) {
-                    TerrainPaintTarget previousTarget;
-                    if (ResolveTerrainPaintTarget(_terrainPaintState.entityUUID, previousTarget)) {
-                        UploadTerrainPaintTextureIfNeeded(_terrainPaintState, previousTarget, previousRenderer, true);
-                    }
-                }
-                CommitTerrainPaintState(_terrainPaintState);
-                _terrainPaintState.active = false;
-            }
-            beginStroke = true;
-        }
-
-        Renderer* renderer = _engine->getRenderer();
-        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
             return;
         }
 
@@ -2729,37 +3224,86 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         TerrainBrushMaskSampler maskSampler;
         ConfigureTerrainBrushMaskSampler(maskSampler, brush, _terrainMaskCache);
 
-        if (beginStroke) {
-            auto& history = _terrainPaintHistory[entityUUID];
-            EnsureTerrainHistoryCompatible(history, _terrainPaintState);
-            PushTerrainUndoSnapshot(history, _terrainPaintState.pixels);
+        if (brushMode == TerrainBrushModeCpp::Paint) {
+            bool beginStroke = false;
+            if (_terrainSculptState.active) {
+                [self finishActiveTerrainStrokeInternal];
+                beginStroke = true;
+            }
+            if (!_terrainPaintState.active || _terrainPaintState.entityUUID != entityUUID) {
+                if (_terrainPaintState.active && _terrainPaintState.entityUUID != entityUUID) {
+                    Renderer* previousRenderer = _engine->getRenderer();
+                    TerrainPaintTarget previousTarget;
+                    if (previousRenderer && ResolveTerrainPaintTarget(_terrainPaintState.entityUUID, previousTarget)) {
+                        UploadTerrainPaintTextureIfNeeded(_terrainPaintState, previousTarget, previousRenderer, true);
+                    }
+                    CommitTerrainPaintState(_terrainPaintState);
+                    _terrainPaintState.active = false;
+                }
+                beginStroke = true;
+            }
+
+            Renderer* renderer = _engine->getRenderer();
+            if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+                return;
+            }
+
+            if (beginStroke) {
+                auto& history = _terrainPaintHistory[entityUUID];
+                EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+                PushTerrainUndoSnapshot(history, _terrainPaintState.pixels);
+            }
+
+            _terrainPaintState.active = true;
+            _terrainPaintState.entityUUID = entityUUID;
+            if (beginStroke) {
+                _terrainPaintState.hasLastUV = false;
+            }
+
+            ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, beginStroke);
+            UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, renderer, beginStroke);
+            return;
         }
 
-        _terrainPaintState.active = true;
-        _terrainPaintState.entityUUID = entityUUID;
-        if (beginStroke) {
-            _terrainPaintState.hasLastUV = false;
+        bool beginStroke = false;
+        if (_terrainPaintState.active) {
+            [self finishActiveTerrainStrokeInternal];
+            beginStroke = true;
+        }
+        if (!_terrainSculptState.active || _terrainSculptState.entityUUID != entityUUID) {
+            if (_terrainSculptState.active && _terrainSculptState.entityUUID != entityUUID) {
+                [self finishActiveTerrainStrokeInternal];
+            }
+            beginStroke = true;
         }
 
-        ApplyTerrainBrushStroke(_terrainPaintState, target, u, v, brush, maskSampler, beginStroke);
-        UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, renderer, beginStroke);
+        if (!EnsureTerrainSculptGrid(target, static_cast<int>(sculptResolution))) {
+            return;
+        }
+
+        if (beginStroke) {
+            auto& history = _terrainSculptHistory[entityUUID];
+            EnsureTerrainSculptHistoryCompatible(history, target);
+            PushTerrainSculptUndoSnapshot(history, CaptureTerrainVertexHeights(target.mesh));
+            _terrainSculptState.hasLastUV = false;
+            _terrainSculptState.hasFlattenHeight = false;
+        }
+
+        _terrainSculptState.active = true;
+        _terrainSculptState.entityUUID = entityUUID;
+        ApplyTerrainSculptStroke(_terrainSculptState, target, u, v, brush, maskSampler, sculptToolMode, beginStroke);
     }];
 }
 
 - (void)endTerrainPaint {
     [self performAsync:^{
-        if (!_terrainPaintState.active) {
-            return;
-        }
-        if (_engine && !_terrainPaintState.entityUUID.empty()) {
+        if (_engine && _terrainPaintState.active && !_terrainPaintState.entityUUID.empty()) {
             TerrainPaintTarget target;
             if (ResolveTerrainPaintTarget(_terrainPaintState.entityUUID, target)) {
                 UploadTerrainPaintTextureIfNeeded(_terrainPaintState, target, _engine->getRenderer(), true);
             }
         }
-        CommitTerrainPaintState(_terrainPaintState);
-        _terrainPaintState.active = false;
-        _terrainPaintState.hasLastUV = false;
+        [self finishActiveTerrainStrokeInternal];
     }];
 }
 
@@ -2768,7 +3312,9 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
                                          y:(float)y
                                screenWidth:(float)width
                               screenHeight:(float)height
+                                      mode:(NSInteger)mode
                                      layer:(NSInteger)layer
+                               sculptTool:(NSInteger)sculptTool
                                     radius:(float)radius
                                   hardness:(float)hardness
                                  maskPreset:(NSInteger)maskPreset
@@ -2783,12 +3329,15 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             return;
         }
 
+        TerrainBrushModeCpp brushMode = TerrainBrushModeFromInt(static_cast<int>(mode));
+        TerrainSculptToolCpp sculptToolMode = TerrainSculptToolFromInt(static_cast<int>(sculptTool));
         std::string requestedEntityUUID = [uuid UTF8String];
         TerrainPaintTarget target;
         float u = 0.0f;
         float v = 0.0f;
+        Math::Vector3 worldHit = Math::Vector3::Zero;
         std::string entityUUID;
-        if (!ResolveTerrainPaintTargetAtCursor(requestedEntityUUID, x, y, width, height, target, entityUUID, u, v)) {
+        if (!ResolveTerrainPaintTargetAtCursor(requestedEntityUUID, x, y, width, height, target, entityUUID, u, v, &worldHit)) {
             [self clearTerrainBrushPreviewInternal];
             return;
         }
@@ -2800,7 +3349,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         }
 
         TerrainBrushParams brush;
-        brush.layer = static_cast<int>(layer);
+        brush.layer = brushMode == TerrainBrushModeCpp::Paint ? static_cast<int>(layer) : 0;
         brush.radius = std::max(0.05f, radius);
         brush.hardness = std::clamp(hardness, 0.0f, 1.0f);
         brush.maskPreset = static_cast<int>(maskPreset);
@@ -2812,12 +3361,16 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         ConfigureTerrainBrushMaskSampler(sampler, brush, _terrainMaskCache);
 
         if (!_terrainBrushPreview.texture ||
+            _terrainBrushPreview.mode != static_cast<int>(brushMode) ||
             _terrainBrushPreview.layer != brush.layer ||
+            _terrainBrushPreview.sculptTool != static_cast<int>(sculptToolMode) ||
             std::abs(_terrainBrushPreview.hardness - brush.hardness) > 0.0001f ||
             _terrainBrushPreview.maskPreset != brush.maskPreset ||
             _terrainBrushPreview.maskPath != brush.maskPath) {
             _terrainBrushPreview.texture = BuildTerrainBrushPreviewTexture(renderer, brush, sampler);
+            _terrainBrushPreview.mode = static_cast<int>(brushMode);
             _terrainBrushPreview.layer = brush.layer;
+            _terrainBrushPreview.sculptTool = static_cast<int>(sculptToolMode);
             _terrainBrushPreview.hardness = brush.hardness;
             _terrainBrushPreview.maskPreset = brush.maskPreset;
             _terrainBrushPreview.maskPath = brush.maskPath;
@@ -2840,7 +3393,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         decal->setNormalTexture(nullptr);
         decal->setORMTexture(nullptr);
         decal->setMaskTexture(nullptr);
-        Math::Vector3 previewColor = TerrainLayerPreviewColor(brush.layer);
+        Math::Vector3 previewColor = TerrainBrushPreviewColor(brushMode, brush.layer, sculptToolMode);
         decal->setTint(Math::Vector4(previewColor.x, previewColor.y, previewColor.z, 1.0f));
         decal->setOpacity(0.95f);
         decal->setEdgeSoftness(0.02f);
@@ -2860,10 +3413,9 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
             normal = normal.normalized();
         }
 
-        Math::Vector3 hitWorld = TerrainUVToWorldPoint(target, u, v);
         float decalThickness = 0.12f;
         float diameter = std::max(brush.radius * 2.0f, 0.05f);
-        previewTransform->setPosition(hitWorld + normal * 0.03f);
+        previewTransform->setPosition(worldHit + normal * 0.03f);
         Math::Quaternion align = targetTransform->getRotation()
             * Math::Quaternion::FromEulerAngles(Math::Vector3(-90.0f * Math::DEG_TO_RAD, 0.0f, 0.0f));
         previewTransform->setRotation(align);
@@ -2877,7 +3429,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
-- (BOOL)undoTerrainPaintForEntity:(NSString *)uuid {
+- (BOOL)undoTerrainStrokeForEntity:(NSString *)uuid mode:(NSInteger)mode {
     return [self performSyncBool:^BOOL {
         if (!_engine || !uuid || uuid.length == 0) {
             return NO;
@@ -2885,58 +3437,83 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (SceneManager::getInstance().isPlaying()) {
             return NO;
         }
+        TerrainBrushModeCpp brushMode = TerrainBrushModeFromInt(static_cast<int>(mode));
         std::string entityUUID = [uuid UTF8String];
-
-        if (_terrainPaintState.active && _terrainPaintState.entityUUID == entityUUID) {
-            CommitTerrainPaintState(_terrainPaintState);
-            _terrainPaintState.active = false;
-            _terrainPaintState.hasLastUV = false;
-        }
 
         TerrainPaintTarget target;
         if (!ResolveTerrainPaintTarget(entityUUID, target)) {
             return NO;
         }
-        Renderer* renderer = _engine->getRenderer();
-        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
-            return NO;
+        if (brushMode == TerrainBrushModeCpp::Paint) {
+            if (_terrainPaintState.active && _terrainPaintState.entityUUID == entityUUID) {
+                CommitTerrainPaintState(_terrainPaintState);
+                _terrainPaintState.active = false;
+                _terrainPaintState.hasLastUV = false;
+            }
+
+            Renderer* renderer = _engine->getRenderer();
+            if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+                return NO;
+            }
+
+            auto it = _terrainPaintHistory.find(entityUUID);
+            if (it == _terrainPaintHistory.end()) {
+                return NO;
+            }
+            TerrainPaintHistoryState& history = it->second;
+            EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+            if (history.undoStack.empty()) {
+                return NO;
+            }
+
+            PushTerrainRedoSnapshot(history, _terrainPaintState.pixels);
+            std::vector<unsigned char> snapshot = std::move(history.undoStack.back());
+            history.undoStack.pop_back();
+            if (snapshot.size() != _terrainPaintState.pixels.size()) {
+                return NO;
+            }
+
+            _terrainPaintState.pixels = std::move(snapshot);
+            _terrainPaintState.dirty = true;
+
+            if (renderer && renderer->getTextureLoader()) {
+                renderer->getTextureLoader()->updateTextureFromRGBA8(
+                    target.material->getTerrainControlTexture(),
+                    _terrainPaintState.pixels.data(),
+                    _terrainPaintState.width,
+                    _terrainPaintState.height,
+                    true
+                );
+            }
+            CommitTerrainPaintState(_terrainPaintState);
+            return YES;
         }
 
-        auto it = _terrainPaintHistory.find(entityUUID);
-        if (it == _terrainPaintHistory.end()) {
+        if (_terrainSculptState.active && _terrainSculptState.entityUUID == entityUUID) {
+            _terrainSculptState.active = false;
+            _terrainSculptState.hasLastUV = false;
+            _terrainSculptState.hasFlattenHeight = false;
+        }
+
+        auto it = _terrainSculptHistory.find(entityUUID);
+        if (it == _terrainSculptHistory.end()) {
             return NO;
         }
-        TerrainPaintHistoryState& history = it->second;
-        EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+        TerrainSculptHistoryState& history = it->second;
+        EnsureTerrainSculptHistoryCompatible(history, target);
         if (history.undoStack.empty()) {
             return NO;
         }
 
-        PushTerrainRedoSnapshot(history, _terrainPaintState.pixels);
-        std::vector<unsigned char> snapshot = std::move(history.undoStack.back());
+        std::vector<float> currentHeights = CaptureTerrainVertexHeights(target.mesh);
+        PushTerrainSculptRedoSnapshot(history, currentHeights);
+        std::vector<float> snapshot = std::move(history.undoStack.back());
         history.undoStack.pop_back();
-        if (snapshot.size() != _terrainPaintState.pixels.size()) {
-            return NO;
-        }
-
-        _terrainPaintState.pixels = std::move(snapshot);
-        _terrainPaintState.dirty = true;
-
-        if (renderer && renderer->getTextureLoader()) {
-            renderer->getTextureLoader()->updateTextureFromRGBA8(
-                target.material->getTerrainControlTexture(),
-                _terrainPaintState.pixels.data(),
-                _terrainPaintState.width,
-                _terrainPaintState.height,
-                true
-            );
-        }
-        CommitTerrainPaintState(_terrainPaintState);
-        return YES;
+        return ApplyTerrainVertexHeights(target, snapshot) ? YES : NO;
     }];
 }
 
-- (BOOL)redoTerrainPaintForEntity:(NSString *)uuid {
+- (BOOL)redoTerrainStrokeForEntity:(NSString *)uuid mode:(NSInteger)mode {
     return [self performSyncBool:^BOOL {
         if (!_engine || !uuid || uuid.length == 0) {
             return NO;
@@ -2944,62 +3521,96 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         if (SceneManager::getInstance().isPlaying()) {
             return NO;
         }
+        TerrainBrushModeCpp brushMode = TerrainBrushModeFromInt(static_cast<int>(mode));
         std::string entityUUID = [uuid UTF8String];
-
-        if (_terrainPaintState.active && _terrainPaintState.entityUUID == entityUUID) {
-            CommitTerrainPaintState(_terrainPaintState);
-            _terrainPaintState.active = false;
-            _terrainPaintState.hasLastUV = false;
-        }
 
         TerrainPaintTarget target;
         if (!ResolveTerrainPaintTarget(entityUUID, target)) {
             return NO;
         }
-        Renderer* renderer = _engine->getRenderer();
-        if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
-            return NO;
+
+        if (brushMode == TerrainBrushModeCpp::Paint) {
+            if (_terrainPaintState.active && _terrainPaintState.entityUUID == entityUUID) {
+                CommitTerrainPaintState(_terrainPaintState);
+                _terrainPaintState.active = false;
+                _terrainPaintState.hasLastUV = false;
+            }
+
+            Renderer* renderer = _engine->getRenderer();
+            if (!EnsureTerrainControlPaintData(_terrainPaintState, target, renderer)) {
+                return NO;
+            }
+
+            auto it = _terrainPaintHistory.find(entityUUID);
+            if (it == _terrainPaintHistory.end()) {
+                return NO;
+            }
+            TerrainPaintHistoryState& history = it->second;
+            EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+            if (history.redoStack.empty()) {
+                return NO;
+            }
+
+            if (!history.undoStack.empty() && SnapshotEquals(history.undoStack.back(), _terrainPaintState.pixels)) {
+                // keep current top
+            } else {
+                history.undoStack.push_back(_terrainPaintState.pixels);
+                if (history.undoStack.size() > kTerrainPaintUndoLimit) {
+                    history.undoStack.erase(history.undoStack.begin());
+                }
+            }
+
+            std::vector<unsigned char> snapshot = std::move(history.redoStack.back());
+            history.redoStack.pop_back();
+            if (snapshot.size() != _terrainPaintState.pixels.size()) {
+                return NO;
+            }
+
+            _terrainPaintState.pixels = std::move(snapshot);
+            _terrainPaintState.dirty = true;
+
+            if (renderer && renderer->getTextureLoader()) {
+                renderer->getTextureLoader()->updateTextureFromRGBA8(
+                    target.material->getTerrainControlTexture(),
+                    _terrainPaintState.pixels.data(),
+                    _terrainPaintState.width,
+                    _terrainPaintState.height,
+                    true
+                );
+            }
+            CommitTerrainPaintState(_terrainPaintState);
+            return YES;
         }
 
-        auto it = _terrainPaintHistory.find(entityUUID);
-        if (it == _terrainPaintHistory.end()) {
+        if (_terrainSculptState.active && _terrainSculptState.entityUUID == entityUUID) {
+            _terrainSculptState.active = false;
+            _terrainSculptState.hasLastUV = false;
+            _terrainSculptState.hasFlattenHeight = false;
+        }
+
+        auto it = _terrainSculptHistory.find(entityUUID);
+        if (it == _terrainSculptHistory.end()) {
             return NO;
         }
-        TerrainPaintHistoryState& history = it->second;
-        EnsureTerrainHistoryCompatible(history, _terrainPaintState);
+        TerrainSculptHistoryState& history = it->second;
+        EnsureTerrainSculptHistoryCompatible(history, target);
         if (history.redoStack.empty()) {
             return NO;
         }
 
-        if (!history.undoStack.empty() && SnapshotEquals(history.undoStack.back(), _terrainPaintState.pixels)) {
-            // no-op, keep current top
+        std::vector<float> currentHeights = CaptureTerrainVertexHeights(target.mesh);
+        if (!history.undoStack.empty() && FloatSnapshotEquals(history.undoStack.back(), currentHeights)) {
+            // keep current top
         } else {
-            history.undoStack.push_back(_terrainPaintState.pixels);
+            history.undoStack.push_back(currentHeights);
             if (history.undoStack.size() > kTerrainPaintUndoLimit) {
                 history.undoStack.erase(history.undoStack.begin());
             }
         }
 
-        std::vector<unsigned char> snapshot = std::move(history.redoStack.back());
+        std::vector<float> snapshot = std::move(history.redoStack.back());
         history.redoStack.pop_back();
-        if (snapshot.size() != _terrainPaintState.pixels.size()) {
-            return NO;
-        }
-
-        _terrainPaintState.pixels = std::move(snapshot);
-        _terrainPaintState.dirty = true;
-
-        if (renderer && renderer->getTextureLoader()) {
-            renderer->getTextureLoader()->updateTextureFromRGBA8(
-                target.material->getTerrainControlTexture(),
-                _terrainPaintState.pixels.data(),
-                _terrainPaintState.width,
-                _terrainPaintState.height,
-                true
-            );
-        }
-        CommitTerrainPaintState(_terrainPaintState);
-        return YES;
+        return ApplyTerrainVertexHeights(target, snapshot) ? YES : NO;
     }];
 }
 
@@ -4013,11 +4624,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (BOOL)saveSceneAtPath:(NSString *)path {
     return [self performSyncBool:^BOOL {
-        if (_terrainPaintState.active) {
-            CommitTerrainPaintState(_terrainPaintState);
-            _terrainPaintState.active = false;
-            _terrainPaintState.hasLastUV = false;
-        }
+        [self finishActiveTerrainStrokeInternal];
         [self clearTerrainBrushPreviewInternal];
         Scene* scene = SceneManager::getInstance().getActiveScene();
         if (!scene || !path) {
@@ -4030,11 +4637,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (BOOL)saveCookedRuntimeSceneAtPath:(NSString *)path includeEditorOnly:(BOOL)includeEditorOnly {
     return [self performSyncBool:^BOOL {
-        if (_terrainPaintState.active) {
-            CommitTerrainPaintState(_terrainPaintState);
-            _terrainPaintState.active = false;
-            _terrainPaintState.hasLastUV = false;
-        }
+        [self finishActiveTerrainStrokeInternal];
         [self clearTerrainBrushPreviewInternal];
         Scene* scene = SceneManager::getInstance().getActiveScene();
         if (!scene || !path) {
@@ -4046,11 +4649,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (BOOL)loadSceneAtPath:(NSString *)path {
     return [self performSyncBool:^BOOL {
-        if (_terrainPaintState.active) {
-            CommitTerrainPaintState(_terrainPaintState);
-            _terrainPaintState.active = false;
-            _terrainPaintState.hasLastUV = false;
-        }
+        [self finishActiveTerrainStrokeInternal];
         [self clearTerrainBrushPreviewInternal];
         Scene* scene = SceneManager::getInstance().getActiveScene();
         if (!scene || !path) {
@@ -4063,11 +4662,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
 
 - (void)enterPlayMode {
     [self performAsync:^{
-        if (_terrainPaintState.active) {
-            CommitTerrainPaintState(_terrainPaintState);
-            _terrainPaintState.active = false;
-            _terrainPaintState.hasLastUV = false;
-        }
+        [self finishActiveTerrainStrokeInternal];
         [self clearTerrainBrushPreviewInternal];
         SceneManager::getInstance().enterPlayMode();
     }];

@@ -48,7 +48,10 @@ struct MetalView: NSViewRepresentable {
         metalView.inputDelegate = isActive ? context.coordinator : nil
         metalView.terrainPaintEnabled = terrainPaintConfig.enabled
         metalView.terrainPaintTargetUUID = terrainPaintConfig.targetEntityUUID
+        metalView.terrainBrushMode = terrainPaintConfig.mode
         metalView.terrainPaintLayer = terrainPaintConfig.layer
+        metalView.terrainSculptTool = terrainPaintConfig.sculptTool
+        metalView.terrainSculptResolution = terrainPaintConfig.sculptResolution
         metalView.terrainBrushRadius = terrainPaintConfig.radius
         metalView.terrainBrushHardness = terrainPaintConfig.hardness
         metalView.terrainBrushStrength = terrainPaintConfig.strength
@@ -73,7 +76,10 @@ struct MetalView: NSViewRepresentable {
         nsView.inputDelegate = isActive ? context.coordinator : nil
         nsView.terrainPaintEnabled = terrainPaintConfig.enabled
         nsView.terrainPaintTargetUUID = terrainPaintConfig.targetEntityUUID
+        nsView.terrainBrushMode = terrainPaintConfig.mode
         nsView.terrainPaintLayer = terrainPaintConfig.layer
+        nsView.terrainSculptTool = terrainPaintConfig.sculptTool
+        nsView.terrainSculptResolution = terrainPaintConfig.sculptResolution
         nsView.terrainBrushRadius = terrainPaintConfig.radius
         nsView.terrainBrushHardness = terrainPaintConfig.hardness
         nsView.terrainBrushStrength = terrainPaintConfig.strength
@@ -310,7 +316,10 @@ struct MetalView: NSViewRepresentable {
         func beginTerrainPaint(at point: CGPoint,
                                viewSize: CGSize,
                                entityUUID: String,
+                               mode: TerrainBrushMode,
                                layer: Int,
+                               sculptTool: TerrainSculptTool,
+                               sculptResolution: Int,
                                radius: Float,
                                hardness: Float,
                                strength: Float,
@@ -331,7 +340,10 @@ struct MetalView: NSViewRepresentable {
                 y: y,
                 screenWidth: width,
                 screenHeight: height,
+                mode: mode.rawValue,
                 layer: layer,
+                sculptTool: sculptTool.rawValue,
+                sculptResolution: sculptResolution,
                 radius: radius,
                 hardness: hardness,
                 strength: strength,
@@ -346,7 +358,10 @@ struct MetalView: NSViewRepresentable {
         func updateTerrainPaint(at point: CGPoint,
                                 viewSize: CGSize,
                                 entityUUID: String,
+                                mode: TerrainBrushMode,
                                 layer: Int,
+                                sculptTool: TerrainSculptTool,
+                                sculptResolution: Int,
                                 radius: Float,
                                 hardness: Float,
                                 strength: Float,
@@ -367,7 +382,10 @@ struct MetalView: NSViewRepresentable {
                 y: y,
                 screenWidth: width,
                 screenHeight: height,
+                mode: mode.rawValue,
                 layer: layer,
+                sculptTool: sculptTool.rawValue,
+                sculptResolution: sculptResolution,
                 radius: radius,
                 hardness: hardness,
                 strength: strength,
@@ -382,7 +400,9 @@ struct MetalView: NSViewRepresentable {
         func updateTerrainBrushPreview(at point: CGPoint,
                                        viewSize: CGSize,
                                        entityUUID: String,
+                                       mode: TerrainBrushMode,
                                        layer: Int,
+                                       sculptTool: TerrainSculptTool,
                                        radius: Float,
                                        hardness: Float,
                                        maskPreset: Int,
@@ -399,7 +419,9 @@ struct MetalView: NSViewRepresentable {
                 y: y,
                 screenWidth: width,
                 screenHeight: height,
+                mode: mode.rawValue,
                 layer: layer,
+                sculptTool: sculptTool.rawValue,
                 radius: radius,
                 hardness: hardness,
                 maskPreset: maskPreset,
@@ -534,7 +556,10 @@ class MetalDisplayView: NSView {
             #endif
         }
     }
+    var terrainBrushMode: TerrainBrushMode = .paint
     var terrainPaintLayer: Int = 0
+    var terrainSculptTool: TerrainSculptTool = .raise
+    var terrainSculptResolution: Int = 128
     var terrainBrushRadius: Float = 1.5
     var terrainBrushHardness: Float = 0.65
     var terrainBrushStrength: Float = 0.35
@@ -731,7 +756,10 @@ class MetalDisplayView: NSView {
                 at: point,
                 viewSize: bounds.size,
                 entityUUID: terrainPaintTargetUUID,
+                mode: terrainBrushMode,
                 layer: terrainPaintLayer,
+                sculptTool: terrainSculptTool,
+                sculptResolution: terrainSculptResolution,
                 radius: terrainBrushRadius,
                 hardness: terrainBrushHardness,
                 strength: terrainBrushStrength,
@@ -766,7 +794,9 @@ class MetalDisplayView: NSView {
                     at: point,
                     viewSize: bounds.size,
                     entityUUID: terrainPaintTargetUUID,
+                    mode: terrainBrushMode,
                     layer: terrainPaintLayer,
+                    sculptTool: terrainSculptTool,
                     radius: terrainBrushRadius,
                     hardness: terrainBrushHardness,
                     maskPreset: terrainBrushMaskPreset,
@@ -778,7 +808,10 @@ class MetalDisplayView: NSView {
                     at: point,
                     viewSize: bounds.size,
                     entityUUID: terrainPaintTargetUUID,
+                    mode: terrainBrushMode,
                     layer: terrainPaintLayer,
+                    sculptTool: terrainSculptTool,
+                    sculptResolution: terrainSculptResolution,
                     radius: terrainBrushRadius,
                     hardness: terrainBrushHardness,
                     strength: terrainBrushStrength,
@@ -827,7 +860,9 @@ class MetalDisplayView: NSView {
             at: point,
             viewSize: bounds.size,
             entityUUID: terrainPaintTargetUUID,
+            mode: terrainBrushMode,
             layer: terrainPaintLayer,
+            sculptTool: terrainSculptTool,
             radius: terrainBrushRadius,
             hardness: terrainBrushHardness,
             maskPreset: terrainBrushMaskPreset,

@@ -410,8 +410,8 @@ private:
     MTL::Buffer* m_lightGPUBuffer;
     MTL::Buffer* m_shadowGPUBuffer;
     MTL::Buffer* m_lightCountBuffer;
-    MTL::Buffer* m_clusterHeaderBuffer;
-    MTL::Buffer* m_clusterIndexBuffer;
+    MTL::Buffer* m_clusterHeaderBuffer; // Non-owning: owned by ClusteredLightingPass
+    MTL::Buffer* m_clusterIndexBuffer;  // Non-owning: owned by ClusteredLightingPass
     MTL::Buffer* m_clusterParamsBuffer;
     MTL::Buffer* m_probeVolumeBuffer;
     MTL::Buffer* m_probeVolumeFallbackBuffer;

@@ -130,7 +130,7 @@ struct EditorToolbar: View {
                         }
                     } label: {
                         ToolbarPillLabel(
-                            title: "Terrain Paint",
+                            title: "Terrain Brush",
                             value: editorState.terrainPaintEnabled ? "On" : "Off",
                             systemImage: "paintbrush.pointed.fill",
                             accent: editorState.terrainPaintEnabled ? EditorTheme.accentSecondary : EditorTheme.textMuted.opacity(0.9)

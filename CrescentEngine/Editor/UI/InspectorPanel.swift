@@ -2793,10 +2793,22 @@ struct MaterialInspector: View {
                                 CrescentEngineBridge.shared().clearTerrainBrushPreview()
                             }
                         })) {
-                        Text("Terrain Paint Mode")
+                        Text("Terrain Brush Mode")
                             .font(EditorTheme.font(size: 11, weight: .medium))
                     }
 
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Brush Mode")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                            .foregroundColor(EditorTheme.textPrimary)
+                        Picker("", selection: $editorState.terrainBrushMode) {
+                            Text("Texture Paint").tag(TerrainBrushMode.paint)
+                            Text("Sculpt").tag(TerrainBrushMode.sculpt)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    if editorState.terrainBrushMode == .paint {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Brush Layer")
                             .font(EditorTheme.font(size: 11, weight: .medium))
@@ -2807,6 +2819,31 @@ struct MaterialInspector: View {
                             Text("Layer 2").tag(2)
                         }
                         .pickerStyle(.segmented)
+                    }
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Sculpt Tool")
+                                .font(EditorTheme.font(size: 11, weight: .medium))
+                                .foregroundColor(EditorTheme.textPrimary)
+                            Picker("", selection: $editorState.terrainSculptTool) {
+                                Text("Raise").tag(TerrainSculptTool.raise)
+                                Text("Smooth").tag(TerrainSculptTool.smooth)
+                                Text("Flatten").tag(TerrainSculptTool.flatten)
+                            }
+                            .pickerStyle(.segmented)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Terrain Grid")
+                                .font(EditorTheme.font(size: 11, weight: .medium))
+                                .foregroundColor(EditorTheme.textPrimary)
+                            Picker("", selection: $editorState.terrainSculptResolution) {
+                                Text("64").tag(64)
+                                Text("128").tag(128)
+                                Text("256").tag(256)
+                            }
+                            .pickerStyle(.segmented)
+                        }
                     }
 
                     SliderRow(title: "Brush Radius", value: $editorState.terrainBrushRadius, range: 0.1...15.0, step: 0.05, tint: .orange) { _ in }
@@ -2851,28 +2888,32 @@ struct MaterialInspector: View {
                         }
                     }
 
-                    Toggle(isOn: $editorState.terrainBrushAutoNormalize) {
-                        Text("Weight Normalize (Unreal Style)")
-                            .font(EditorTheme.font(size: 11, weight: .medium))
+                    if editorState.terrainBrushMode == .paint {
+                        Toggle(isOn: $editorState.terrainBrushAutoNormalize) {
+                            Text("Weight Normalize (Unreal Style)")
+                                .font(EditorTheme.font(size: 11, weight: .medium))
+                        }
                     }
 
                     HStack(spacing: 8) {
-                        Button("Undo Paint") {
-                            _ = CrescentEngineBridge.shared().undoTerrainPaint(entity: entityUUID)
+                        Button("Undo Brush") {
+                            _ = CrescentEngineBridge.shared().undoTerrainStroke(entity: entityUUID, mode: editorState.terrainBrushMode.rawValue)
                             refreshMaterial()
                         }
                         .buttonStyle(.bordered)
                         .font(EditorTheme.font(size: 11, weight: .semibold))
 
-                        Button("Redo Paint") {
-                            _ = CrescentEngineBridge.shared().redoTerrainPaint(entity: entityUUID)
+                        Button("Redo Brush") {
+                            _ = CrescentEngineBridge.shared().redoTerrainStroke(entity: entityUUID, mode: editorState.terrainBrushMode.rawValue)
                             refreshMaterial()
                         }
                         .buttonStyle(.bordered)
                         .font(EditorTheme.font(size: 11, weight: .semibold))
                     }
 
-                    Text("Viewport: left-drag paints, Option erases.")
+                    Text(editorState.terrainBrushMode == .sculpt
+                         ? "Viewport: left-drag sculpts, Option lowers in Raise mode."
+                         : "Viewport: left-drag paints, Option erases.")
                         .font(EditorTheme.font(size: 10, weight: .regular))
                         .foregroundColor(EditorTheme.textMuted)
                 }

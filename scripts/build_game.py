@@ -856,7 +856,7 @@ def package_game(repo_root: Path,
         packaged_project_data["requireCookedTextures"] = require_cooked_textures
         packaged_project_data["textureCookFormat"] = "KTX2_ASTC4x4"
         packaged_project_data["requireCookedScenes"] = bool(cooked_scene_map)
-        packaged_project_data["sceneCookFormat"] = "MessagePackEmbeddedMeshV1" if cooked_scene_map else ""
+        packaged_project_data["sceneCookFormat"] = "MessagePackExternalMeshV1" if cooked_scene_map else ""
         packaged_project_data["lightingBakeFormat"] = "LightmapRGBMKTX2DirectionalShadowmaskProbeReflections_V18"
         packaged_project_data["requireCookedEnvironmentIBL"] = bool(cooked_environment_map)
         packaged_project_data["environmentCookFormat"] = "CENV_RGBA16F_V1" if cooked_environment_map else ""

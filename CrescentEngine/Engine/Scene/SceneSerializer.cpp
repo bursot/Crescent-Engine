@@ -398,9 +398,14 @@ struct BuildSceneOptions {
     bool includeAssetRoot = false;
     bool includeEditorOnly = true;
     bool embedRuntimePayloads = false;
+    bool externalizeRuntimeMeshes = false;
+    std::string cookedScenePath;
+    struct CookedMeshWriter* cookedMeshWriter = nullptr;
 };
 
 json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildSceneOptions& options);
+json SerializeMeshData(const Mesh& mesh);
+std::shared_ptr<Mesh> DeserializeMeshData(const json& j);
 
 std::string PrimitiveTypeToString(PrimitiveType type) {
     switch (type) {
@@ -423,6 +428,39 @@ PrimitiveType PrimitiveTypeFromString(const std::string& value) {
     if (value == "Torus") return PrimitiveType::Torus;
     if (value == "Capsule") return PrimitiveType::Capsule;
     return PrimitiveType::Cube;
+}
+
+bool ShouldSerializeCustomizedPrimitiveMesh(const Entity* entity,
+                                            const MeshRenderer* renderer) {
+    if (!entity || !renderer) {
+        return false;
+    }
+    const auto* primitive = entity->getComponent<PrimitiveMesh>();
+    if (!primitive) {
+        return false;
+    }
+    auto mesh = renderer->getMesh();
+    if (!mesh) {
+        return false;
+    }
+
+    switch (primitive->getType()) {
+        case PrimitiveType::Plane: {
+            const auto& vertices = mesh->getVertices();
+            const auto& indices = mesh->getIndices();
+            if (vertices.size() != 4 || indices.size() != 6) {
+                return true;
+            }
+            for (const auto& vertex : vertices) {
+                if (std::abs(vertex.position.y) > 1e-4f) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        default:
+            return false;
+    }
 }
 
 json SerializeImportOptions(const SceneCommands::ModelImportOptions& options) {
@@ -555,6 +593,211 @@ std::string BuildCookedEnvironmentRelativePath(const std::string& path) {
         return "";
     }
     return "Library/ImportCache/hdri_" + HashRuntimeCookKey(NormalizeCookedEnvironmentKey(path)) + "_v1.cenv";
+}
+
+struct CookedMeshWriter {
+    std::filesystem::path sceneOutputPath;
+    std::unordered_map<std::string, std::string> emittedPaths;
+};
+
+class CookedMeshBinaryWriter {
+public:
+    void writeU32(uint32_t value) {
+        for (int i = 0; i < 4; ++i) {
+            m_bytes.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xffu));
+        }
+    }
+
+    void writeBytes(const void* data, size_t size) {
+        if (!data || size == 0) {
+            return;
+        }
+        const uint8_t* src = static_cast<const uint8_t*>(data);
+        m_bytes.insert(m_bytes.end(), src, src + size);
+    }
+
+    void writeString(const std::string& value) {
+        writeU32(static_cast<uint32_t>(value.size()));
+        writeBytes(value.data(), value.size());
+    }
+
+    const std::vector<uint8_t>& bytes() const {
+        return m_bytes;
+    }
+
+private:
+    std::vector<uint8_t> m_bytes;
+};
+
+std::vector<uint8_t> SerializeCookedMeshBinary(const Mesh& mesh) {
+    json payload = SerializeMeshData(mesh);
+    std::vector<uint8_t> packed = json::to_msgpack(payload);
+
+    CookedMeshBinaryWriter writer;
+    writer.writeBytes("CMSH", 4);
+    writer.writeU32(1);
+    writer.writeU32(static_cast<uint32_t>(packed.size()));
+    writer.writeBytes(packed.data(), packed.size());
+    return writer.bytes();
+}
+
+bool SaveCookedMeshBinary(const std::filesystem::path& outputPath, const Mesh& mesh) {
+    std::vector<uint8_t> bytes = SerializeCookedMeshBinary(mesh);
+    if (bytes.empty()) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+    std::ofstream out(outputPath, std::ios::binary);
+    if (!out.is_open()) {
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return out.good();
+}
+
+std::shared_ptr<Mesh> DeserializeCookedMeshBinary(const std::vector<uint8_t>& bytes) {
+    if (bytes.size() < 12) {
+        return nullptr;
+    }
+    if (std::memcmp(bytes.data(), "CMSH", 4) != 0) {
+        return nullptr;
+    }
+
+    auto readU32 = [&bytes](size_t offset) -> uint32_t {
+        return static_cast<uint32_t>(bytes[offset]) |
+               (static_cast<uint32_t>(bytes[offset + 1]) << 8u) |
+               (static_cast<uint32_t>(bytes[offset + 2]) << 16u) |
+               (static_cast<uint32_t>(bytes[offset + 3]) << 24u);
+    };
+
+    uint32_t version = readU32(4);
+    uint32_t payloadSize = readU32(8);
+    if (version != 1 || bytes.size() < 12ull + payloadSize) {
+        return nullptr;
+    }
+
+    std::vector<uint8_t> payload(bytes.begin() + 12, bytes.begin() + 12 + payloadSize);
+    json root = json::from_msgpack(payload, true, false);
+    if (root.is_discarded() || !root.is_object()) {
+        return nullptr;
+    }
+    return DeserializeMeshData(root);
+}
+
+std::string BuildCookedSceneMeshRelativePath(const std::filesystem::path& cookedScenePath,
+                                             const std::string& meshKey) {
+    if (meshKey.empty()) {
+        return "";
+    }
+    std::filesystem::path sceneStem = cookedScenePath.stem();
+    std::filesystem::path sidecarDir = sceneStem.string() + ".meshes";
+    return (sidecarDir / (meshKey + ".cmesh")).generic_string();
+}
+
+std::string BuildRuntimeMeshCookKey(const Entity* entity,
+                                    const ModelMeshReference* modelRef,
+                                    const char* tag) {
+    std::string seed;
+    if (modelRef && !modelRef->getSourcePath().empty()) {
+        seed = NormalizeEmbeddedCookKey(modelRef->getSourcePath()) + "|" +
+               std::to_string(modelRef->getMeshIndex()) + "|" +
+               std::to_string(modelRef->getMaterialIndex()) + "|" +
+               (modelRef->isSkinned() ? "1" : "0") + "|" +
+               (modelRef->isMerged() ? "1" : "0");
+    } else if (entity) {
+        seed = entity->getUUID().toString();
+    }
+    if (tag && *tag) {
+        seed += "|";
+        seed += tag;
+    }
+    if (seed.empty()) {
+        return "";
+    }
+    return HashRuntimeCookKey(seed);
+}
+
+std::string EmitCookedMeshRef(Entity* entity,
+                              const std::shared_ptr<Mesh>& mesh,
+                              const ModelMeshReference* modelRef,
+                              const char* tag,
+                              const BuildSceneOptions& options) {
+    if (!mesh || !options.externalizeRuntimeMeshes || !options.cookedMeshWriter ||
+        options.cookedMeshWriter->sceneOutputPath.empty()) {
+        return "";
+    }
+
+    std::string meshKey = BuildRuntimeMeshCookKey(entity, modelRef, tag);
+    if (meshKey.empty()) {
+        return "";
+    }
+
+    auto existing = options.cookedMeshWriter->emittedPaths.find(meshKey);
+    if (existing != options.cookedMeshWriter->emittedPaths.end()) {
+        return existing->second;
+    }
+
+    std::string relativePath = BuildCookedSceneMeshRelativePath(options.cookedMeshWriter->sceneOutputPath, meshKey);
+    if (relativePath.empty()) {
+        return "";
+    }
+
+    std::filesystem::path outputPath = options.cookedMeshWriter->sceneOutputPath.parent_path() / relativePath;
+    if (!SaveCookedMeshBinary(outputPath, *mesh)) {
+        return "";
+    }
+
+    options.cookedMeshWriter->emittedPaths[meshKey] = relativePath;
+    return relativePath;
+}
+
+std::string ResolveSceneRelativePath(const std::string& scenePath, const std::string& storedPath) {
+    if (storedPath.empty()) {
+        return "";
+    }
+    std::filesystem::path path(storedPath);
+    if (path.is_absolute() || scenePath.empty()) {
+        return path.lexically_normal().string();
+    }
+    return (std::filesystem::path(scenePath).parent_path() / path).lexically_normal().string();
+}
+
+std::shared_ptr<Mesh> LoadCookedMeshRef(const json& meshRef,
+                                        const std::string& scenePath,
+                                        std::unordered_map<std::string, std::shared_ptr<Mesh>>& cookedMeshCache) {
+    std::string storedPath;
+    if (meshRef.is_string()) {
+        storedPath = meshRef.get<std::string>();
+    } else if (meshRef.is_object()) {
+        storedPath = meshRef.value("path", std::string());
+    }
+    if (storedPath.empty()) {
+        return nullptr;
+    }
+
+    std::string resolvedPath = ResolveSceneRelativePath(scenePath, storedPath);
+    if (resolvedPath.empty()) {
+        return nullptr;
+    }
+
+    auto it = cookedMeshCache.find(resolvedPath);
+    if (it != cookedMeshCache.end()) {
+        return it->second;
+    }
+
+    std::ifstream in(resolvedPath, std::ios::binary);
+    if (!in.is_open()) {
+        return nullptr;
+    }
+
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto mesh = DeserializeCookedMeshBinary(bytes);
+    if (mesh) {
+        cookedMeshCache[resolvedPath] = mesh;
+    }
+    return mesh;
 }
 
 json SerializeTextureRef(const std::shared_ptr<Texture2D>& texture, const char* typeKey, bool includeCookedPath = false) {
@@ -1843,7 +2086,8 @@ void ApplyEntityComponents(Entity* entity,
                            Scene* scene,
                            const std::string& scenePath,
                            TextureLoader* textureLoader,
-                           std::unordered_map<std::string, ModelCacheEntry>& modelCache);
+                           std::unordered_map<std::string, ModelCacheEntry>& modelCache,
+                           std::unordered_map<std::string, std::shared_ptr<Mesh>>& cookedMeshCache);
 
 bool EnvEnabled(const char* key) {
     const char* value = std::getenv(key);
@@ -1859,14 +2103,21 @@ bool HasCookedMeshPayload(const json& components) {
     }
     if (components.contains("MeshRenderer")) {
         const json& meshRenderer = components["MeshRenderer"];
-        if (meshRenderer.is_object() && meshRenderer.contains("mesh")) {
+        if (meshRenderer.is_object() && (meshRenderer.contains("mesh") || meshRenderer.contains("meshRef"))) {
             return true;
         }
     }
     if (components.contains("SkinnedMeshRenderer")) {
         const json& skinned = components["SkinnedMeshRenderer"];
         if (skinned.is_object() &&
-            (skinned.contains("mesh") || skinned.contains("skeleton") || skinned.contains("animationClips"))) {
+            (skinned.contains("mesh") || skinned.contains("meshRef") ||
+             skinned.contains("skeleton") || skinned.contains("animationClips"))) {
+            return true;
+        }
+    }
+    if (components.contains("HLODProxy")) {
+        const json& hlod = components["HLODProxy"];
+        if (hlod.is_object() && (hlod.contains("mesh") || hlod.contains("meshRef"))) {
             return true;
         }
     }
@@ -1948,13 +2199,14 @@ bool DeserializeSceneRoot(Scene* scene, const json& root, const std::string& sce
     Renderer* renderer = Engine::getInstance().getRenderer();
     TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
     std::unordered_map<std::string, ModelCacheEntry> modelCache;
+    std::unordered_map<std::string, std::shared_ptr<Mesh>> cookedMeshCache;
 
     for (auto& [uuid, record] : records) {
         if (!record.entity) {
             continue;
         }
         record.entity->setEditorOnly(record.editorOnly);
-        ApplyEntityComponents(record.entity, record.components, scene, scenePath, textureLoader, modelCache);
+        ApplyEntityComponents(record.entity, record.components, scene, scenePath, textureLoader, modelCache, cookedMeshCache);
     }
 
     if (wasActive) {
@@ -2037,12 +2289,22 @@ bool SceneSerializer::SaveCookedRuntimeScene(Scene* scene, const std::string& pa
     if (!out.is_open()) {
         return false;
     }
-    std::vector<uint8_t> payload = SerializeCookedRuntimeSceneBinary(scene, includeEditorOnly);
+    BuildSceneOptions options;
+    options.includeEditorOnly = includeEditorOnly;
+    options.embedRuntimePayloads = true;
+    options.externalizeRuntimeMeshes = true;
+    options.cookedScenePath = path;
+    CookedMeshWriter writer;
+    writer.sceneOutputPath = path;
+    options.cookedMeshWriter = &writer;
+
+    json root = BuildSceneJson(scene, "", options);
+    std::vector<uint8_t> payload = json::to_msgpack(root);
     if (payload.empty()) {
         return false;
     }
     out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
-    return true;
+    return out.good();
 }
 
 bool SceneSerializer::LoadScene(Scene* scene, const std::string& path) {
@@ -2137,7 +2399,8 @@ void ApplyEntityComponents(Entity* entity,
                            Scene* scene,
                            const std::string& scenePath,
                            TextureLoader* textureLoader,
-                           std::unordered_map<std::string, ModelCacheEntry>& modelCache) {
+                           std::unordered_map<std::string, ModelCacheEntry>& modelCache,
+                           std::unordered_map<std::string, std::shared_ptr<Mesh>>& cookedMeshCache) {
     if (!entity) {
         return;
     }
@@ -2156,10 +2419,10 @@ void ApplyEntityComponents(Entity* entity,
         entity->addComponent<PrimitiveMesh>()->setType(type);
     }
 
-    ModelMeshReference* modelRef = nullptr;
+    ModelMeshReference* modelMeshReference = nullptr;
     if (components.contains("ModelMeshReference")) {
         const json& m = components["ModelMeshReference"];
-        modelRef = entity->addComponent<ModelMeshReference>();
+        modelMeshReference = entity->addComponent<ModelMeshReference>();
         std::string storedPath = m.value("sourcePath", std::string());
         std::string guid = m.value("sourceGuid", std::string());
         std::string resolvedPath;
@@ -2185,15 +2448,15 @@ void ApplyEntityComponents(Entity* entity,
                 }
             }
         }
-        modelRef->setSourcePath(resolvedPath);
-        modelRef->setSourceGuid(guid);
-        modelRef->setMeshIndex(m.value("meshIndex", -1));
-        modelRef->setMaterialIndex(m.value("materialIndex", -1));
-        modelRef->setMeshName(m.value("meshName", std::string()));
-        modelRef->setSkinned(m.value("skinned", false));
-        modelRef->setMerged(m.value("merged", false));
+        modelMeshReference->setSourcePath(resolvedPath);
+        modelMeshReference->setSourceGuid(guid);
+        modelMeshReference->setMeshIndex(m.value("meshIndex", -1));
+        modelMeshReference->setMaterialIndex(m.value("materialIndex", -1));
+        modelMeshReference->setMeshName(m.value("meshName", std::string()));
+        modelMeshReference->setSkinned(m.value("skinned", false));
+        modelMeshReference->setMerged(m.value("merged", false));
         if (m.contains("importOptions")) {
-            modelRef->setImportOptions(DeserializeImportOptions(m["importOptions"]));
+            modelMeshReference->setImportOptions(DeserializeImportOptions(m["importOptions"]));
         }
     }
 
@@ -2201,24 +2464,24 @@ void ApplyEntityComponents(Entity* entity,
     SkinnedMeshRenderer* skinnedRenderer = nullptr;
     const bool hasCookedPayload = HasCookedMeshPayload(components);
 
-    if (modelRef && !hasCookedPayload) {
-        std::string cacheKey = MakeModelCacheKey(modelRef->getSourcePath(), modelRef->getImportOptions());
+    if (modelMeshReference && !hasCookedPayload) {
+        std::string cacheKey = MakeModelCacheKey(modelMeshReference->getSourcePath(), modelMeshReference->getImportOptions());
         auto it = modelCache.find(cacheKey);
         if (it == modelCache.end()) {
-            modelCache[cacheKey] = BuildModelCache(modelRef->getSourcePath(), modelRef->getImportOptions());
+            modelCache[cacheKey] = BuildModelCache(modelMeshReference->getSourcePath(), modelMeshReference->getImportOptions());
             it = modelCache.find(cacheKey);
         }
         const ModelCacheEntry& cache = it->second;
         MeshCacheEntry meshEntry;
         bool found = false;
-        if (modelRef->isMerged()) {
-            auto mergedIt = cache.mergedByMaterial.find(modelRef->getMaterialIndex());
+        if (modelMeshReference->isMerged()) {
+            auto mergedIt = cache.mergedByMaterial.find(modelMeshReference->getMaterialIndex());
             if (mergedIt != cache.mergedByMaterial.end()) {
                 meshEntry = mergedIt->second;
                 found = true;
             }
         } else {
-            auto meshIt = cache.meshesByIndex.find(modelRef->getMeshIndex());
+            auto meshIt = cache.meshesByIndex.find(modelMeshReference->getMeshIndex());
             if (meshIt != cache.meshesByIndex.end()) {
                 meshEntry = meshIt->second;
                 found = true;
@@ -2228,7 +2491,7 @@ void ApplyEntityComponents(Entity* entity,
             meshRenderer = entity->addComponent<MeshRenderer>();
             meshRenderer->setMesh(meshEntry.mesh);
             meshRenderer->setMaterial(meshEntry.material ? meshEntry.material : Material::CreateDefault());
-            if (modelRef->isSkinned() && cache.skeleton) {
+            if (modelMeshReference->isSkinned() && cache.skeleton) {
                 skinnedRenderer = entity->addComponent<SkinnedMeshRenderer>();
                 skinnedRenderer->setMesh(meshEntry.mesh);
                 skinnedRenderer->setMaterial(meshEntry.material ? meshEntry.material : Material::CreateDefault());
@@ -2274,7 +2537,14 @@ void ApplyEntityComponents(Entity* entity,
         if (!meshRenderer) {
             meshRenderer = entity->addComponent<MeshRenderer>();
         }
-        if (r.contains("mesh")) {
+        if (r.contains("meshRef")) {
+            if (auto mesh = LoadCookedMeshRef(r["meshRef"], scenePath, cookedMeshCache)) {
+                meshRenderer->setMesh(mesh);
+                if (skinnedRenderer) {
+                    skinnedRenderer->setMesh(mesh);
+                }
+            }
+        } else if (r.contains("mesh")) {
             if (auto mesh = DeserializeMeshData(r["mesh"])) {
                 meshRenderer->setMesh(mesh);
                 if (skinnedRenderer) {
@@ -2369,7 +2639,14 @@ void ApplyEntityComponents(Entity* entity,
             }
             proxy->setSourceUuids(sources);
         }
-        if (h.contains("mesh")) {
+        if (h.contains("meshRef")) {
+            if (auto mesh = LoadCookedMeshRef(h["meshRef"], scenePath, cookedMeshCache)) {
+                if (!meshRenderer) {
+                    meshRenderer = entity->addComponent<MeshRenderer>();
+                }
+                meshRenderer->setMesh(mesh);
+            }
+        } else if (h.contains("mesh")) {
             auto mesh = DeserializeMeshData(h["mesh"]);
             if (mesh) {
                 if (!meshRenderer) {
@@ -2382,10 +2659,19 @@ void ApplyEntityComponents(Entity* entity,
 
     if (components.contains("SkinnedMeshRenderer")) {
         const json& s = components["SkinnedMeshRenderer"];
-        if (!skinnedRenderer && (s.contains("mesh") || s.contains("skeleton") || s.contains("animationClips"))) {
+        if (!skinnedRenderer && (s.contains("mesh") || s.contains("meshRef") ||
+                                 s.contains("skeleton") || s.contains("animationClips"))) {
             skinnedRenderer = entity->addComponent<SkinnedMeshRenderer>();
         }
-        if (skinnedRenderer && s.contains("mesh")) {
+        if (skinnedRenderer && s.contains("meshRef")) {
+            if (auto mesh = LoadCookedMeshRef(s["meshRef"], scenePath, cookedMeshCache)) {
+                skinnedRenderer->setMesh(mesh);
+                if (!meshRenderer) {
+                    meshRenderer = entity->addComponent<MeshRenderer>();
+                }
+                meshRenderer->setMesh(mesh);
+            }
+        } else if (skinnedRenderer && s.contains("mesh")) {
             if (auto mesh = DeserializeMeshData(s["mesh"])) {
                 skinnedRenderer->setMesh(mesh);
                 if (!meshRenderer) {
@@ -2905,6 +3191,7 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
             };
         }
 
+        ModelMeshReference* modelMeshReference = entity->getComponent<ModelMeshReference>();
         if (auto* renderer = entity->getComponent<MeshRenderer>()) {
             json materials = json::array();
             const auto& mats = renderer->getMaterials();
@@ -2928,9 +3215,21 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 }
                 components["MeshRenderer"]["bakedVertexColors"] = bakedColors;
             }
-            if (options.embedRuntimePayloads && !entity->getComponent<SkinnedMeshRenderer>()) {
+            const bool shouldSerializeMeshData =
+                (!entity->getComponent<SkinnedMeshRenderer>()) &&
+                (options.embedRuntimePayloads || ShouldSerializeCustomizedPrimitiveMesh(entity, renderer));
+            if (shouldSerializeMeshData) {
                 if (auto mesh = renderer->getMesh()) {
-                    components["MeshRenderer"]["mesh"] = SerializeMeshData(*mesh);
+                    if (options.embedRuntimePayloads && options.externalizeRuntimeMeshes) {
+                        std::string meshRef = EmitCookedMeshRef(entity, mesh, modelMeshReference, "mesh_renderer", options);
+                        if (!meshRef.empty()) {
+                            components["MeshRenderer"]["meshRef"] = meshRef;
+                        } else {
+                            components["MeshRenderer"]["mesh"] = SerializeMeshData(*mesh);
+                        }
+                    } else {
+                        components["MeshRenderer"]["mesh"] = SerializeMeshData(*mesh);
+                    }
                 }
             }
             if (renderer->hasStaticLightingData()) {
@@ -3001,7 +3300,16 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
             };
             if (options.embedRuntimePayloads) {
                 if (auto mesh = skinned->getMesh()) {
-                    skinnedData["mesh"] = SerializeMeshData(*mesh);
+                    if (options.externalizeRuntimeMeshes) {
+                        std::string meshRef = EmitCookedMeshRef(entity, mesh, modelMeshReference, "skinned_mesh", options);
+                        if (!meshRef.empty()) {
+                            skinnedData["meshRef"] = meshRef;
+                        } else {
+                            skinnedData["mesh"] = SerializeMeshData(*mesh);
+                        }
+                    } else {
+                        skinnedData["mesh"] = SerializeMeshData(*mesh);
+                    }
                 }
                 if (auto skeleton = skinned->getSkeleton()) {
                     skinnedData["skeleton"] = SerializeSkeletonData(*skeleton);
@@ -3053,7 +3361,16 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
 
             if (auto* renderer = entity->getComponent<MeshRenderer>()) {
                 if (auto mesh = renderer->getMesh()) {
-                    hlodData["mesh"] = SerializeMeshData(*mesh);
+                    if (options.externalizeRuntimeMeshes) {
+                        std::string meshRef = EmitCookedMeshRef(entity, mesh, modelMeshReference, "hlod_mesh", options);
+                        if (!meshRef.empty()) {
+                            hlodData["meshRef"] = meshRef;
+                        } else {
+                            hlodData["mesh"] = SerializeMeshData(*mesh);
+                        }
+                    } else {
+                        hlodData["mesh"] = SerializeMeshData(*mesh);
+                    }
                 }
             }
 
@@ -3459,6 +3776,7 @@ std::vector<uint8_t> SceneSerializer::SerializeCookedRuntimeSceneBinary(Scene* s
     BuildSceneOptions options;
     options.includeEditorOnly = includeEditorOnly;
     options.embedRuntimePayloads = true;
+    options.externalizeRuntimeMeshes = true;
     json root = BuildSceneJson(scene, "", options);
     return json::to_msgpack(root);
 }
@@ -3736,12 +4054,13 @@ std::vector<Entity*> SceneSerializer::DuplicateEntities(Scene* scene, const std:
     Renderer* renderer = Engine::getInstance().getRenderer();
     TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
     std::unordered_map<std::string, ModelCacheEntry> modelCache;
+    std::unordered_map<std::string, std::shared_ptr<Mesh>> cookedMeshCache;
     for (auto& [uuid, record] : records) {
         if (!record.entity) {
             continue;
         }
         record.entity->setEditorOnly(record.editorOnly);
-        ApplyEntityComponents(record.entity, record.components, scene, "", textureLoader, modelCache);
+        ApplyEntityComponents(record.entity, record.components, scene, "", textureLoader, modelCache, cookedMeshCache);
     }
 
     for (auto& [uuid, record] : records) {

@@ -281,6 +281,7 @@ void Engine::render() {
             m_renderer->setMetalLayer(m_sceneSurface.layer, false);
             m_renderer->setViewportSize(m_sceneSurface.width, m_sceneSurface.height, true);
             if (debugRenderer) {
+                debugRenderer->setGridEnabled(true);
                 debugRenderer->clear();
             }
 
@@ -319,6 +320,7 @@ void Engine::render() {
             m_renderer->setMetalLayer(m_gameSurface.layer, false);
             m_renderer->setViewportSize(m_gameSurface.width, m_gameSurface.height, true);
             if (debugRenderer) {
+                debugRenderer->setGridEnabled(false);
                 debugRenderer->clear();
             }
 

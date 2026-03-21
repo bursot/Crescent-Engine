@@ -217,7 +217,10 @@ class EditorState: ObservableObject {
     @Published var isBuildingGame: Bool = false
     @Published var lastBuiltAppURL: URL?
     @Published var terrainPaintEnabled: Bool = false
+    @Published var terrainBrushMode: TerrainBrushMode = .paint
     @Published var terrainPaintLayer: Int = 0
+    @Published var terrainSculptTool: TerrainSculptTool = .raise
+    @Published var terrainSculptResolution: Int = 128
     @Published var terrainBrushRadius: Float = 1.5
     @Published var terrainBrushHardness: Float = 0.65
     @Published var terrainBrushStrength: Float = 0.35
@@ -253,7 +256,10 @@ class EditorState: ObservableObject {
         TerrainPaintConfig(
             enabled: terrainPaintEnabled && !isPlaying && viewMode == .scene,
             targetEntityUUID: primarySelectionUUID ?? "",
+            mode: terrainBrushMode,
             layer: terrainPaintLayer,
+            sculptTool: terrainSculptTool,
+            sculptResolution: terrainSculptResolution,
             radius: terrainBrushRadius,
             hardness: terrainBrushHardness,
             strength: terrainBrushStrength,

@@ -466,11 +466,15 @@ struct ViewportPanel: View {
 
                 if viewKind == .scene && isActive && editorState.terrainPaintConfig.enabled {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Terrain Paint ON")
+                        Text(editorState.terrainBrushMode == .sculpt ? "Terrain Sculpt ON" : "Terrain Paint ON")
                             .font(EditorTheme.font(size: 10, weight: .semibold))
-                        Text("Layer \(editorState.terrainPaintLayer)  Radius \(String(format: "%.2f", editorState.terrainBrushRadius))  Strength \(String(format: "%.2f", editorState.terrainBrushStrength))")
+                        Text(editorState.terrainBrushMode == .sculpt
+                             ? "\(sculptToolLabel(editorState.terrainSculptTool))  Radius \(String(format: "%.2f", editorState.terrainBrushRadius))  Strength \(String(format: "%.2f", editorState.terrainBrushStrength))"
+                             : "Layer \(editorState.terrainPaintLayer)  Radius \(String(format: "%.2f", editorState.terrainBrushRadius))  Strength \(String(format: "%.2f", editorState.terrainBrushStrength))")
                             .font(EditorTheme.mono(size: 10))
-                        Text("Hardness \(String(format: "%.2f", editorState.terrainBrushHardness))  Spacing \(String(format: "%.2f", editorState.terrainBrushSpacing))  Option=Erase")
+                        Text(editorState.terrainBrushMode == .sculpt
+                             ? "Hardness \(String(format: "%.2f", editorState.terrainBrushHardness))  Spacing \(String(format: "%.2f", editorState.terrainBrushSpacing))  Grid \(editorState.terrainSculptResolution)x\(editorState.terrainSculptResolution)  Option=Lower"
+                             : "Hardness \(String(format: "%.2f", editorState.terrainBrushHardness))  Spacing \(String(format: "%.2f", editorState.terrainBrushSpacing))  Option=Erase")
                             .font(EditorTheme.mono(size: 10))
                             .foregroundColor(EditorTheme.textMuted)
                     }
@@ -551,6 +555,14 @@ struct ViewportPanel: View {
             up: simd_float3(up[0].floatValue, up[1].floatValue, up[2].floatValue),
             forward: simd_float3(forward[0].floatValue, forward[1].floatValue, forward[2].floatValue)
         )
+    }
+}
+
+private func sculptToolLabel(_ tool: TerrainSculptTool) -> String {
+    switch tool {
+    case .raise: return "Raise / Lower"
+    case .smooth: return "Smooth"
+    case .flatten: return "Flatten"
     }
 }
 

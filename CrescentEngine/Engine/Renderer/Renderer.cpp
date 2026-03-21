@@ -7416,6 +7416,9 @@ void Renderer::shutdown() {
         m_shadowPass.reset();
     }
     if (m_clusterPass) {
+        // Cluster header/index buffers are owned by ClusteredLightingPass.
+        m_clusterHeaderBuffer = nullptr;
+        m_clusterIndexBuffer = nullptr;
         m_clusterPass->shutdown();
         m_clusterPass.reset();
     }
@@ -7552,14 +7555,8 @@ void Renderer::shutdown() {
         m_lightCountBuffer->release();
         m_lightCountBuffer = nullptr;
     }
-    if (m_clusterHeaderBuffer) {
-        m_clusterHeaderBuffer->release();
-        m_clusterHeaderBuffer = nullptr;
-    }
-    if (m_clusterIndexBuffer) {
-        m_clusterIndexBuffer->release();
-        m_clusterIndexBuffer = nullptr;
-    }
+    m_clusterHeaderBuffer = nullptr;
+    m_clusterIndexBuffer = nullptr;
     if (m_clusterParamsBuffer) {
         m_clusterParamsBuffer->release();
         m_clusterParamsBuffer = nullptr;
