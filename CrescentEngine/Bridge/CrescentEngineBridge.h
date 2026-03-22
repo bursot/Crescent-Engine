@@ -219,6 +219,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Animation / Skinned Mesh
 - (NSDictionary *)getSkinnedMeshInfo:(NSString *)uuid NS_SWIFT_NAME(getSkinnedMeshInfo(uuid:));
 - (BOOL)setSkinnedMeshInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setSkinnedMeshInfo(uuid:info:));
+- (BOOL)addAnimationSource:(NSString *)uuid path:(NSString *)path NS_SWIFT_NAME(addAnimationSource(uuid:path:));
+- (BOOL)removeAnimationSource:(NSString *)uuid index:(NSInteger)index NS_SWIFT_NAME(removeAnimationSource(uuid:index:));
 - (BOOL)setAnimatorParameter:(NSString *)uuid name:(NSString *)name type:(NSString *)type value:(id)value NS_SWIFT_NAME(setAnimatorParameter(uuid:name:type:value:));
 - (BOOL)fireAnimatorTrigger:(NSString *)uuid name:(NSString *)name NS_SWIFT_NAME(fireAnimatorTrigger(uuid:name:));
 - (BOOL)setAnimatorRootMotion:(NSString *)uuid enabled:(BOOL)enabled applyPosition:(BOOL)applyPosition applyRotation:(BOOL)applyRotation NS_SWIFT_NAME(setAnimatorRootMotion(uuid:enabled:applyPosition:applyRotation:));

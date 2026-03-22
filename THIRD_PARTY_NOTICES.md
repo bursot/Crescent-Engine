@@ -27,3 +27,8 @@ This project uses third-party software. License texts are included where noted.
 ## miniaudio
 - Source: https://github.com/mackron/miniaudio
 - License: Public domain or MIT (see `ThirdParty/miniaudio/miniaudio.h`)
+
+## meshoptimizer
+- Source: https://github.com/zeux/meshoptimizer
+- License: MIT
+- Fetched by `scripts/setup_deps.sh`

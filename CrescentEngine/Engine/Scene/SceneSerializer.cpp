@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -41,6 +42,21 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+
+#if __has_include("../../../ThirdParty/meshoptimizer/src/meshoptimizer.h")
+#define CRESCENT_HAS_MESHOPTIMIZER 1
+#include "../../../ThirdParty/meshoptimizer/src/meshoptimizer.h"
+#include "../../../ThirdParty/meshoptimizer/src/allocator.cpp"
+#include "../../../ThirdParty/meshoptimizer/src/indexcodec.cpp"
+#include "../../../ThirdParty/meshoptimizer/src/indexgenerator.cpp"
+#include "../../../ThirdParty/meshoptimizer/src/overdrawoptimizer.cpp"
+#include "../../../ThirdParty/meshoptimizer/src/quantization.cpp"
+#include "../../../ThirdParty/meshoptimizer/src/vcacheoptimizer.cpp"
+#include "../../../ThirdParty/meshoptimizer/src/vertexcodec.cpp"
+#include "../../../ThirdParty/meshoptimizer/src/vfetchoptimizer.cpp"
+#else
+#define CRESCENT_HAS_MESHOPTIMIZER 0
+#endif
 
 namespace Crescent {
 namespace {
@@ -608,6 +624,13 @@ public:
         }
     }
 
+    void writeF32(float value) {
+        uint32_t bits = 0;
+        static_assert(sizeof(float) == sizeof(uint32_t), "Expected 32-bit float");
+        std::memcpy(&bits, &value, sizeof(uint32_t));
+        writeU32(bits);
+    }
+
     void writeBytes(const void* data, size_t size) {
         if (!data || size == 0) {
             return;
@@ -630,6 +653,267 @@ private:
 };
 
 std::vector<uint8_t> SerializeCookedMeshBinary(const Mesh& mesh) {
+#if CRESCENT_HAS_MESHOPTIMIZER
+    struct OptimizedCookedMeshData {
+        std::vector<Vertex> vertices;
+        std::vector<uint32_t> indices;
+        std::vector<Submesh> submeshes;
+        std::vector<SkinWeight> skinWeights;
+    };
+
+    struct QuantizedVertex {
+        uint16_t position[3];
+        int16_t normal[3];
+        uint16_t texCoord[2];
+        uint16_t texCoord1[2];
+        int16_t tangent[3];
+        int16_t bitangent[3];
+        uint8_t color[4];
+    };
+
+    auto quantizePosition = [](float value, float minValue, float maxValue) -> uint16_t {
+        float extent = maxValue - minValue;
+        if (extent <= 1e-8f) {
+            return 0;
+        }
+        float normalized = (value - minValue) / extent;
+        return static_cast<uint16_t>(meshopt_quantizeUnorm(normalized, 16));
+    };
+
+    auto quantizeSnorm16 = [](float value) -> int16_t {
+        return static_cast<int16_t>(meshopt_quantizeSnorm(value, 16));
+    };
+
+    auto quantizeColor8 = [](float value) -> uint8_t {
+        return static_cast<uint8_t>(meshopt_quantizeUnorm(value, 8));
+    };
+
+    auto optimizeRange = [](std::vector<uint32_t>& indices,
+                            size_t start,
+                            size_t count,
+                            const std::vector<Vertex>& vertices) {
+        if (count < 3 || (count % 3) != 0 || start + count > indices.size() || vertices.empty()) {
+            return;
+        }
+
+        std::vector<uint32_t> cacheOptimized(count);
+        meshopt_optimizeVertexCache(cacheOptimized.data(),
+                                    indices.data() + start,
+                                    count,
+                                    vertices.size());
+
+        std::vector<uint32_t> overdrawOptimized(count);
+        meshopt_optimizeOverdraw(overdrawOptimized.data(),
+                                 cacheOptimized.data(),
+                                 count,
+                                 &vertices[0].position.x,
+                                 vertices.size(),
+                                 sizeof(Vertex),
+                                 1.05f);
+        std::copy(overdrawOptimized.begin(), overdrawOptimized.end(), indices.begin() + static_cast<std::ptrdiff_t>(start));
+    };
+
+    auto buildOptimizedMesh = [&mesh, &optimizeRange]() -> OptimizedCookedMeshData {
+        OptimizedCookedMeshData result{
+            mesh.getVertices(),
+            mesh.getIndices(),
+            mesh.getSubmeshes(),
+            mesh.getSkinWeights()
+        };
+
+        if (result.vertices.empty()) {
+            return result;
+        }
+
+        if (!result.indices.empty()) {
+            if (!result.submeshes.empty()) {
+                for (const Submesh& submesh : result.submeshes) {
+                    optimizeRange(result.indices, submesh.indexStart, submesh.indexCount, result.vertices);
+                }
+            } else {
+                optimizeRange(result.indices, 0, result.indices.size(), result.vertices);
+            }
+
+            std::vector<unsigned int> dedupeRemap(result.vertices.size());
+            size_t uniqueVertexCount = meshopt_generateVertexRemap(dedupeRemap.data(),
+                                                                  result.indices.data(),
+                                                                  result.indices.size(),
+                                                                  result.vertices.data(),
+                                                                  result.vertices.size(),
+                                                                  sizeof(Vertex));
+            if (uniqueVertexCount > 0 && uniqueVertexCount < result.vertices.size()) {
+                std::vector<Vertex> dedupedVertices(uniqueVertexCount);
+                meshopt_remapVertexBuffer(dedupedVertices.data(),
+                                          result.vertices.data(),
+                                          result.vertices.size(),
+                                          sizeof(Vertex),
+                                          dedupeRemap.data());
+
+                std::vector<uint32_t> dedupedIndices(result.indices.size());
+                meshopt_remapIndexBuffer(dedupedIndices.data(),
+                                         result.indices.data(),
+                                         result.indices.size(),
+                                         dedupeRemap.data());
+
+                result.vertices = std::move(dedupedVertices);
+                result.indices = std::move(dedupedIndices);
+
+                if (!result.skinWeights.empty()) {
+                    std::vector<SkinWeight> dedupedWeights(uniqueVertexCount);
+                    meshopt_remapVertexBuffer(dedupedWeights.data(),
+                                              result.skinWeights.data(),
+                                              result.skinWeights.size(),
+                                              sizeof(SkinWeight),
+                                              dedupeRemap.data());
+                    result.skinWeights = std::move(dedupedWeights);
+                }
+            }
+
+            std::vector<unsigned int> fetchRemap(result.vertices.size());
+            size_t compactVertexCount = meshopt_optimizeVertexFetchRemap(fetchRemap.data(),
+                                                                         result.indices.data(),
+                                                                         result.indices.size(),
+                                                                         result.vertices.size());
+            if (compactVertexCount > 0 && compactVertexCount <= result.vertices.size()) {
+                std::vector<Vertex> compactVertices(compactVertexCount);
+                meshopt_remapVertexBuffer(compactVertices.data(),
+                                          result.vertices.data(),
+                                          result.vertices.size(),
+                                          sizeof(Vertex),
+                                          fetchRemap.data());
+
+                std::vector<uint32_t> compactIndices(result.indices.size());
+                meshopt_remapIndexBuffer(compactIndices.data(),
+                                         result.indices.data(),
+                                         result.indices.size(),
+                                         fetchRemap.data());
+
+                result.vertices = std::move(compactVertices);
+                result.indices = std::move(compactIndices);
+
+                if (!result.skinWeights.empty()) {
+                    std::vector<SkinWeight> compactWeights(compactVertexCount);
+                    meshopt_remapVertexBuffer(compactWeights.data(),
+                                              result.skinWeights.data(),
+                                              result.skinWeights.size(),
+                                              sizeof(SkinWeight),
+                                              fetchRemap.data());
+                    result.skinWeights = std::move(compactWeights);
+                }
+            }
+        }
+
+        return result;
+    };
+
+    auto encodeVertexLikeBuffer = [](const void* data,
+                                     size_t count,
+                                     size_t stride,
+                                     std::vector<uint8_t>& output) -> bool {
+        if (!data || count == 0 || stride == 0) {
+            output.clear();
+            return true;
+        }
+
+        size_t bound = meshopt_encodeVertexBufferBound(count, stride);
+        output.resize(bound);
+        size_t encodedSize = meshopt_encodeVertexBuffer(output.data(), output.size(), data, count, stride);
+        if (encodedSize == 0) {
+            output.clear();
+            return false;
+        }
+        output.resize(encodedSize);
+        return true;
+    };
+
+    OptimizedCookedMeshData optimized = buildOptimizedMesh();
+    std::vector<QuantizedVertex> quantizedVertices;
+    quantizedVertices.reserve(optimized.vertices.size());
+    const Math::Vector3 boundsMin = mesh.getBoundsMin();
+    const Math::Vector3 boundsMax = mesh.getBoundsMax();
+    for (const Vertex& vertex : optimized.vertices) {
+        QuantizedVertex q{};
+        q.position[0] = quantizePosition(vertex.position.x, boundsMin.x, boundsMax.x);
+        q.position[1] = quantizePosition(vertex.position.y, boundsMin.y, boundsMax.y);
+        q.position[2] = quantizePosition(vertex.position.z, boundsMin.z, boundsMax.z);
+        q.normal[0] = quantizeSnorm16(vertex.normal.x);
+        q.normal[1] = quantizeSnorm16(vertex.normal.y);
+        q.normal[2] = quantizeSnorm16(vertex.normal.z);
+        q.texCoord[0] = meshopt_quantizeHalf(vertex.texCoord.x);
+        q.texCoord[1] = meshopt_quantizeHalf(vertex.texCoord.y);
+        q.texCoord1[0] = meshopt_quantizeHalf(vertex.texCoord1.x);
+        q.texCoord1[1] = meshopt_quantizeHalf(vertex.texCoord1.y);
+        q.tangent[0] = quantizeSnorm16(vertex.tangent.x);
+        q.tangent[1] = quantizeSnorm16(vertex.tangent.y);
+        q.tangent[2] = quantizeSnorm16(vertex.tangent.z);
+        q.bitangent[0] = quantizeSnorm16(vertex.bitangent.x);
+        q.bitangent[1] = quantizeSnorm16(vertex.bitangent.y);
+        q.bitangent[2] = quantizeSnorm16(vertex.bitangent.z);
+        q.color[0] = quantizeColor8(vertex.color.x);
+        q.color[1] = quantizeColor8(vertex.color.y);
+        q.color[2] = quantizeColor8(vertex.color.z);
+        q.color[3] = quantizeColor8(vertex.color.w);
+        quantizedVertices.push_back(q);
+    }
+
+    std::vector<uint8_t> encodedVertices;
+    std::vector<uint8_t> encodedIndices;
+    std::vector<uint8_t> encodedSkinWeights;
+
+    bool vertexEncoded = encodeVertexLikeBuffer(quantizedVertices.data(),
+                                                quantizedVertices.size(),
+                                                sizeof(QuantizedVertex),
+                                                encodedVertices);
+    bool skinWeightEncoded = encodeVertexLikeBuffer(optimized.skinWeights.data(),
+                                                    optimized.skinWeights.size(),
+                                                    sizeof(SkinWeight),
+                                                    encodedSkinWeights);
+
+    bool indexEncoded = true;
+    if (!optimized.indices.empty()) {
+        size_t bound = meshopt_encodeIndexBufferBound(optimized.indices.size(), optimized.vertices.size());
+        encodedIndices.resize(bound);
+        size_t encodedSize = meshopt_encodeIndexBuffer(encodedIndices.data(),
+                                                       encodedIndices.size(),
+                                                       optimized.indices.data(),
+                                                       optimized.indices.size());
+        if (encodedSize == 0) {
+            indexEncoded = false;
+            encodedIndices.clear();
+        } else {
+            encodedIndices.resize(encodedSize);
+        }
+    }
+
+    if (vertexEncoded && skinWeightEncoded && indexEncoded) {
+        CookedMeshBinaryWriter writer;
+        writer.writeBytes("CMSH", 4);
+        writer.writeU32(3);
+        writer.writeU32(static_cast<uint32_t>(optimized.vertices.size()));
+        writer.writeU32(static_cast<uint32_t>(optimized.indices.size()));
+        writer.writeU32(static_cast<uint32_t>(optimized.submeshes.size()));
+        writer.writeU32(static_cast<uint32_t>(optimized.skinWeights.size()));
+        writer.writeU32(static_cast<uint32_t>(mesh.getName().size()));
+        writer.writeU32(static_cast<uint32_t>(encodedVertices.size()));
+        writer.writeU32(static_cast<uint32_t>(encodedIndices.size()));
+        writer.writeU32(static_cast<uint32_t>(optimized.submeshes.size() * sizeof(Submesh)));
+        writer.writeU32(static_cast<uint32_t>(encodedSkinWeights.size()));
+        writer.writeU32(mesh.isDoubleSided() ? 1u : 0u);
+        writer.writeF32(mesh.getBoundsMin().x);
+        writer.writeF32(mesh.getBoundsMin().y);
+        writer.writeF32(mesh.getBoundsMin().z);
+        writer.writeF32(mesh.getBoundsMax().x);
+        writer.writeF32(mesh.getBoundsMax().y);
+        writer.writeF32(mesh.getBoundsMax().z);
+        writer.writeBytes(mesh.getName().data(), mesh.getName().size());
+        writer.writeBytes(encodedVertices.data(), encodedVertices.size());
+        writer.writeBytes(encodedIndices.data(), encodedIndices.size());
+        writer.writeBytes(optimized.submeshes.data(), optimized.submeshes.size() * sizeof(Submesh));
+        writer.writeBytes(encodedSkinWeights.data(), encodedSkinWeights.size());
+        return writer.bytes();
+    }
+#endif
+
     json payload = SerializeMeshData(mesh);
     std::vector<uint8_t> packed = json::to_msgpack(payload);
 
@@ -673,17 +957,208 @@ std::shared_ptr<Mesh> DeserializeCookedMeshBinary(const std::vector<uint8_t>& by
     };
 
     uint32_t version = readU32(4);
-    uint32_t payloadSize = readU32(8);
-    if (version != 1 || bytes.size() < 12ull + payloadSize) {
+    if (version == 1) {
+        uint32_t payloadSize = readU32(8);
+        if (bytes.size() < 12ull + payloadSize) {
+            return nullptr;
+        }
+
+        std::vector<uint8_t> payload(bytes.begin() + 12, bytes.begin() + 12 + payloadSize);
+        json root = json::from_msgpack(payload, true, false);
+        if (root.is_discarded() || !root.is_object()) {
+            return nullptr;
+        }
+        return DeserializeMeshData(root);
+    }
+
+#if CRESCENT_HAS_MESHOPTIMIZER
+    constexpr size_t kHeaderSize = 72;
+    if ((version != 2 && version != 3) || bytes.size() < kHeaderSize) {
         return nullptr;
     }
 
-    std::vector<uint8_t> payload(bytes.begin() + 12, bytes.begin() + 12 + payloadSize);
-    json root = json::from_msgpack(payload, true, false);
-    if (root.is_discarded() || !root.is_object()) {
+    auto readF32 = [&bytes](size_t offset) -> float {
+        uint32_t bits = static_cast<uint32_t>(bytes[offset]) |
+                        (static_cast<uint32_t>(bytes[offset + 1]) << 8u) |
+                        (static_cast<uint32_t>(bytes[offset + 2]) << 16u) |
+                        (static_cast<uint32_t>(bytes[offset + 3]) << 24u);
+        float value = 0.0f;
+        std::memcpy(&value, &bits, sizeof(float));
+        return value;
+    };
+
+    const uint32_t vertexCount = readU32(8);
+    const uint32_t indexCount = readU32(12);
+    const uint32_t submeshCount = readU32(16);
+    const uint32_t skinWeightCount = readU32(20);
+    const uint32_t nameSize = readU32(24);
+    const uint32_t vertexDataSize = readU32(28);
+    const uint32_t indexDataSize = readU32(32);
+    const uint32_t submeshDataSize = readU32(36);
+    const uint32_t skinWeightDataSize = readU32(40);
+    const bool doubleSided = readU32(44) != 0;
+
+    const size_t expectedSubmeshBytes = static_cast<size_t>(submeshCount) * sizeof(Submesh);
+    if (submeshDataSize != expectedSubmeshBytes) {
         return nullptr;
     }
-    return DeserializeMeshData(root);
+
+    const size_t totalPayloadSize = static_cast<size_t>(nameSize)
+        + static_cast<size_t>(vertexDataSize)
+        + static_cast<size_t>(indexDataSize)
+        + static_cast<size_t>(submeshDataSize)
+        + static_cast<size_t>(skinWeightDataSize);
+    if (bytes.size() < kHeaderSize + totalPayloadSize) {
+        return nullptr;
+    }
+
+    size_t cursor = kHeaderSize;
+    std::string name;
+    if (nameSize > 0) {
+        name.assign(reinterpret_cast<const char*>(bytes.data() + cursor), nameSize);
+        cursor += nameSize;
+    }
+
+    std::vector<Vertex> vertices(vertexCount);
+    if (vertexCount > 0) {
+        if (vertexDataSize == 0) {
+            return nullptr;
+        }
+
+        if (version == 2) {
+            if (meshopt_decodeVertexBuffer(vertices.data(),
+                                           vertexCount,
+                                           sizeof(Vertex),
+                                           bytes.data() + cursor,
+                                           vertexDataSize) != 0) {
+                return nullptr;
+            }
+        } else {
+            struct QuantizedVertex {
+                uint16_t position[3];
+                int16_t normal[3];
+                uint16_t texCoord[2];
+                uint16_t texCoord1[2];
+                int16_t tangent[3];
+                int16_t bitangent[3];
+                uint8_t color[4];
+            };
+
+            auto dequantizePosition = [](uint16_t value, float minValue, float maxValue) -> float {
+                float extent = maxValue - minValue;
+                if (extent <= 1e-8f) {
+                    return minValue;
+                }
+                float normalized = static_cast<float>(value) / 65535.0f;
+                return minValue + normalized * extent;
+            };
+
+            auto dequantizeSnorm16 = [](int16_t value) -> float {
+                float normalized = static_cast<float>(value) / 32767.0f;
+                return std::max(-1.0f, std::min(1.0f, normalized));
+            };
+
+            auto dequantizeColor8 = [](uint8_t value) -> float {
+                return static_cast<float>(value) / 255.0f;
+            };
+
+            std::vector<QuantizedVertex> quantizedVertices(vertexCount);
+            if (meshopt_decodeVertexBuffer(quantizedVertices.data(),
+                                           vertexCount,
+                                           sizeof(QuantizedVertex),
+                                           bytes.data() + cursor,
+                                           vertexDataSize) != 0) {
+                return nullptr;
+            }
+
+            const float boundsMinX = readF32(48);
+            const float boundsMinY = readF32(52);
+            const float boundsMinZ = readF32(56);
+            const float boundsMaxX = readF32(60);
+            const float boundsMaxY = readF32(64);
+            const float boundsMaxZ = readF32(68);
+
+            for (size_t i = 0; i < quantizedVertices.size(); ++i) {
+                const QuantizedVertex& q = quantizedVertices[i];
+                Vertex& v = vertices[i];
+                v.position.x = dequantizePosition(q.position[0], boundsMinX, boundsMaxX);
+                v.position.y = dequantizePosition(q.position[1], boundsMinY, boundsMaxY);
+                v.position.z = dequantizePosition(q.position[2], boundsMinZ, boundsMaxZ);
+                v.normal.x = dequantizeSnorm16(q.normal[0]);
+                v.normal.y = dequantizeSnorm16(q.normal[1]);
+                v.normal.z = dequantizeSnorm16(q.normal[2]);
+                v.texCoord.x = meshopt_dequantizeHalf(q.texCoord[0]);
+                v.texCoord.y = meshopt_dequantizeHalf(q.texCoord[1]);
+                v.texCoord1.x = meshopt_dequantizeHalf(q.texCoord1[0]);
+                v.texCoord1.y = meshopt_dequantizeHalf(q.texCoord1[1]);
+                v.tangent.x = dequantizeSnorm16(q.tangent[0]);
+                v.tangent.y = dequantizeSnorm16(q.tangent[1]);
+                v.tangent.z = dequantizeSnorm16(q.tangent[2]);
+                v.bitangent.x = dequantizeSnorm16(q.bitangent[0]);
+                v.bitangent.y = dequantizeSnorm16(q.bitangent[1]);
+                v.bitangent.z = dequantizeSnorm16(q.bitangent[2]);
+                v.color.x = dequantizeColor8(q.color[0]);
+                v.color.y = dequantizeColor8(q.color[1]);
+                v.color.z = dequantizeColor8(q.color[2]);
+                v.color.w = dequantizeColor8(q.color[3]);
+            }
+        }
+        cursor += vertexDataSize;
+    }
+
+    std::vector<uint32_t> indices(indexCount);
+    if (indexCount > 0) {
+        if (indexDataSize == 0 ||
+            meshopt_decodeIndexBuffer(indices.data(),
+                                      indexCount,
+                                      sizeof(uint32_t),
+                                      bytes.data() + cursor,
+                                      indexDataSize) != 0) {
+            return nullptr;
+        }
+        cursor += indexDataSize;
+    }
+
+    std::vector<Submesh> submeshes(submeshCount);
+    if (submeshCount > 0) {
+        std::memcpy(submeshes.data(), bytes.data() + cursor, submeshDataSize);
+        cursor += submeshDataSize;
+    }
+
+    std::vector<SkinWeight> skinWeights(skinWeightCount);
+    if (skinWeightCount > 0) {
+        if (skinWeightDataSize == 0 ||
+            meshopt_decodeVertexBuffer(skinWeights.data(),
+                                       skinWeightCount,
+                                       sizeof(SkinWeight),
+                                       bytes.data() + cursor,
+                                       skinWeightDataSize) != 0) {
+            return nullptr;
+        }
+        cursor += skinWeightDataSize;
+    }
+
+    auto mesh = std::make_shared<Mesh>();
+    mesh->setVertices(vertices);
+    mesh->setIndices(indices);
+    if (!submeshes.empty()) {
+        mesh->setSubmeshes(submeshes);
+    }
+    if (!skinWeights.empty()) {
+        mesh->setSkinWeights(skinWeights);
+    }
+    mesh->setName(name);
+    mesh->setDoubleSided(doubleSided);
+
+    const Math::Vector3 expectedBoundsMin(readF32(48), readF32(52), readF32(56));
+    const Math::Vector3 expectedBoundsMax(readF32(60), readF32(64), readF32(68));
+    (void)expectedBoundsMin;
+    (void)expectedBoundsMax;
+    return mesh;
+#else
+    (void)bytes;
+    return nullptr;
+#endif
 }
 
 std::string BuildCookedSceneMeshRelativePath(const std::filesystem::path& cookedScenePath,
@@ -2695,6 +3170,48 @@ void ApplyEntityComponents(Entity* entity,
             }
             skinnedRenderer->setAnimationClips(clips);
         }
+        if (skinnedRenderer && !s.contains("animationClips") &&
+            s.contains("animationSources") && s["animationSources"].is_array()) {
+            auto skeleton = skinnedRenderer->getSkeleton();
+            if (skeleton) {
+                for (const auto& sourceEntry : s["animationSources"]) {
+                    std::string resolvedPath = ResolveTextureEntryPath(sourceEntry);
+                    if (resolvedPath.empty()) {
+                        continue;
+                    }
+
+                    std::string guid;
+                    if (sourceEntry.is_object()) {
+                        guid = sourceEntry.value("guid", std::string());
+                    }
+
+                    SceneCommands::ModelImportOptions importOptions;
+                    AssetDatabase& db = AssetDatabase::getInstance();
+                    AssetRecord record;
+                    bool hasRecord = false;
+                    if (!guid.empty()) {
+                        hasRecord = db.getRecordForGuid(guid, record);
+                    }
+                    if (!hasRecord) {
+                        hasRecord = db.getRecordForPath(resolvedPath, record);
+                    }
+                    if (hasRecord && record.type == "model") {
+                        importOptions = record.modelSettings;
+                    }
+
+                    auto clips = SceneCommands::importAnimationClipsForSkeleton(resolvedPath, *skeleton, importOptions);
+                    if (clips.empty()) {
+                        continue;
+                    }
+
+                    AnimationClipSource source;
+                    source.path = resolvedPath;
+                    source.guid = guid;
+                    source.clips = std::move(clips);
+                    skinnedRenderer->addAnimationClipSource(source);
+                }
+            }
+        }
         if (skinnedRenderer && meshRenderer) {
             const auto& materials = meshRenderer->getMaterials();
             for (size_t i = 0; i < materials.size(); ++i) {
@@ -3327,6 +3844,27 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                         }
                     }
                     skinnedData["animationClips"] = clipData;
+                }
+            } else {
+                const auto& sources = skinned->getAnimationClipSources();
+                if (!sources.empty()) {
+                    json sourceData = json::array();
+                    for (const auto& source : sources) {
+                        if (source.path.empty()) {
+                            continue;
+                        }
+                        json ref = SerializeAssetPath(source.path, "model");
+                        if (ref.is_null() || ref.empty()) {
+                            continue;
+                        }
+                        if (ref.is_object() && !source.guid.empty() && !ref.contains("guid")) {
+                            ref["guid"] = source.guid;
+                        }
+                        sourceData.push_back(ref);
+                    }
+                    if (!sourceData.empty()) {
+                        skinnedData["animationSources"] = sourceData;
+                    }
                 }
             }
             const auto& clips = skinned->getAnimationClips();

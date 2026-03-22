@@ -180,7 +180,8 @@ inline float3 reconstructViewPosition(float2 uv,
     float2 ndc = uvToNdc(uv);
     float4 clip = float4(ndc, depth, 1.0);
     float4 view = camera.projectionMatrixInverse * clip;
-    return view.xyz / max(view.w, 0.0001);
+    float safeW = (abs(view.w) > 1e-5) ? view.w : (view.w < 0.0 ? -1e-5 : 1e-5);
+    return view.xyz / safeW;
 }
 
 inline float linearizeDepth(float depth, constant CameraUniforms& camera) {
@@ -616,8 +617,8 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
     float3 n = normalize(normalWS);
     float nDotLPre = saturate(dot(n, normalize(lightDirWS)));
     float receiverScale = isCascade
-        ? mix(2.4, 0.9, nDotLPre)
-        : mix(3.0, 1.25, nDotLPre);
+        ? mix(0.95, 0.28, nDotLPre)
+        : mix(1.2, 0.4, nDotLPre);
     float receiverOffset = max(s.depthRange.z, 1e-4) * receiverScale;
     float3 samplePos = pos + n * receiverOffset;
     float4 clip = s.viewProj * float4(samplePos, 1.0);
@@ -784,7 +785,7 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
     float3 toLight = lightPosWS - worldPos;
     float nDotL = saturate(dot(normalize(normalWS), normalize(toLight)));
     float texelWorld = (2.0 * farP) / max(s.atlasUV.x, 1.0);
-    float receiverOffset = texelWorld * mix(4.0, 1.6, nDotL);
+    float receiverOffset = texelWorld * mix(1.6, 0.55, nDotL);
     float3 samplePos = worldPos + normalize(normalWS) * receiverOffset;
     float3 toFrag = samplePos - lightPosWS;
     PointShadowProjection proj = projectPointShadowFace(toFrag);
@@ -3122,7 +3123,7 @@ fragment float4 fragment_main(
     }
     
     // AO should mostly shape indirect lighting, but full-strength AO often causes muddy shadows.
-    float indirectAO = mix(1.0, ao, 0.6);
+    float indirectAO = mix(1.0, ao, 0.82);
     environmentDiffuseLighting *= environment.exposureIntensity.y * indirectAO;
     environmentSpecularLighting *= environment.exposureIntensity.y;
     
@@ -3130,13 +3131,13 @@ fragment float4 fragment_main(
     float3 ambientRadiance = environment.ambientColorIntensity.rgb * environment.ambientColorIntensity.w;
     float3 F_ambient = fresnelSchlickRoughness(NdotV, F0, roughness);
     float3 kD_ambient = (float3(1.0) - F_ambient) * (1.0 - metallic);
-    float ambientAO = mix(1.0, ao, 0.35);
+    float ambientAO = mix(1.0, ao, 0.65);
     float3 ambientLighting = ambientRadiance * (kD_ambient * albedo / PI) * ambientAO;
     float3 probeLighting = float3(0.0);
     if (in.staticLightmapFlag < 0.5 && probeVolume.gridCounts.w > 0.5 && probeVolume.featureParams.x > 0.5) {
         probeLighting = sample_probe_volume_irradiance(probeData, probeVolume, in.worldPosition, N);
     }
-    float probeAO = mix(1.0, ao, 0.5);
+    float probeAO = mix(1.0, ao, 0.72);
     float3 probeIndirect = probeLighting * (kD_ambient * albedo / PI) * probeAO;
     float3 F_probe = fresnelSchlickRoughness(NdotV, F0, roughness);
     float2 probeBRDF = hasProperIBL

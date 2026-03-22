@@ -10,6 +10,18 @@
 namespace Crescent {
 namespace {
 
+static void RebindClipList(const std::shared_ptr<Skeleton>& skeleton,
+                           std::vector<std::shared_ptr<AnimationClip>>& clips) {
+    if (!skeleton) {
+        return;
+    }
+    for (const auto& clip : clips) {
+        if (clip) {
+            clip->rebindToSkeleton(*skeleton);
+        }
+    }
+}
+
 static void DecomposeTRS(const Math::Matrix4x4& matrix,
                          Math::Vector3& outPos,
                          Math::Quaternion& outRot,
@@ -172,16 +184,19 @@ void SkinnedMeshRenderer::setSkeleton(std::shared_ptr<Skeleton> skeleton) {
         m_PrevBoneMatrices = m_BoneMatrices;
         m_RootMotionValid = false;
         m_PrevRootTime = 0.0f;
-        for (const auto& clip : m_Clips) {
-            if (clip) {
-                clip->rebindToSkeleton(*m_Skeleton);
-            }
+        RebindClipList(m_Skeleton, m_BaseClips);
+        for (auto& source : m_AnimationClipSources) {
+            RebindClipList(m_Skeleton, source.clips);
         }
+        rebuildAnimationClipList(false);
     } else {
         m_BoneMatrices.clear();
         m_PrevBoneMatrices.clear();
         m_RootMotionValid = false;
         m_PrevRootTime = 0.0f;
+        m_Clips.clear();
+        m_Clip.reset();
+        m_ActiveClipIndex = -1;
     }
 }
 
@@ -206,30 +221,38 @@ void SkinnedMeshRenderer::setAnimationClip(std::shared_ptr<AnimationClip> clip) 
 }
 
 void SkinnedMeshRenderer::setAnimationClips(const std::vector<std::shared_ptr<AnimationClip>>& clips) {
-    m_Clips = clips;
-    m_BlendClip.reset();
-    m_BlendDuration = 0.0f;
-    m_BlendElapsed = 0.0f;
-    m_BlendClipIndex = -1;
-    m_RootMotionValid = false;
-    m_PrevRootTime = 0.0f;
-    if (m_Skeleton) {
-        for (const auto& clip : m_Clips) {
-            if (clip) {
-                clip->rebindToSkeleton(*m_Skeleton);
-            }
-        }
-    }
-    if (m_Clips.empty()) {
-        m_Clip.reset();
-        m_ActiveClipIndex = -1;
+    m_BaseClips = clips;
+    rebuildAnimationClipList(true);
+}
+
+void SkinnedMeshRenderer::setAnimationClipSources(const std::vector<AnimationClipSource>& sources) {
+    m_AnimationClipSources = sources;
+    rebuildAnimationClipList(true);
+}
+
+void SkinnedMeshRenderer::clearAnimationClipSources() {
+    if (m_AnimationClipSources.empty()) {
         return;
     }
-    if (m_ActiveClipIndex < 0 || m_ActiveClipIndex >= static_cast<int>(m_Clips.size())) {
-        m_ActiveClipIndex = 0;
+    m_AnimationClipSources.clear();
+    rebuildAnimationClipList(true);
+}
+
+void SkinnedMeshRenderer::addAnimationClipSource(const AnimationClipSource& source) {
+    if (source.path.empty() || source.clips.empty()) {
+        return;
     }
-    m_Clip = m_Clips[static_cast<size_t>(m_ActiveClipIndex)];
-    m_TimeSeconds = 0.0f;
+    m_AnimationClipSources.push_back(source);
+    rebuildAnimationClipList(true);
+}
+
+bool SkinnedMeshRenderer::removeAnimationClipSource(size_t index) {
+    if (index >= m_AnimationClipSources.size()) {
+        return false;
+    }
+    m_AnimationClipSources.erase(m_AnimationClipSources.begin() + index);
+    rebuildAnimationClipList(true);
+    return true;
 }
 
 bool SkinnedMeshRenderer::setActiveClipIndex(int index) {
@@ -246,6 +269,60 @@ bool SkinnedMeshRenderer::setActiveClipIndex(int index) {
     m_RootMotionValid = false;
     m_PrevRootTime = 0.0f;
     return true;
+}
+
+void SkinnedMeshRenderer::rebuildAnimationClipList(bool resetPlayback) {
+    m_BlendClip.reset();
+    m_BlendDuration = 0.0f;
+    m_BlendElapsed = 0.0f;
+    m_BlendClipIndex = -1;
+    m_RootMotionValid = false;
+    m_PrevRootTime = 0.0f;
+
+    RebindClipList(m_Skeleton, m_BaseClips);
+    for (auto& source : m_AnimationClipSources) {
+        RebindClipList(m_Skeleton, source.clips);
+    }
+
+    std::shared_ptr<AnimationClip> activeClip = m_Clip;
+    m_Clips.clear();
+    m_Clips.reserve(m_BaseClips.size());
+    for (const auto& clip : m_BaseClips) {
+        m_Clips.push_back(clip);
+    }
+    for (const auto& source : m_AnimationClipSources) {
+        for (const auto& clip : source.clips) {
+            m_Clips.push_back(clip);
+        }
+    }
+
+    int resolvedIndex = -1;
+    if (activeClip) {
+        for (size_t i = 0; i < m_Clips.size(); ++i) {
+            if (m_Clips[i] == activeClip) {
+                resolvedIndex = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    if (resolvedIndex < 0 && !m_Clips.empty()) {
+        resolvedIndex = m_ActiveClipIndex;
+        if (resolvedIndex < 0 || resolvedIndex >= static_cast<int>(m_Clips.size())) {
+            resolvedIndex = 0;
+        }
+    }
+
+    m_ActiveClipIndex = resolvedIndex;
+    if (m_ActiveClipIndex >= 0 && m_ActiveClipIndex < static_cast<int>(m_Clips.size())) {
+        m_Clip = m_Clips[static_cast<size_t>(m_ActiveClipIndex)];
+    } else {
+        m_Clip.reset();
+        m_ActiveClipIndex = -1;
+    }
+
+    if (resetPlayback) {
+        m_TimeSeconds = 0.0f;
+    }
 }
 
 bool SkinnedMeshRenderer::crossFadeToClip(int index, float durationSeconds, bool restart) {

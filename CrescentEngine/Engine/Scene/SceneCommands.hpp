@@ -8,6 +8,10 @@
 #include "../Components/Light.hpp"
 #include "../Components/Camera.hpp"
 #include "../Components/Decal.hpp"
+#include "../Animation/Skeleton.hpp"
+#include "../Animation/AnimationClip.hpp"
+#include <memory>
+#include <vector>
 
 namespace Crescent {
 
@@ -60,6 +64,10 @@ public:
 
     // Import a model file (static meshes + materials)
     static Entity* importModel(Scene* scene, const std::string& path, const ModelImportOptions& options = ModelImportOptions(), const std::string& name = "");
+    static std::vector<std::shared_ptr<AnimationClip>> importAnimationClipsForSkeleton(
+        const std::string& path,
+        const Skeleton& skeleton,
+        const ModelImportOptions& options = ModelImportOptions());
 
     // Reimport assets by GUID (uses stored import settings)
     static bool reimportModelAsset(Scene* scene, const std::string& guid);

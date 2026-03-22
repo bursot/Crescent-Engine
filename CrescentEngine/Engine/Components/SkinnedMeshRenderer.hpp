@@ -11,6 +11,12 @@
 
 namespace Crescent {
 
+struct AnimationClipSource {
+    std::string path;
+    std::string guid;
+    std::vector<std::shared_ptr<AnimationClip>> clips;
+};
+
 class SkinnedMeshRenderer : public Component {
 public:
     SkinnedMeshRenderer();
@@ -37,7 +43,13 @@ public:
     std::shared_ptr<AnimationClip> getAnimationClip() const { return m_Clip; }
     void setAnimationClip(std::shared_ptr<AnimationClip> clip);
     const std::vector<std::shared_ptr<AnimationClip>>& getAnimationClips() const { return m_Clips; }
+    size_t getBaseAnimationClipCount() const { return m_BaseClips.size(); }
     void setAnimationClips(const std::vector<std::shared_ptr<AnimationClip>>& clips);
+    const std::vector<AnimationClipSource>& getAnimationClipSources() const { return m_AnimationClipSources; }
+    void setAnimationClipSources(const std::vector<AnimationClipSource>& sources);
+    void clearAnimationClipSources();
+    void addAnimationClipSource(const AnimationClipSource& source);
+    bool removeAnimationClipSource(size_t index);
     int getActiveClipIndex() const { return m_ActiveClipIndex; }
     bool setActiveClipIndex(int index);
     bool crossFadeToClip(int index, float durationSeconds, bool restart = true);
@@ -73,12 +85,15 @@ public:
 
 private:
     void applyRootMotion(AnimationLocalPose& pose, float sampleTime);
+    void rebuildAnimationClipList(bool resetPlayback);
 
     std::shared_ptr<Mesh> m_Mesh;
     std::shared_ptr<Skeleton> m_Skeleton;
     std::vector<std::shared_ptr<Material>> m_Materials;
     std::shared_ptr<AnimationClip> m_Clip;
     std::vector<std::shared_ptr<AnimationClip>> m_Clips;
+    std::vector<std::shared_ptr<AnimationClip>> m_BaseClips;
+    std::vector<AnimationClipSource> m_AnimationClipSources;
     std::vector<Math::Matrix4x4> m_BoneMatrices;
     std::vector<Math::Matrix4x4> m_PrevBoneMatrices;
     std::shared_ptr<AnimationClip> m_BlendClip;

@@ -35,6 +35,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#if __has_include("../../../ThirdParty/meshoptimizer/src/meshoptimizer.h")
+#define CRESCENT_HAS_MESHOPTIMIZER 1
+#include "../../../ThirdParty/meshoptimizer/src/meshoptimizer.h"
+#include "../../../ThirdParty/meshoptimizer/src/simplifier.cpp"
+#else
+#define CRESCENT_HAS_MESHOPTIMIZER 0
+#endif
+
 #ifndef aiTextureType_GLTF_METALLIC_ROUGHNESS
 #define aiTextureType_GLTF_METALLIC_ROUGHNESS aiTextureType_UNKNOWN
 #endif
@@ -79,6 +87,151 @@ struct MeshCacheEntry {
     std::shared_ptr<Mesh> mesh;
     std::shared_ptr<Material> material;
 };
+
+struct HLODBucketBuildResult {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+};
+
+static HLODBucketBuildResult BuildCompactHLODBucket(const std::vector<Vertex>& sourceVertices,
+                                                    const std::vector<uint32_t>& sourceIndices) {
+    HLODBucketBuildResult result;
+    if (sourceVertices.empty() || sourceIndices.empty()) {
+        return result;
+    }
+
+    std::unordered_map<uint32_t, uint32_t> remap;
+    remap.reserve(sourceIndices.size());
+    result.indices.reserve(sourceIndices.size());
+
+    for (uint32_t index : sourceIndices) {
+        if (index >= sourceVertices.size()) {
+            continue;
+        }
+        auto [it, inserted] = remap.emplace(index, static_cast<uint32_t>(result.vertices.size()));
+        if (inserted) {
+            result.vertices.push_back(sourceVertices[index]);
+        }
+        result.indices.push_back(it->second);
+    }
+
+    return result;
+}
+
+#if CRESCENT_HAS_MESHOPTIMIZER
+static size_t RoundIndexCountToTriangleMultiple(size_t value) {
+    return (value / 3) * 3;
+}
+
+static float ComputeHLODRatio(size_t triangleCount, size_t sourceCount) {
+    float ratio = 0.5f;
+    if (triangleCount >= 512) ratio = 0.42f;
+    if (triangleCount >= 2048) ratio = 0.3f;
+    if (triangleCount >= 8192) ratio = 0.2f;
+    if (sourceCount >= 8) ratio *= 0.9f;
+    if (sourceCount >= 16) ratio *= 0.85f;
+    return std::max(0.12f, std::min(0.85f, ratio));
+}
+
+static bool SimplifyHLODBucketInPlace(HLODBucketBuildResult& bucket, size_t sourceCount) {
+    if (bucket.vertices.empty() || bucket.indices.size() < 192 || (bucket.indices.size() % 3) != 0) {
+        return false;
+    }
+
+    const size_t triangleCount = bucket.indices.size() / 3;
+    const float ratio = ComputeHLODRatio(triangleCount, sourceCount);
+    const size_t targetIndexCount = std::max<size_t>(96, RoundIndexCountToTriangleMultiple(static_cast<size_t>(std::round(bucket.indices.size() * ratio))));
+    if (targetIndexCount >= bucket.indices.size() || targetIndexCount < 3) {
+        return false;
+    }
+
+    std::vector<float> attributes;
+    attributes.reserve(bucket.vertices.size() * 17);
+    for (const Vertex& v : bucket.vertices) {
+        attributes.push_back(v.normal.x);
+        attributes.push_back(v.normal.y);
+        attributes.push_back(v.normal.z);
+        attributes.push_back(v.texCoord.x);
+        attributes.push_back(v.texCoord.y);
+        attributes.push_back(v.texCoord1.x);
+        attributes.push_back(v.texCoord1.y);
+        attributes.push_back(v.tangent.x);
+        attributes.push_back(v.tangent.y);
+        attributes.push_back(v.tangent.z);
+        attributes.push_back(v.bitangent.x);
+        attributes.push_back(v.bitangent.y);
+        attributes.push_back(v.bitangent.z);
+        attributes.push_back(v.color.x);
+        attributes.push_back(v.color.y);
+        attributes.push_back(v.color.z);
+        attributes.push_back(v.color.w);
+    }
+
+    constexpr float kWeights[17] = {
+        0.35f, 0.35f, 0.35f,
+        0.75f, 0.75f,
+        0.35f, 0.35f,
+        0.2f, 0.2f, 0.2f,
+        0.1f, 0.1f, 0.1f,
+        0.05f, 0.05f, 0.05f, 0.05f
+    };
+
+    std::vector<uint32_t> simplified(bucket.indices.size());
+    float resultError = 0.0f;
+    size_t simplifiedCount = meshopt_simplifyWithAttributes(simplified.data(),
+                                                            bucket.indices.data(),
+                                                            bucket.indices.size(),
+                                                            &bucket.vertices[0].position.x,
+                                                            bucket.vertices.size(),
+                                                            sizeof(Vertex),
+                                                            attributes.data(),
+                                                            sizeof(float) * 17,
+                                                            kWeights,
+                                                            17,
+                                                            nullptr,
+                                                            targetIndexCount,
+                                                            0.02f,
+                                                            meshopt_SimplifyLockBorder,
+                                                            &resultError);
+    if (simplifiedCount == 0 || simplifiedCount >= bucket.indices.size()) {
+        return false;
+    }
+
+    simplified.resize(RoundIndexCountToTriangleMultiple(simplifiedCount));
+    if (simplified.size() < 3) {
+        return false;
+    }
+
+    std::vector<uint32_t> cacheOptimized(simplified.size());
+    meshopt_optimizeVertexCache(cacheOptimized.data(), simplified.data(), simplified.size(), bucket.vertices.size());
+
+    std::vector<uint32_t> fetchRemap(bucket.vertices.size());
+    size_t compactVertexCount = meshopt_optimizeVertexFetchRemap(fetchRemap.data(),
+                                                                 cacheOptimized.data(),
+                                                                 cacheOptimized.size(),
+                                                                 bucket.vertices.size());
+    if (compactVertexCount == 0) {
+        return false;
+    }
+
+    std::vector<Vertex> compactVertices(compactVertexCount);
+    meshopt_remapVertexBuffer(compactVertices.data(),
+                              bucket.vertices.data(),
+                              bucket.vertices.size(),
+                              sizeof(Vertex),
+                              fetchRemap.data());
+
+    std::vector<uint32_t> compactIndices(cacheOptimized.size());
+    meshopt_remapIndexBuffer(compactIndices.data(),
+                             cacheOptimized.data(),
+                             cacheOptimized.size(),
+                             fetchRemap.data());
+
+    bucket.vertices = std::move(compactVertices);
+    bucket.indices = std::move(compactIndices);
+    return true;
+}
+#endif
 
 struct ModelCacheEntry {
     std::unordered_map<int, MeshCacheEntry> meshesByIndex;
@@ -3028,7 +3181,49 @@ static std::shared_ptr<Skeleton> BuildSkeleton(const aiScene* scene) {
     return skeleton;
 }
 
-static std::vector<std::shared_ptr<AnimationClip>> BuildAnimations(const aiScene* scene, const Skeleton& skeleton) {
+static std::string ToLowerAnimString(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+static bool IsGenericAnimationName(const std::string& value) {
+    if (value.empty()) {
+        return true;
+    }
+    std::string lowered = ToLowerAnimString(value);
+    return lowered == "mixamo.com" ||
+           lowered == "default take" ||
+           lowered == "take 001" ||
+           lowered == "take001" ||
+           lowered == "armature|mixamo.com|layer0" ||
+           lowered.rfind("animation_", 0) == 0;
+}
+
+static std::string BuildAnimationClipName(const aiAnimation* anim,
+                                          unsigned int index,
+                                          unsigned int animationCount,
+                                          const std::string& sourceNameHint) {
+    std::string name = (anim && anim->mName.length > 0) ? anim->mName.C_Str() : "";
+    if (IsGenericAnimationName(name)) {
+        name.clear();
+    }
+    if (!name.empty()) {
+        return name;
+    }
+    if (!sourceNameHint.empty()) {
+        if (animationCount <= 1) {
+            return sourceNameHint;
+        }
+        return sourceNameHint + "_" + std::to_string(index);
+    }
+    return "Animation_" + std::to_string(index);
+}
+
+static std::vector<std::shared_ptr<AnimationClip>> BuildAnimations(const aiScene* scene,
+                                                                   const Skeleton& skeleton,
+                                                                   const std::string& sourceNameHint = "") {
     std::vector<std::shared_ptr<AnimationClip>> clips;
     if (!scene || scene->mNumAnimations == 0) {
         return clips;
@@ -3040,8 +3235,7 @@ static std::vector<std::shared_ptr<AnimationClip>> BuildAnimations(const aiScene
             continue;
         }
         auto clip = std::make_shared<AnimationClip>();
-        std::string name = (anim->mName.length > 0) ? anim->mName.C_Str() : ("Animation_" + std::to_string(i));
-        clip->setName(name);
+        clip->setName(BuildAnimationClipName(anim, i, scene->mNumAnimations, sourceNameHint));
         clip->setDurationTicks(static_cast<float>(anim->mDuration));
         float ticksPerSecond = static_cast<float>(anim->mTicksPerSecond);
         if (ticksPerSecond <= 0.0f) {
@@ -3683,7 +3877,7 @@ Entity* SceneCommands::importModel(Scene* scene, const std::string& path, const 
 
     context.skeleton = BuildSkeleton(aiScene);
     if (context.skeleton) {
-        context.animations = BuildAnimations(aiScene, *context.skeleton);
+        context.animations = BuildAnimations(aiScene, *context.skeleton, std::filesystem::path(path).stem().string());
     }
     
     context.meshes.reserve(aiScene->mNumMeshes);
@@ -3789,6 +3983,32 @@ Entity* SceneCommands::importModel(Scene* scene, const std::string& path, const 
         AssetDatabase::getInstance().recordImportForGuid(guid);
     }
     return root;
+}
+
+std::vector<std::shared_ptr<AnimationClip>> SceneCommands::importAnimationClipsForSkeleton(
+    const std::string& path,
+    const Skeleton& skeleton,
+    const ModelImportOptions& options) {
+    if (path.empty() || skeleton.getBoneCount() == 0) {
+        return {};
+    }
+
+    Assimp::Importer importer;
+    importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
+    if (options.scale > 0.0f && options.scale != 1.0f) {
+        importer.SetPropertyFloat(AI_CONFIG_GLOBAL_SCALE_FACTOR_KEY, options.scale);
+    }
+
+    const unsigned int flags = aiProcess_GlobalScale | aiProcess_ValidateDataStructure;
+    const aiScene* aiScene = importer.ReadFile(path, flags);
+    if (!aiScene || aiScene->mNumAnimations == 0) {
+        std::cerr << "[AnimationImporter] Failed to read clips: " << path
+                  << " (" << importer.GetErrorString() << ")" << std::endl;
+        return {};
+    }
+
+    std::string sourceName = std::filesystem::path(path).stem().string();
+    return BuildAnimations(aiScene, skeleton, sourceName);
 }
 
 bool SceneCommands::reimportModelAsset(Scene* scene, const std::string& guid) {
@@ -4192,24 +4412,44 @@ Entity* SceneCommands::buildHLOD(Scene* scene, const std::vector<std::string>& u
         return nullptr;
     }
 
+    mergedIndices.clear();
+    mergedSubmeshes.clear();
+
     uint32_t indexStart = 0;
+    std::vector<Vertex> hlodVertices;
+    std::vector<uint32_t> hlodIndices;
     for (const auto& bucket : buckets) {
         if (bucket.indices.empty()) {
             continue;
         }
-        mergedSubmeshes.emplace_back(indexStart, static_cast<uint32_t>(bucket.indices.size()), bucket.materialIndex);
-        mergedIndices.insert(mergedIndices.end(), bucket.indices.begin(), bucket.indices.end());
-        indexStart += static_cast<uint32_t>(bucket.indices.size());
+
+        HLODBucketBuildResult bucketMesh = BuildCompactHLODBucket(mergedVertices, bucket.indices);
+        if (bucketMesh.vertices.empty() || bucketMesh.indices.empty()) {
+            continue;
+        }
+
+#if CRESCENT_HAS_MESHOPTIMIZER
+        SimplifyHLODBucketInPlace(bucketMesh, sources.size());
+#endif
+
+        const uint32_t baseVertex = static_cast<uint32_t>(hlodVertices.size());
+        hlodVertices.insert(hlodVertices.end(), bucketMesh.vertices.begin(), bucketMesh.vertices.end());
+
+        mergedSubmeshes.emplace_back(indexStart, static_cast<uint32_t>(bucketMesh.indices.size()), bucket.materialIndex);
+        for (uint32_t index : bucketMesh.indices) {
+            hlodIndices.push_back(baseVertex + index);
+        }
+        indexStart += static_cast<uint32_t>(bucketMesh.indices.size());
     }
 
-    if (mergedIndices.empty()) {
+    if (hlodVertices.empty() || hlodIndices.empty()) {
         return nullptr;
     }
 
     auto mergedMesh = std::make_shared<Mesh>();
     mergedMesh->setName("HLOD_Mesh");
-    mergedMesh->setVertices(mergedVertices);
-    mergedMesh->setIndices(mergedIndices);
+    mergedMesh->setVertices(hlodVertices);
+    mergedMesh->setIndices(hlodIndices);
     if (!mergedSubmeshes.empty()) {
         mergedMesh->setSubmeshes(mergedSubmeshes);
     }

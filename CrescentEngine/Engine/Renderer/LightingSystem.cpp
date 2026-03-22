@@ -349,8 +349,9 @@ void LightingSystem::allocateShadows() {
     const float cascadeBias = primaryDirectional ? primaryDirectional->getShadowBias() : 0.0005f;
     const float cascadeNormalBias = primaryDirectional ? primaryDirectional->getShadowNormalBias() : 0.001f;
     const float cascadePenumbra = primaryDirectional ? primaryDirectional->getPenumbra() : 1.0f;
-    const float biasScale = 2.0f;
-    const float normalBiasScale = 3.0f;
+    // Keep authored bias meaningful; large automatic floors were causing visible peter-panning.
+    const float biasScale = 1.0f;
+    const float normalBiasScale = 1.5f;
 
     // Directional cascades
     for (auto& slice : m_cascades) {
@@ -392,8 +393,8 @@ void LightingSystem::allocateShadows() {
             float texelWorld = (2.0f * farPlane) / static_cast<float>(res);
             float depthSpan = std::max(farPlane - nearPlane, 0.1f);
             float normalizedTexel = texelWorld / depthSpan;
-            float bias = std::max(light->getShadowBias(), normalizedTexel * biasScale * 2.0f);
-            float normalBias = std::max(light->getShadowNormalBias(), normalizedTexel * normalBiasScale * 3.0f);
+            float bias = std::max(light->getShadowBias(), normalizedTexel * 1.5f);
+            float normalBias = std::max(light->getShadowNormalBias(), normalizedTexel * 2.25f);
             gpuShadow.params = Math::Vector4(bias, normalBias, light->getPenumbra(), 3.0f); // type=point cube
             gpuShadow.depthRange = Math::Vector4(nearPlane, farPlane, static_cast<float>(m_pointCubeCounts[tier]), (float)tier); // cube index in z, tier in w
             gpuShadow.atlasUV = Math::Vector4((float)res, 0.0f, 0.0f, 0.0f); // store resolution
@@ -496,11 +497,9 @@ void LightingSystem::allocateShadows() {
         );
         float texelWorld = slice.texelWorldSize;
         float normalizedTexel = texelWorld / std::max(0.1f, slice.depthSpan);
-        // Directional cascades are much more sensitive to self-shadow shimmer than
-        // local lights because a tiny camera move affects a large receiver area.
-        // Keep a stronger floor so dense scenes do not break into acne/flicker.
-        float bias = std::max(cascadeBias, std::max(normalizedTexel * biasScale, 0.0012f));
-        float normalBias = std::max(cascadeNormalBias, std::max(normalizedTexel * normalBiasScale, 0.0025f));
+        // Keep a modest stability floor for cascades, but let authored values stay effective.
+        float bias = std::max(cascadeBias, std::max(normalizedTexel * biasScale, 0.00035f));
+        float normalBias = std::max(cascadeNormalBias, std::max(normalizedTexel * normalBiasScale, 0.00075f));
         gpuShadow.params = Math::Vector4(bias, normalBias, cascadePenumbra, static_cast<float>(i)); // bias/normalBias/penumbra/cascadeId
         gpuShadow.depthRange = Math::Vector4(slice.splitNear, slice.splitFar, texelWorld, static_cast<float>(slice.atlas.layer));
 

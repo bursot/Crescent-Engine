@@ -5395,8 +5395,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     if (useSSAO) {
         SSAOParamsGPU ssaoParams{};
         ssaoParams.radius = std::max(0.05f, post.ssaoRadius);
-        ssaoParams.bias = 0.02f;
-        ssaoParams.intensity = std::max(0.0f, std::min(post.ssaoStrength, 1.0f));
+        ssaoParams.bias = std::max(0.0025f, post.ssaoRadius * 0.01f);
+        ssaoParams.intensity = std::max(0.0f, std::min(post.ssaoStrength, 3.0f));
         ssaoParams.power = 1.5f;
         ssaoParams.noiseScale = Math::Vector2(renderWidth / 4.0f, renderHeight / 4.0f);
         ssaoParams.texelSize = Math::Vector2(1.0f / renderWidth, 1.0f / renderHeight);

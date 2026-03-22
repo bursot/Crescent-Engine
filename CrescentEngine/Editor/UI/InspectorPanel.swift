@@ -358,6 +358,14 @@ struct AnimationInspector: View {
     let entityUUID: String
     @Environment(\.openWindow) private var openWindow
 
+    private struct AnimationClipSourceItem: Identifiable {
+        let id: String
+        let index: Int
+        let name: String
+        let path: String
+        let clipCount: Int
+    }
+
     private struct AnimatorParam: Identifiable {
         let id: String
         var name: String
@@ -391,11 +399,22 @@ struct AnimationInspector: View {
     @State private var newEventName: String = ""
     @State private var newEventTime: Float = 0.0
     @State private var eventLog: [AnimationEventItem] = []
+    @State private var clipSources: [AnimationClipSourceItem] = []
+    @State private var showClipImporter: Bool = false
     
     private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+    private let modelTypes: [UTType] = {
+        let exts = [
+            "fbx", "obj", "gltf", "glb", "dae", "blend", "3ds",
+            "stl", "ply", "x", "smd", "md5mesh", "md2", "md3", "ms3d", "lwo", "lws"
+        ]
+        return exts.compactMap { UTType(filenameExtension: $0) }
+    }()
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            clipSourceSection
+
             if clipNames.isEmpty && stateNames.isEmpty {
                 Text("No animation clips")
                     .font(EditorTheme.font(size: 11))
@@ -667,6 +686,61 @@ struct AnimationInspector: View {
         .onReceive(timer) { _ in
             refreshAnimation()
         }
+        .fileImporter(isPresented: $showClipImporter, allowedContentTypes: modelTypes, allowsMultipleSelection: true) { result in
+            handleClipImport(result)
+        }
+    }
+
+    private var clipSourceSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Clip Assets")
+                        .font(EditorTheme.font(size: 11, weight: .semibold))
+                        .foregroundColor(EditorTheme.textPrimary)
+                    Spacer()
+                    Button("Add Clip") {
+                        showClipImporter = true
+                    }
+                    .buttonStyle(.bordered)
+                    .font(EditorTheme.font(size: 10, weight: .semibold))
+                }
+
+                if clipSources.isEmpty {
+                    Text("Attach separate FBX/GLB animation clips to this skeleton.")
+                        .font(EditorTheme.font(size: 10))
+                        .foregroundColor(EditorTheme.textMuted)
+                } else {
+                    ForEach(clipSources) { source in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(source.name)
+                                    .font(EditorTheme.font(size: 10, weight: .medium))
+                                    .foregroundColor(EditorTheme.textPrimary)
+                                Text(source.path)
+                                    .font(EditorTheme.mono(size: 9))
+                                    .foregroundColor(EditorTheme.textMuted)
+                                    .lineLimit(1)
+                                Text("\(source.clipCount) clip")
+                                    .font(EditorTheme.font(size: 9))
+                                    .foregroundColor(EditorTheme.textMuted)
+                            }
+                            Spacer()
+                            Button {
+                                _ = CrescentEngineBridge.shared().removeAnimationSource(uuid: entityUUID, index: source.index)
+                                refreshAnimation()
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+        }
     }
     
     private func refreshAnimation() {
@@ -676,6 +750,7 @@ struct AnimationInspector: View {
             stateNames = []
             clipEvents = []
             eventLog = []
+            clipSources = []
             return
         }
         if let clips = info["clips"] as? [String] {
@@ -690,6 +765,25 @@ struct AnimationInspector: View {
             stateNames = states.compactMap { $0 as? String }
         } else {
             stateNames = []
+        }
+
+        if let sources = info["clipSources"] as? [[String: Any]] {
+            clipSources = sources.compactMap { entry in
+                let index = (entry["index"] as? NSNumber)?.intValue ?? -1
+                let name = (entry["name"] as? String) ?? ""
+                let path = (entry["path"] as? String) ?? ""
+                let clipCount = (entry["clipCount"] as? NSNumber)?.intValue ?? 0
+                guard index >= 0, !path.isEmpty else { return nil }
+                return AnimationClipSourceItem(
+                    id: "\(index):\(path)",
+                    index: index,
+                    name: name.isEmpty ? URL(fileURLWithPath: path).lastPathComponent : name,
+                    path: path,
+                    clipCount: clipCount
+                )
+            }
+        } else {
+            clipSources = []
         }
 
         rootMotionEnabled = (info["rootMotionEnabled"] as? NSNumber)?.boolValue ?? rootMotionEnabled
@@ -795,6 +889,17 @@ struct AnimationInspector: View {
         clipEvents.sort { $0.time < $1.time }
         commitEvents()
         newEventName = ""
+    }
+
+    private func handleClipImport(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else { return }
+        let bridge = CrescentEngineBridge.shared()
+        for url in urls {
+            let imported = bridge.importAsset(path: url.path, type: "model")
+            guard !imported.isEmpty else { continue }
+            _ = bridge.addAnimationSource(uuid: entityUUID, path: imported)
+        }
+        refreshAnimation()
     }
 }
 

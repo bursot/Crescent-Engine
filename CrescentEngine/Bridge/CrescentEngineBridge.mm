@@ -2183,6 +2183,64 @@ static bool ResolveAnimatorAndSkinned(const std::string& uuid,
     return outSkinned != nullptr;
 }
 
+static bool ResolveAnimatorAndSkinnedTargets(const std::string& uuid,
+                                             Animator*& outAnimator,
+                                             SkinnedMeshRenderer*& outSkinned,
+                                             std::vector<SkinnedMeshRenderer*>& outTargets) {
+    outTargets.clear();
+    outAnimator = nullptr;
+    outSkinned = nullptr;
+
+    Scene* scene = SceneManager::getInstance().getActiveScene();
+    Entity* entity = scene ? SceneCommands::getEntityByUUID(scene, uuid) : nullptr;
+
+    outAnimator = GetAnimatorByUUID(uuid);
+    if (!outAnimator && entity) {
+        outAnimator = FindAnimatorInParents(entity);
+    }
+
+    if (outAnimator) {
+        if (Entity* animatorEntity = outAnimator->getEntity()) {
+            CollectSkinnedInHierarchy(animatorEntity, outAnimator, outTargets);
+        }
+        if (!outTargets.empty()) {
+            outSkinned = outTargets.front();
+        }
+        return outSkinned != nullptr;
+    }
+
+    if (entity) {
+        CollectSkinnedInHierarchy(entity, nullptr, outTargets);
+    }
+    if (outTargets.empty()) {
+        if (SkinnedMeshRenderer* direct = GetSkinnedByUUID(uuid)) {
+            outTargets.push_back(direct);
+        }
+    }
+    if (!outTargets.empty()) {
+        outSkinned = outTargets.front();
+    }
+    return outSkinned != nullptr;
+}
+
+static SceneCommands::ModelImportOptions ResolveAnimationImportOptions(const std::string& path,
+                                                                       const std::string& guid) {
+    SceneCommands::ModelImportOptions options;
+    AssetDatabase& db = AssetDatabase::getInstance();
+    AssetRecord record;
+    bool hasRecord = false;
+    if (!guid.empty()) {
+        hasRecord = db.getRecordForGuid(guid, record);
+    }
+    if (!hasRecord && !path.empty()) {
+        hasRecord = db.getRecordForPath(path, record);
+    }
+    if (hasRecord && record.type == "model") {
+        options = record.modelSettings;
+    }
+    return options;
+}
+
 static NSString* AnimatorParamTypeToString(AnimatorParameterType type) {
     switch (type) {
         case AnimatorParameterType::Int: return @"Int";
@@ -5831,7 +5889,8 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
     return (NSDictionary *)[self performSyncObject:^id{
         Animator* animator = nullptr;
         SkinnedMeshRenderer* skinned = nullptr;
-        if (!ResolveAnimatorAndSkinned(uuid.UTF8String, animator, skinned) || !skinned) {
+        std::vector<SkinnedMeshRenderer*> targets;
+        if (!ResolveAnimatorAndSkinnedTargets(uuid.UTF8String, animator, skinned, targets) || !skinned) {
             return @{};
         }
         
@@ -5860,6 +5919,23 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
             @"time": @(skinned->getTimeSeconds()),
             @"duration": @(duration)
         } mutableCopy];
+
+        NSMutableArray* clipSources = [NSMutableArray array];
+        const auto& sources = skinned->getAnimationClipSources();
+        for (size_t i = 0; i < sources.size(); ++i) {
+            const auto& source = sources[i];
+            NSString* path = [NSString stringWithUTF8String:source.path.c_str()];
+            NSString* name = path.lastPathComponent.length > 0 ? path.lastPathComponent : path;
+            NSString* guid = source.guid.empty() ? @"" : [NSString stringWithUTF8String:source.guid.c_str()];
+            [clipSources addObject:@{
+                @"index": @(static_cast<int>(i)),
+                @"name": name ?: @"",
+                @"path": path ?: @"",
+                @"guid": guid,
+                @"clipCount": @(static_cast<int>(source.clips.size()))
+            }];
+        }
+        info[@"clipSources"] = clipSources;
 
         if (animator) {
             NSMutableArray* stateNames = [NSMutableArray array];
@@ -5911,7 +5987,8 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
     return [self performSyncBool:^BOOL {
         Animator* animator = nullptr;
         SkinnedMeshRenderer* skinned = nullptr;
-        if (!ResolveAnimatorAndSkinned(uuid.UTF8String, animator, skinned) || !skinned) {
+        std::vector<SkinnedMeshRenderer*> targets;
+        if (!ResolveAnimatorAndSkinnedTargets(uuid.UTF8String, animator, skinned, targets) || !skinned) {
             return NO;
         }
         
@@ -5932,20 +6009,178 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         
         if (!appliedState) {
             if (NSNumber* clipIndex = info[@"clipIndex"]) {
-                skinned->setActiveClipIndex(clipIndex.intValue);
+                for (auto* target : targets) {
+                    if (target) {
+                        target->setActiveClipIndex(clipIndex.intValue);
+                    }
+                }
             }
         }
         if (NSNumber* playing = info[@"playing"]) {
-            skinned->setPlaying(playing.boolValue);
+            for (auto* target : targets) {
+                if (target) {
+                    target->setPlaying(playing.boolValue);
+                }
+            }
         }
         if (NSNumber* looping = info[@"looping"]) {
-            skinned->setLooping(looping.boolValue);
+            for (auto* target : targets) {
+                if (target) {
+                    target->setLooping(looping.boolValue);
+                }
+            }
         }
         if (NSNumber* speed = info[@"speed"]) {
-            skinned->setPlaybackSpeed(std::max(0.0f, speed.floatValue));
+            float playbackSpeed = std::max(0.0f, speed.floatValue);
+            for (auto* target : targets) {
+                if (target) {
+                    target->setPlaybackSpeed(playbackSpeed);
+                }
+            }
         }
         if (NSNumber* time = info[@"time"]) {
-            skinned->setTimeSeconds(std::max(0.0f, time.floatValue));
+            float timeSeconds = std::max(0.0f, time.floatValue);
+            for (auto* target : targets) {
+                if (target) {
+                    target->setTimeSeconds(timeSeconds);
+                }
+            }
+        }
+        return YES;
+    }];
+}
+
+- (BOOL)addAnimationSource:(NSString *)uuid path:(NSString *)path {
+    return [self performSyncBool:^BOOL {
+        if (!path || path.length == 0) {
+            return NO;
+        }
+
+        Animator* animator = nullptr;
+        SkinnedMeshRenderer* skinned = nullptr;
+        std::vector<SkinnedMeshRenderer*> targets;
+        if (!ResolveAnimatorAndSkinnedTargets(uuid.UTF8String, animator, skinned, targets) || !skinned) {
+            return NO;
+        }
+
+        std::string resolvedPath = path.UTF8String;
+        AssetDatabase& db = AssetDatabase::getInstance();
+        std::string guid = db.registerAsset(resolvedPath, "model");
+        SceneCommands::ModelImportOptions options = ResolveAnimationImportOptions(resolvedPath, guid);
+
+        int oldClipCount = static_cast<int>(skinned->getAnimationClips().size());
+        bool addedAny = false;
+        for (auto* target : targets) {
+            if (!target) {
+                continue;
+            }
+            auto skeleton = target->getSkeleton();
+            if (!skeleton) {
+                continue;
+            }
+            auto clips = SceneCommands::importAnimationClipsForSkeleton(resolvedPath, *skeleton, options);
+            if (clips.empty()) {
+                continue;
+            }
+            AnimationClipSource source;
+            source.path = resolvedPath;
+            source.guid = guid;
+            source.clips = std::move(clips);
+            target->addAnimationClipSource(source);
+            addedAny = true;
+        }
+        if (!addedAny) {
+            return NO;
+        }
+
+        if (animator) {
+            auto states = animator->getStates();
+            const auto& combined = skinned->getAnimationClips();
+            for (int clipIndex = oldClipCount; clipIndex < static_cast<int>(combined.size()); ++clipIndex) {
+                AnimatorState state;
+                if (combined[static_cast<size_t>(clipIndex)]) {
+                    state.name = combined[static_cast<size_t>(clipIndex)]->getName();
+                }
+                if (state.name.empty()) {
+                    state.name = "Clip " + std::to_string(clipIndex);
+                }
+                state.clipIndex = clipIndex;
+                state.speed = 1.0f;
+                state.loop = true;
+                states.push_back(state);
+            }
+            animator->setStates(states);
+        }
+        return YES;
+    }];
+}
+
+- (BOOL)removeAnimationSource:(NSString *)uuid index:(NSInteger)index {
+    return [self performSyncBool:^BOOL {
+        Animator* animator = nullptr;
+        SkinnedMeshRenderer* skinned = nullptr;
+        std::vector<SkinnedMeshRenderer*> targets;
+        if (!ResolveAnimatorAndSkinnedTargets(uuid.UTF8String, animator, skinned, targets) || !skinned) {
+            return NO;
+        }
+        if (index < 0) {
+            return NO;
+        }
+        const auto& sources = skinned->getAnimationClipSources();
+        size_t sourceIndex = static_cast<size_t>(index);
+        if (sourceIndex >= sources.size()) {
+            return NO;
+        }
+
+        int removedStart = static_cast<int>(skinned->getBaseAnimationClipCount());
+        for (size_t i = 0; i < sourceIndex; ++i) {
+            removedStart += static_cast<int>(sources[i].clips.size());
+        }
+        int removedCount = static_cast<int>(sources[sourceIndex].clips.size());
+        if (removedCount <= 0) {
+            bool removedAny = false;
+            for (auto* target : targets) {
+                if (target) {
+                    removedAny = target->removeAnimationClipSource(sourceIndex) || removedAny;
+                }
+            }
+            return removedAny;
+        }
+
+        bool removed = false;
+        for (auto* target : targets) {
+            if (target) {
+                removed = target->removeAnimationClipSource(sourceIndex) || removed;
+            }
+        }
+        if (!removed) {
+            return NO;
+        }
+
+        if (animator) {
+            auto states = animator->getStates();
+            for (auto& state : states) {
+                if (state.clipIndex >= removedStart && state.clipIndex < removedStart + removedCount) {
+                    state.clipIndex = -1;
+                } else if (state.clipIndex >= removedStart + removedCount) {
+                    state.clipIndex -= removedCount;
+                }
+            }
+            animator->setStates(states);
+
+            auto blendTrees = animator->getBlendTrees();
+            for (auto& tree : blendTrees) {
+                tree.motions.erase(std::remove_if(tree.motions.begin(), tree.motions.end(), [&](AnimatorBlendMotion& motion) {
+                    if (motion.clipIndex >= removedStart && motion.clipIndex < removedStart + removedCount) {
+                        return true;
+                    }
+                    if (motion.clipIndex >= removedStart + removedCount) {
+                        motion.clipIndex -= removedCount;
+                    }
+                    return false;
+                }), tree.motions.end());
+            }
+            animator->setBlendTrees(blendTrees);
         }
         return YES;
     }];
