@@ -2639,6 +2639,31 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (BOOL)playPreviewAudioClip:(NSString *)path
+                      volume:(float)volume
+                       pitch:(float)pitch {
+    return [self performSyncBool:^BOOL {
+        if (!path || path.length == 0) {
+            return NO;
+        }
+
+        std::string resolvedPath = path.UTF8String;
+        std::filesystem::path candidate(resolvedPath);
+        if (!candidate.is_absolute()) {
+            resolvedPath = AssetDatabase::getInstance().resolvePath(resolvedPath);
+        }
+
+        std::error_code ec;
+        if (!std::filesystem::exists(resolvedPath, ec)) {
+            return NO;
+        }
+
+        return AudioSystem::getInstance().playOneShot(resolvedPath,
+                                                      std::max(0.0f, volume),
+                                                      std::max(0.01f, pitch));
+    }];
+}
+
 - (NSString *)createAnimationPreviewCloneFromUUID:(NSString *)uuid {
     return (NSString *)[self performSyncObject:^id{
         if (!_engine || !uuid || uuid.length == 0) {

@@ -22,6 +22,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)resizePreviewWithWidth:(float)width height:(float)height;
 - (void)setAnimationPreviewTargetUUID:(NSString *)uuid NS_SWIFT_NAME(setAnimationPreviewTarget(uuid:));
 - (void)setAnimationPreviewPlaybackState:(NSDictionary *)info NS_SWIFT_NAME(setAnimationPreviewPlayback(info:));
+- (BOOL)playPreviewAudioClip:(NSString *)path
+                      volume:(float)volume
+                       pitch:(float)pitch NS_SWIFT_NAME(playPreviewAudio(path:volume:pitch:));
 - (NSString *)createAnimationPreviewCloneFromUUID:(NSString *)uuid NS_SWIFT_NAME(createAnimationPreviewClone(sourceUUID:));
 - (void)destroyAnimationPreviewCloneUUID:(NSString *)uuid NS_SWIFT_NAME(destroyAnimationPreviewClone(uuid:));
 

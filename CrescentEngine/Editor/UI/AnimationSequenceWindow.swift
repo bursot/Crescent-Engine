@@ -474,6 +474,45 @@ struct AnimationSequenceWindow: View {
         CrescentEngineBridge.shared().setAnimationPreviewPlayback(info: payload)
     }
 
+    private func isAudioEvent(_ event: SequenceEvent) -> Bool {
+        let type = event.eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return type == "audio" || (!event.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    private func triggerPreviewAudio(for event: SequenceEvent) {
+        let rawPath = event.payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawPath.isEmpty else { return }
+
+        let minPitch = max(0.01, min(event.pitchMin, event.pitchMax))
+        let maxPitch = max(minPitch, max(event.pitchMin, event.pitchMax))
+        let pitch = minPitch == maxPitch ? minPitch : Float.random(in: minPitch...maxPitch)
+        let volume = max(0.0, event.volume)
+        _ = CrescentEngineBridge.shared().playPreviewAudio(path: rawPath, volume: volume, pitch: pitch)
+    }
+
+    private func triggerPreviewAudioEvents(from startTime: Float,
+                                           to endTime: Float,
+                                           duration: Float,
+                                           looped: Bool) {
+        guard !events.isEmpty else { return }
+
+        let epsilon: Float = 0.0001
+        func fire(rangeStart: Float, rangeEnd: Float) {
+            for event in events where isAudioEvent(event) {
+                if event.time > rangeStart + epsilon && event.time <= rangeEnd + epsilon {
+                    triggerPreviewAudio(for: event)
+                }
+            }
+        }
+
+        if looped {
+            fire(rangeStart: startTime, rangeEnd: duration)
+            fire(rangeStart: 0.0, rangeEnd: endTime)
+        } else {
+            fire(rangeStart: startTime, rangeEnd: endTime)
+        }
+    }
+
     private func advancePreview() {
         guard isPreviewPlaying, let uuid = activeUUID, !uuid.isEmpty else {
             return
@@ -483,15 +522,19 @@ struct AnimationSequenceWindow: View {
             return
         }
 
+        let previousTime = previewTime
         previewTime += (1.0 / 30.0) * previewSpeed
+        var looped = false
         if previewTime >= duration {
             if isPreviewLooping {
                 previewTime.formTruncatingRemainder(dividingBy: duration)
+                looped = true
             } else {
                 previewTime = duration
                 isPreviewPlaying = false
             }
         }
+        triggerPreviewAudioEvents(from: previousTime, to: previewTime, duration: duration, looped: looped)
         pushPreviewState(uuid: uuid, timeOnly: true)
     }
 
