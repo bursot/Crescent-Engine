@@ -100,7 +100,8 @@ class Renderer {
 public:
     enum class RenderTargetPool {
         Scene,
-        Game
+        Game,
+        Preview
     };
 
     Renderer();
@@ -527,6 +528,7 @@ private:
 
     RenderTargetState m_sceneTargets;
     RenderTargetState m_gameTargets;
+    RenderTargetState m_previewTargets;
     RenderTargetPool m_activePool;
 };
 

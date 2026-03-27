@@ -9,6 +9,13 @@ namespace Crescent {
 struct AnimationEvent {
     float time = 0.0f;
     std::string name;
+    std::string eventType;
+    std::string eventTag;
+    std::string payload;
+    float volume = 1.0f;
+    float pitchMin = 1.0f;
+    float pitchMax = 1.0f;
+    bool spatial = true;
 };
 
 struct VectorKeyframe {

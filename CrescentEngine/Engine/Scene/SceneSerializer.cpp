@@ -13,6 +13,8 @@
 #include "../Components/PhysicsCollider.hpp"
 #include "../Components/CharacterController.hpp"
 #include "../Components/FirstPersonController.hpp"
+#include "../Components/ThirdPersonController.hpp"
+#include "../Components/BoneAttachment.hpp"
 #include "../Components/Health.hpp"
 #include "../Components/AudioSource.hpp"
 #include "../Input/InputManager.hpp"
@@ -1608,7 +1610,14 @@ json SerializeAnimationClipData(const AnimationClip& clip) {
     for (const AnimationEvent& event : clip.getEvents()) {
         events.push_back({
             {"time", event.time},
-            {"name", event.name}
+            {"name", event.name},
+            {"eventType", event.eventType},
+            {"eventTag", event.eventTag},
+            {"payload", event.payload},
+            {"volume", event.volume},
+            {"pitchMin", event.pitchMin},
+            {"pitchMax", event.pitchMax},
+            {"spatial", event.spatial}
         });
     }
 
@@ -1684,6 +1693,13 @@ std::shared_ptr<AnimationClip> DeserializeAnimationClipData(const json& j) {
             AnimationEvent event;
             event.time = entry.value("time", 0.0f);
             event.name = entry.value("name", std::string());
+            event.eventType = entry.value("eventType", std::string());
+            event.eventTag = entry.value("eventTag", std::string());
+            event.payload = entry.value("payload", std::string());
+            event.volume = entry.value("volume", 1.0f);
+            event.pitchMin = entry.value("pitchMin", 1.0f);
+            event.pitchMax = entry.value("pitchMax", 1.0f);
+            event.spatial = entry.value("spatial", true);
             if (!event.name.empty()) {
                 clip->addEvent(event);
             }
@@ -3248,6 +3264,13 @@ void ApplyEntityComponents(Entity* entity,
                         AnimationEvent ev;
                         ev.time = evt.value("time", 0.0f);
                         ev.name = evt.value("name", "");
+                        ev.eventType = evt.value("eventType", std::string());
+                        ev.eventTag = evt.value("eventTag", std::string());
+                        ev.payload = evt.value("payload", std::string());
+                        ev.volume = evt.value("volume", 1.0f);
+                        ev.pitchMin = evt.value("pitchMin", 1.0f);
+                        ev.pitchMax = evt.value("pitchMax", 1.0f);
+                        ev.spatial = evt.value("spatial", true);
                         if (!ev.name.empty()) {
                             clip->addEvent(ev);
                         }
@@ -3367,6 +3390,10 @@ void ApplyEntityComponents(Entity* entity,
         if (k.contains("target")) {
             ik->setTargetPosition(JsonToVec3(k["target"], ik->getTargetPosition()));
         }
+        ik->setTargetEntityUUID(k.value("targetEntityUUID", std::string("")));
+        if (k.contains("targetOffset")) {
+            ik->setTargetOffset(JsonToVec3(k["targetOffset"], ik->getTargetOffset()));
+        }
         ik->setTargetInWorld(k.value("world", ik->getTargetInWorld()));
         ik->setWeight(k.value("weight", ik->getWeight()));
     }
@@ -3484,6 +3511,65 @@ void ApplyEntityComponents(Entity* entity,
                 controller->setMuzzleTexturePath(c["muzzleTexture"].get<std::string>());
             }
         }
+    }
+
+    if (components.contains("ThirdPersonController")) {
+        const json& c = components["ThirdPersonController"];
+        ThirdPersonController* controller = entity->getComponent<ThirdPersonController>();
+        if (!controller) {
+            controller = entity->addComponent<ThirdPersonController>();
+        }
+        controller->setMouseSensitivity(c.value("mouseSensitivity", controller->getMouseSensitivity()));
+        controller->setInvertY(c.value("invertY", controller->getInvertY()));
+        controller->setRequireLookButton(c.value("requireLookButton", controller->getRequireLookButton()));
+        controller->setLookButton(static_cast<MouseButton>(c.value("lookButton", static_cast<int>(controller->getLookButton()))));
+        controller->setMinPitch(c.value("minPitch", controller->getMinPitch()));
+        controller->setMaxPitch(c.value("maxPitch", controller->getMaxPitch()));
+        controller->setPivotHeight(c.value("pivotHeight", controller->getPivotHeight()));
+        controller->setLookAhead(c.value("lookAhead", controller->getLookAhead()));
+        controller->setShoulderOffset(c.value("shoulderOffset", controller->getShoulderOffset()));
+        controller->setCameraDistance(c.value("cameraDistance", controller->getCameraDistance()));
+        controller->setMinDistance(c.value("minDistance", controller->getMinDistance()));
+        controller->setMaxDistance(c.value("maxDistance", controller->getMaxDistance()));
+        controller->setZoomSpeed(c.value("zoomSpeed", controller->getZoomSpeed()));
+        controller->setCameraCollisionRadius(c.value("cameraCollisionRadius", controller->getCameraCollisionRadius()));
+        controller->setPositionSmoothSpeed(c.value("positionSmoothSpeed", controller->getPositionSmoothSpeed()));
+        controller->setRotationSmoothSpeed(c.value("rotationSmoothSpeed", controller->getRotationSmoothSpeed()));
+        controller->setCameraSmoothSpeed(c.value("cameraSmoothSpeed", controller->getCameraSmoothSpeed()));
+        controller->setWalkSpeed(c.value("walkSpeed", controller->getWalkSpeed()));
+        controller->setRunSpeed(c.value("runSpeed", controller->getRunSpeed()));
+        controller->setSprintSpeed(c.value("sprintSpeed", controller->getSprintSpeed()));
+        controller->setEnableSprint(c.value("enableSprint", controller->getEnableSprint()));
+        controller->setDriveCharacterController(c.value("driveCharacterController", controller->getDriveCharacterController()));
+        if (c.contains("weaponGripPositionOffset")) {
+            controller->setWeaponGripPositionOffset(JsonToVec3(c["weaponGripPositionOffset"], controller->getWeaponGripPositionOffset()));
+        }
+        if (c.contains("weaponGripRotationOffset")) {
+            controller->setWeaponGripRotationOffsetDegrees(JsonToVec3(c["weaponGripRotationOffset"], controller->getWeaponGripRotationOffsetDegrees()));
+        }
+        if (c.contains("weaponSupportHandOffset")) {
+            controller->setWeaponSupportHandOffset(JsonToVec3(c["weaponSupportHandOffset"], controller->getWeaponSupportHandOffset()));
+        }
+    }
+
+    if (components.contains("BoneAttachment")) {
+        const json& a = components["BoneAttachment"];
+        BoneAttachment* attachment = entity->getComponent<BoneAttachment>();
+        if (!attachment) {
+            attachment = entity->addComponent<BoneAttachment>();
+        }
+        attachment->setBoneName(a.value("boneName", attachment->getBoneName()));
+        attachment->setSourceEntityUUID(a.value("sourceEntityUUID", attachment->getSourceEntityUUID()));
+        if (a.contains("positionOffset")) {
+            attachment->setPositionOffset(JsonToVec3(a["positionOffset"], attachment->getPositionOffset()));
+        }
+        if (a.contains("rotationOffset")) {
+            attachment->setRotationOffsetDegrees(JsonToVec3(a["rotationOffset"], attachment->getRotationOffsetDegrees()));
+        }
+        if (a.contains("scaleOffset")) {
+            attachment->setScaleOffset(JsonToVec3(a["scaleOffset"], attachment->getScaleOffset()));
+        }
+        attachment->setInheritBoneScale(a.value("inheritBoneScale", attachment->getInheritBoneScale()));
     }
 
     if (components.contains("AudioSource")) {
@@ -4015,6 +4101,8 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 {"mid", ik->getMidBone()},
                 {"end", ik->getEndBone()},
                 {"target", Vec3ToJson(ik->getTargetPosition())},
+                {"targetEntityUUID", ik->getTargetEntityUUID()},
+                {"targetOffset", Vec3ToJson(ik->getTargetOffset())},
                 {"world", ik->getTargetInWorld()},
                 {"weight", ik->getWeight()}
             };
@@ -4110,6 +4198,47 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
             if (!muzzleRef.is_null() && !muzzleRef.empty()) {
                 components["FirstPersonController"]["muzzleTexture"] = muzzleRef;
             }
+        }
+
+        if (auto* controller = entity->getComponent<ThirdPersonController>()) {
+            components["ThirdPersonController"] = {
+                {"mouseSensitivity", controller->getMouseSensitivity()},
+                {"invertY", controller->getInvertY()},
+                {"requireLookButton", controller->getRequireLookButton()},
+                {"lookButton", static_cast<int>(controller->getLookButton())},
+                {"minPitch", controller->getMinPitch()},
+                {"maxPitch", controller->getMaxPitch()},
+                {"pivotHeight", controller->getPivotHeight()},
+                {"lookAhead", controller->getLookAhead()},
+                {"shoulderOffset", controller->getShoulderOffset()},
+                {"cameraDistance", controller->getCameraDistance()},
+                {"minDistance", controller->getMinDistance()},
+                {"maxDistance", controller->getMaxDistance()},
+                {"zoomSpeed", controller->getZoomSpeed()},
+                {"cameraCollisionRadius", controller->getCameraCollisionRadius()},
+                {"positionSmoothSpeed", controller->getPositionSmoothSpeed()},
+                {"rotationSmoothSpeed", controller->getRotationSmoothSpeed()},
+                {"cameraSmoothSpeed", controller->getCameraSmoothSpeed()},
+                {"walkSpeed", controller->getWalkSpeed()},
+                {"runSpeed", controller->getRunSpeed()},
+                {"sprintSpeed", controller->getSprintSpeed()},
+                {"enableSprint", controller->getEnableSprint()},
+                {"driveCharacterController", controller->getDriveCharacterController()},
+                {"weaponGripPositionOffset", Vec3ToJson(controller->getWeaponGripPositionOffset())},
+                {"weaponGripRotationOffset", Vec3ToJson(controller->getWeaponGripRotationOffsetDegrees())},
+                {"weaponSupportHandOffset", Vec3ToJson(controller->getWeaponSupportHandOffset())}
+            };
+        }
+
+        if (auto* attachment = entity->getComponent<BoneAttachment>()) {
+            components["BoneAttachment"] = {
+                {"boneName", attachment->getBoneName()},
+                {"sourceEntityUUID", attachment->getSourceEntityUUID()},
+                {"positionOffset", Vec3ToJson(attachment->getPositionOffset())},
+                {"rotationOffset", Vec3ToJson(attachment->getRotationOffsetDegrees())},
+                {"scaleOffset", Vec3ToJson(attachment->getScaleOffset())},
+                {"inheritBoneScale", attachment->getInheritBoneScale()}
+            };
         }
 
         if (auto* audio = entity->getComponent<AudioSource>()) {

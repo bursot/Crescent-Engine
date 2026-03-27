@@ -4,6 +4,7 @@
 #include "../Animation/AnimationPose.hpp"
 #include "../Components/IKConstraint.hpp"
 #include "../Core/Time.hpp"
+#include "../Scene/SceneCommands.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -159,6 +160,44 @@ static Math::Matrix4x4 BuildGlobalPose(const Skeleton& skeleton,
         global = global * Math::Matrix4x4::TRS(pose.positions[idx], pose.rotations[idx], pose.scales[idx]);
     }
     return global;
+}
+
+static void ResetPoseBoneTranslationToBind(const Skeleton& skeleton,
+                                           AnimationLocalPose& pose,
+                                           int boneIndex) {
+    const auto& bones = skeleton.getBones();
+    if (boneIndex < 0 || boneIndex >= static_cast<int>(bones.size()) ||
+        boneIndex >= static_cast<int>(pose.positions.size())) {
+        return;
+    }
+    Math::Vector3 basePos;
+    Math::Quaternion baseRot;
+    Math::Vector3 baseScale;
+    DecomposeTRS(bones[boneIndex].localBind, basePos, baseRot, baseScale);
+    pose.positions[boneIndex] = basePos;
+}
+
+static void ResetPoseChainTranslationsToBind(const Skeleton& skeleton,
+                                             AnimationLocalPose& pose,
+                                             int boneIndex) {
+    const auto& bones = skeleton.getBones();
+    for (int idx = boneIndex; idx >= 0 && idx < static_cast<int>(bones.size()); idx = bones[idx].parentIndex) {
+        ResetPoseBoneTranslationToBind(skeleton, pose, idx);
+    }
+}
+
+static void ResetLikelyRootMotionTranslationsToBind(const Skeleton& skeleton,
+                                                    AnimationLocalPose& pose) {
+    const auto& bones = skeleton.getBones();
+    for (size_t i = 0; i < bones.size(); ++i) {
+        const Bone& bone = bones[i];
+        std::string name = ToLower(bone.name);
+        bool likelyRootMotionBone = bone.parentIndex < 0 ||
+            ContainsToken(name, {"root", "armature", "scene", "hips", "pelvis", "hip"});
+        if (likelyRootMotionBone) {
+            ResetPoseChainTranslationsToBind(skeleton, pose, static_cast<int>(i));
+        }
+    }
 }
 
 static void CollectEvents(const AnimationClip* clip,
@@ -490,43 +529,47 @@ void Animator::OnUpdate(float deltaTime) {
             outputPose = &m_StatePose;
         }
 
-        // Root motion extraction (modifies pose)
-        if (m_RootMotionEnabled && outputPose) {
+        // Strip root motion from the sampled pose whenever transform application is disabled.
+        // This keeps controller-driven locomotion clips in-place instead of visually drifting and snapping on loop.
+        bool shouldStripRootMotion = outputPose &&
+            (m_RootMotionEnabled || (!m_RootMotionApplyPosition && !m_RootMotionApplyRotation));
+        if (shouldStripRootMotion) {
             int motionIdx = ResolveRootMotionBoneIndex(skeleton, outputPose);
             if (motionIdx >= 0 && motionIdx < static_cast<int>(outputPose->positions.size())) {
-                Math::Vector3 basePos;
-                Math::Quaternion baseRot;
-                Math::Vector3 baseScale;
-                DecomposeTRS(skeleton.getBones()[motionIdx].localBind, basePos, baseRot, baseScale);
-                Math::Matrix4x4 global = BuildGlobalPose(skeleton, *outputPose, motionIdx);
-                Math::Vector3 currentPos;
-                Math::Quaternion currentRot;
-                Math::Vector3 currentScale;
-                DecomposeTRS(global, currentPos, currentRot, currentScale);
+                if (m_RootMotionEnabled) {
+                    Math::Vector3 basePos;
+                    Math::Quaternion baseRot;
+                    Math::Vector3 baseScale;
+                    DecomposeTRS(skeleton.getBones()[motionIdx].localBind, basePos, baseRot, baseScale);
+                    Math::Matrix4x4 global = BuildGlobalPose(skeleton, *outputPose, motionIdx);
+                    Math::Vector3 currentPos;
+                    Math::Quaternion currentRot;
+                    Math::Vector3 currentScale;
+                    DecomposeTRS(global, currentPos, currentRot, currentScale);
 
-                if (!m_RootMotionValid || m_StateTime < m_PrevRootTime) {
-                    m_PrevRootPos = currentPos;
-                    m_PrevRootRot = currentRot;
-                    m_RootMotionValid = true;
-                } else {
-                    Math::Vector3 deltaPos = currentPos - m_PrevRootPos;
-                    Math::Quaternion deltaRot = currentRot * m_PrevRootRot.inverse();
-                    Transform* transform = getEntity() ? getEntity()->getTransform() : nullptr;
-                    if (transform) {
-                        if (m_RootMotionApplyPosition) {
-                            transform->translate(deltaPos, true);
+                    if (!m_RootMotionValid || m_StateTime < m_PrevRootTime) {
+                        m_PrevRootPos = currentPos;
+                        m_PrevRootRot = currentRot;
+                        m_RootMotionValid = true;
+                    } else {
+                        Math::Vector3 deltaPos = currentPos - m_PrevRootPos;
+                        Math::Quaternion deltaRot = currentRot * m_PrevRootRot.inverse();
+                        Transform* transform = getEntity() ? getEntity()->getTransform() : nullptr;
+                        if (transform) {
+                            if (m_RootMotionApplyPosition) {
+                                transform->translate(deltaPos, true);
+                            }
+                            if (m_RootMotionApplyRotation) {
+                                transform->rotate(deltaRot, true);
+                            }
                         }
-                        if (m_RootMotionApplyRotation) {
-                            transform->rotate(deltaRot, true);
-                        }
+                        m_PrevRootPos = currentPos;
+                        m_PrevRootRot = currentRot;
                     }
-                    m_PrevRootPos = currentPos;
-                    m_PrevRootRot = currentRot;
+                    m_PrevRootTime = m_StateTime;
                 }
-                m_PrevRootTime = m_StateTime;
-                outputPose->positions[motionIdx] = basePos;
-                outputPose->rotations[motionIdx] = baseRot;
-                outputPose->scales[motionIdx] = baseScale;
+                ResetPoseChainTranslationsToBind(skeleton, *outputPose, motionIdx);
+                ResetLikelyRootMotionTranslationsToBind(skeleton, *outputPose);
             }
         }
 
@@ -538,7 +581,13 @@ void Animator::OnUpdate(float deltaTime) {
                 int midIdx = skeleton.getBoneIndex(ik->getMidBone());
                 int endIdx = skeleton.getBoneIndex(ik->getEndBone());
                 Math::Vector3 target = ik->getTargetPosition();
-                if (!ik->getTargetInWorld() && entity) {
+                if (entity && !ik->getTargetEntityUUID().empty()) {
+                    if (Entity* targetEntity = SceneCommands::getEntityByUUID(entity->getScene(), ik->getTargetEntityUUID())) {
+                        if (Transform* targetTransform = targetEntity->getTransform()) {
+                            target = targetTransform->getWorldMatrix().transformPoint(ik->getTargetOffset());
+                        }
+                    }
+                } else if (!ik->getTargetInWorld() && entity) {
                     target = entity->getTransform()->getWorldMatrix().transformPoint(target);
                 }
                 ApplyTwoBoneIK(skeleton, *outputPose, rootIdx, midIdx, endIdx, target, ik->getWeight());

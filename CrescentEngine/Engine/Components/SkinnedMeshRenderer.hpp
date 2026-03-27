@@ -54,6 +54,10 @@ public:
     bool setActiveClipIndex(int index);
     bool crossFadeToClip(int index, float durationSeconds, bool restart = true);
     void applyBoneMatrices(const std::vector<Math::Matrix4x4>& matrices);
+    Math::Vector3 getBoundsMin() const;
+    Math::Vector3 getBoundsMax() const;
+    Math::Vector3 getBoundsCenter() const;
+    Math::Vector3 getBoundsSize() const;
 
     bool isDrivenByAnimator() const { return m_DrivenByAnimator; }
     void setDrivenByAnimator(bool driven) { m_DrivenByAnimator = driven; }
@@ -78,7 +82,7 @@ public:
     void setApplyRootMotionRotation(bool value) { m_RootMotionApplyRotation = value; }
 
     const std::vector<Math::Matrix4x4>& getBoneMatrices() const { return m_BoneMatrices; }
-    void setBoneMatrices(const std::vector<Math::Matrix4x4>& matrices) { m_BoneMatrices = matrices; }
+    void setBoneMatrices(const std::vector<Math::Matrix4x4>& matrices) { applyBoneMatrices(matrices); }
     const std::vector<Math::Matrix4x4>& getPreviousBoneMatrices() const { return m_PrevBoneMatrices; }
 
     void OnUpdate(float deltaTime) override;
@@ -86,6 +90,7 @@ public:
 private:
     void applyRootMotion(AnimationLocalPose& pose, float sampleTime);
     void rebuildAnimationClipList(bool resetPlayback);
+    void updateDynamicBounds();
 
     std::shared_ptr<Mesh> m_Mesh;
     std::shared_ptr<Skeleton> m_Skeleton;
@@ -124,6 +129,9 @@ private:
     float m_PrevRootTime = 0.0f;
     Math::Vector3 m_PrevRootPos = Math::Vector3::Zero;
     Math::Quaternion m_PrevRootRot = Math::Quaternion::Identity;
+    Math::Vector3 m_LocalBoundsMin = Math::Vector3::Zero;
+    Math::Vector3 m_LocalBoundsMax = Math::Vector3::Zero;
+    bool m_HasDynamicBounds = false;
 };
 
 } // namespace Crescent

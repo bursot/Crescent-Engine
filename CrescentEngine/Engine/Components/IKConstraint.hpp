@@ -25,6 +25,12 @@ public:
     const Math::Vector3& getTargetPosition() const { return m_TargetPosition; }
     void setTargetPosition(const Math::Vector3& position) { m_TargetPosition = position; }
 
+    const std::string& getTargetEntityUUID() const { return m_TargetEntityUUID; }
+    void setTargetEntityUUID(const std::string& uuid) { m_TargetEntityUUID = uuid; }
+
+    const Math::Vector3& getTargetOffset() const { return m_TargetOffset; }
+    void setTargetOffset(const Math::Vector3& offset) { m_TargetOffset = offset; }
+
     bool getTargetInWorld() const { return m_TargetInWorld; }
     void setTargetInWorld(bool world) { m_TargetInWorld = world; }
 
@@ -36,6 +42,8 @@ private:
     std::string m_MidBone;
     std::string m_EndBone;
     Math::Vector3 m_TargetPosition;
+    std::string m_TargetEntityUUID;
+    Math::Vector3 m_TargetOffset;
     bool m_TargetInWorld;
     float m_Weight;
 };

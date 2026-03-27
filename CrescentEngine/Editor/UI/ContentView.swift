@@ -391,6 +391,7 @@ struct ViewportPanel: View {
         switch viewKind {
         case .scene: return editorState.viewMode == .scene
         case .game: return editorState.viewMode == .game
+        case .preview: return false
         }
     }
 
@@ -520,6 +521,8 @@ struct ViewportPanel: View {
                         editorState.setViewMode(.scene)
                     case .game:
                         editorState.setViewMode(.game)
+                    case .preview:
+                        break
                     }
                 }
 

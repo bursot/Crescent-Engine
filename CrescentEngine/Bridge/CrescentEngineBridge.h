@@ -16,8 +16,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)resizeWithWidth:(float)width height:(float)height;
 - (void)setSceneMetalLayer:(CAMetalLayer *)layer;
 - (void)setGameMetalLayer:(CAMetalLayer *)layer;
+- (void)setPreviewMetalLayer:(CAMetalLayer *)layer;
 - (void)resizeSceneWithWidth:(float)width height:(float)height;
 - (void)resizeGameWithWidth:(float)width height:(float)height;
+- (void)resizePreviewWithWidth:(float)width height:(float)height;
+- (void)setAnimationPreviewTargetUUID:(NSString *)uuid NS_SWIFT_NAME(setAnimationPreviewTarget(uuid:));
+- (void)setAnimationPreviewPlaybackState:(NSDictionary *)info NS_SWIFT_NAME(setAnimationPreviewPlayback(info:));
+- (NSString *)createAnimationPreviewCloneFromUUID:(NSString *)uuid NS_SWIFT_NAME(createAnimationPreviewClone(sourceUUID:));
+- (void)destroyAnimationPreviewCloneUUID:(NSString *)uuid NS_SWIFT_NAME(destroyAnimationPreviewClone(uuid:));
 
 // Input handling
 - (void)handleKeyDown:(unsigned short)keyCode;
@@ -255,6 +261,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setFirstPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setFirstPersonControllerInfo(uuid:info:));
 - (BOOL)addFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(addFirstPersonController(uuid:));
 - (void)removeFirstPersonController:(NSString *)uuid NS_SWIFT_NAME(removeFirstPersonController(uuid:));
+- (NSDictionary *)getThirdPersonControllerInfo:(NSString *)uuid NS_SWIFT_NAME(getThirdPersonControllerInfo(uuid:));
+- (BOOL)setThirdPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setThirdPersonControllerInfo(uuid:info:));
+- (BOOL)addThirdPersonController:(NSString *)uuid NS_SWIFT_NAME(addThirdPersonController(uuid:));
+- (void)removeThirdPersonController:(NSString *)uuid NS_SWIFT_NAME(removeThirdPersonController(uuid:));
+- (NSDictionary *)getBoneAttachmentInfo:(NSString *)uuid NS_SWIFT_NAME(getBoneAttachmentInfo(uuid:));
+- (BOOL)setBoneAttachmentInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setBoneAttachmentInfo(uuid:info:));
+- (BOOL)addBoneAttachment:(NSString *)uuid NS_SWIFT_NAME(addBoneAttachment(uuid:));
+- (void)removeBoneAttachment:(NSString *)uuid NS_SWIFT_NAME(removeBoneAttachment(uuid:));
 - (NSNumber *)getFireEventCounter NS_SWIFT_NAME(getFireEventCounter());
 - (NSDictionary *)getAudioSourceInfo:(NSString *)uuid NS_SWIFT_NAME(getAudioSourceInfo(uuid:));
 - (BOOL)setAudioSourceInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setAudioSourceInfo(uuid:info:));

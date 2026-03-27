@@ -6,9 +6,12 @@
 #include "../Renderer/DebugRenderer.hpp"
 #include "../Scene/SceneManager.hpp"
 #include "../Scene/SceneCommands.hpp"
+#include "../Scene/SceneSerializer.hpp"
 #include "../Components/Camera.hpp"
 #include "../Components/CameraController.hpp"
+#include "../Components/Animator.hpp"
 #include "../Components/MeshRenderer.hpp"
+#include "../Components/SkinnedMeshRenderer.hpp"
 #include "../Components/Light.hpp"
 #include "../Audio/AudioSystem.hpp"
 #include "../Physics/PhysicsWorld.hpp"
@@ -16,9 +19,193 @@
 #include "../ECS/Transform.hpp"
 #include "../Input/InputManager.hpp"
 #include <iostream>
+#include <limits>
 
 namespace {
 constexpr bool kInputDebug = false;
+
+static void EncapsulateTransformedLocalAABB(const Crescent::Math::Matrix4x4& worldMatrix,
+                                            const Crescent::Math::Vector3& localMin,
+                                            const Crescent::Math::Vector3& localMax,
+                                            Crescent::AABB& outBounds,
+                                            bool& hasBounds) {
+    using namespace Crescent;
+    const Math::Vector3 corners[8] = {
+        {localMin.x, localMin.y, localMin.z},
+        {localMax.x, localMin.y, localMin.z},
+        {localMin.x, localMax.y, localMin.z},
+        {localMin.x, localMin.y, localMax.z},
+        {localMax.x, localMax.y, localMin.z},
+        {localMin.x, localMax.y, localMax.z},
+        {localMax.x, localMin.y, localMax.z},
+        {localMax.x, localMax.y, localMax.z},
+    };
+
+    Math::Vector3 worldMin(std::numeric_limits<float>::max());
+    Math::Vector3 worldMax(std::numeric_limits<float>::lowest());
+    for (const auto& corner : corners) {
+        Math::Vector3 worldPt = worldMatrix.transformPoint(corner);
+        worldMin = Math::Vector3::Min(worldMin, worldPt);
+        worldMax = Math::Vector3::Max(worldMax, worldPt);
+    }
+
+    AABB transformed(worldMin, worldMax);
+    if (!hasBounds) {
+        outBounds = transformed;
+        hasBounds = true;
+    } else {
+        outBounds.encapsulate(transformed);
+    }
+}
+
+static void AccumulateRenderableHierarchyBounds(Crescent::Entity* entity,
+                                                Crescent::AABB& outBounds,
+                                                bool& hasBounds) {
+    using namespace Crescent;
+    if (!entity) {
+        return;
+    }
+
+    Transform* transform = entity->getTransform();
+    if (transform) {
+        const Math::Matrix4x4 worldMatrix = transform->getWorldMatrix();
+        if (auto* meshRenderer = entity->getComponent<MeshRenderer>()) {
+            if (auto mesh = meshRenderer->getMesh()) {
+                EncapsulateTransformedLocalAABB(worldMatrix, mesh->getBoundsMin(), mesh->getBoundsMax(), outBounds, hasBounds);
+            }
+        }
+        if (auto* skinnedRenderer = entity->getComponent<SkinnedMeshRenderer>()) {
+            if (skinnedRenderer->getMesh()) {
+                EncapsulateTransformedLocalAABB(worldMatrix,
+                                               skinnedRenderer->getBoundsMin(),
+                                               skinnedRenderer->getBoundsMax(),
+                                               outBounds,
+                                               hasBounds);
+            }
+        }
+
+        for (Transform* child : transform->getChildren()) {
+            if (!child) {
+                continue;
+            }
+            AccumulateRenderableHierarchyBounds(child->getEntity(), outBounds, hasBounds);
+        }
+    }
+}
+
+static Crescent::AABB ComputeRenderableHierarchyBounds(Crescent::Entity* entity) {
+    Crescent::AABB bounds;
+    bool hasBounds = false;
+    AccumulateRenderableHierarchyBounds(entity, bounds, hasBounds);
+    if (hasBounds) {
+        return bounds;
+    }
+    return Crescent::SelectionSystem::getEntityBounds(entity);
+}
+
+static void CollectSkinnedPreviewTargets(Crescent::Entity* entity,
+                                         std::vector<Crescent::SkinnedMeshRenderer*>& outTargets) {
+    if (!entity) {
+        return;
+    }
+    if (auto* skinned = entity->getComponent<Crescent::SkinnedMeshRenderer>()) {
+        outTargets.push_back(skinned);
+    }
+    if (Crescent::Transform* transform = entity->getTransform()) {
+        for (Crescent::Transform* child : transform->getChildren()) {
+            if (!child) {
+                continue;
+            }
+            CollectSkinnedPreviewTargets(child->getEntity(), outTargets);
+        }
+    }
+}
+
+static Crescent::Animator* FindAnimatorPreviewTarget(Crescent::Entity* entity) {
+    if (!entity) {
+        return nullptr;
+    }
+    if (auto* animator = entity->getComponent<Crescent::Animator>()) {
+        return animator;
+    }
+    if (Crescent::Transform* transform = entity->getTransform()) {
+        for (Crescent::Transform* child : transform->getChildren()) {
+            if (!child) {
+                continue;
+            }
+            if (auto* animator = FindAnimatorPreviewTarget(child->getEntity())) {
+                return animator;
+            }
+        }
+    }
+    return nullptr;
+}
+
+static void DestroyLegacyAnimationPreviewArtifacts(Crescent::Scene* scene) {
+    if (!scene) {
+        return;
+    }
+
+    std::vector<Crescent::Entity*> toDestroy;
+    for (const auto& entry : scene->getAllEntities()) {
+        Crescent::Entity* entity = entry.get();
+        if (!entity || !entity->isEditorOnly()) {
+            continue;
+        }
+        if (entity->getName() == "Animation Preview Camera") {
+            toDestroy.push_back(entity);
+        }
+    }
+
+    for (Crescent::Entity* entity : toDestroy) {
+        scene->destroyEntity(entity);
+    }
+}
+
+static bool IsSameOrAncestorOf(Crescent::Entity* candidate, Crescent::Entity* target) {
+    if (!candidate || !target) {
+        return false;
+    }
+    Crescent::Entity* cursor = target;
+    while (cursor) {
+        if (cursor == candidate) {
+            return true;
+        }
+        Crescent::Transform* transform = cursor->getTransform();
+        Crescent::Transform* parent = transform ? transform->getParent() : nullptr;
+        cursor = parent ? parent->getEntity() : nullptr;
+    }
+    return false;
+}
+
+static bool IsSameOrDescendantOf(Crescent::Entity* candidate, Crescent::Entity* target) {
+    return IsSameOrAncestorOf(target, candidate);
+}
+
+static bool IsPreviewTargetRelated(Crescent::Entity* entity, Crescent::Entity* target) {
+    return IsSameOrAncestorOf(entity, target) || IsSameOrDescendantOf(entity, target);
+}
+
+static void PruneAnimationPreviewScene(Crescent::Scene* scene, Crescent::Entity* target) {
+    if (!scene || !target) {
+        return;
+    }
+
+    std::vector<Crescent::Entity*> toDestroy;
+    for (const auto& entry : scene->getAllEntities()) {
+        Crescent::Entity* entity = entry.get();
+        if (!entity) {
+            continue;
+        }
+        if (!IsPreviewTargetRelated(entity, target)) {
+            toDestroy.push_back(entity);
+        }
+    }
+
+    for (Crescent::Entity* entity : toDestroy) {
+        scene->destroyEntity(entity);
+    }
+}
 }
 
 namespace Crescent {
@@ -260,17 +447,19 @@ void Engine::render() {
             return;
         }
 
-        bool hasSceneSurface = m_sceneSurface.isValid();
-        bool hasGameSurface = m_gameSurface.isValid();
-        if (!hasSceneSurface && !hasGameSurface) {
-            m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
-            m_renderer->render();
-            return;
-        }
+    bool hasSceneSurface = m_sceneSurface.isValid();
+    bool hasGameSurface = m_gameSurface.isValid();
+    bool hasPreviewSurface = m_previewSurface.isValid();
+    if (!hasSceneSurface && !hasGameSurface && !hasPreviewSurface) {
+        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Scene);
+        m_renderer->render();
+        return;
+    }
 
         auto viewMode = SceneManager::getInstance().getViewMode();
         bool renderSceneSurface = hasSceneSurface && (viewMode == SceneManager::ViewMode::Scene || !hasGameSurface);
         bool renderGameSurface = hasGameSurface && (viewMode == SceneManager::ViewMode::Game || !hasSceneSurface);
+        bool renderPreviewSurface = hasPreviewSurface;
 
         auto* debugRenderer = m_renderer->getDebugRenderer();
         const auto& selection = SelectionSystem::getSelection();
@@ -332,6 +521,28 @@ void Engine::render() {
                 m_renderer->renderScene(activeScene, gameCamera, gameOptions);
             }
         }
+
+        if (renderPreviewSurface) {
+            Scene* previewScene = ensureAnimationPreviewScene(activeScene);
+            Camera* previewCamera = ensureAnimationPreviewCamera(previewScene);
+            Entity* previewTarget = resolveAnimationPreviewTarget(previewScene);
+            if (previewCamera && previewTarget) {
+                applyAnimationPreviewPlayback(previewTarget);
+                frameAnimationPreviewCamera(previewCamera, previewTarget);
+                m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Preview);
+                m_renderer->setMetalLayer(m_previewSurface.layer, false);
+                m_renderer->setViewportSize(m_previewSurface.width, m_previewSurface.height, true);
+                if (debugRenderer) {
+                    debugRenderer->setGridEnabled(false);
+                    debugRenderer->clear();
+                }
+
+                Renderer::RenderOptions previewOptions;
+                previewOptions.allowTemporal = false;
+                previewOptions.updateHistory = false;
+                m_renderer->renderScene(previewScene, previewCamera, previewOptions);
+            }
+        }
     });
     m_renderJobs.wait(handle);
 }
@@ -352,6 +563,14 @@ void Engine::setGameMetalLayer(void* layer) {
     }
 }
 
+void Engine::setPreviewMetalLayer(void* layer) {
+    m_previewSurface.layer = layer;
+    if (m_renderer && layer) {
+        m_renderer->setRenderTargetPool(Renderer::RenderTargetPool::Preview);
+        m_renderer->setMetalLayer(layer, true);
+    }
+}
+
 void Engine::resizeScene(float width, float height) {
     m_sceneSurface.width = width;
     m_sceneSurface.height = height;
@@ -360,6 +579,189 @@ void Engine::resizeScene(float width, float height) {
 void Engine::resizeGame(float width, float height) {
     m_gameSurface.width = width;
     m_gameSurface.height = height;
+}
+
+void Engine::resizePreview(float width, float height) {
+    m_previewSurface.width = width;
+    m_previewSurface.height = height;
+}
+
+void Engine::setAnimationPreviewTargetUUID(const std::string& uuid) {
+    if (m_animationPreviewTargetUUID != uuid) {
+        m_animationPreviewSceneDirty = true;
+    }
+    m_animationPreviewTargetUUID = uuid;
+}
+
+void Engine::setAnimationPreviewPlaybackState(const AnimationPreviewPlaybackState& state) {
+    m_animationPreviewPlaybackState = state;
+}
+
+Entity* Engine::ensureAnimationPreviewCameraEntity(Scene* scene) {
+    if (!scene) {
+        return nullptr;
+    }
+
+    for (const auto& entry : scene->getAllEntities()) {
+        Entity* entity = entry.get();
+        if (!entity || !entity->isEditorOnly()) {
+            continue;
+        }
+        Camera* camera = entity->getComponent<Camera>();
+        if (camera && entity->getName() == "Animation Preview Camera") {
+            return entity;
+        }
+    }
+
+    Entity* previewEntity = scene->createEntity("Animation Preview Camera");
+    if (!previewEntity) {
+        return nullptr;
+    }
+    previewEntity->setEditorOnly(true);
+    Camera* camera = previewEntity->addComponent<Camera>();
+    camera->setEditorCamera(false);
+    camera->setFieldOfView(45.0f * Math::DEG_TO_RAD);
+    camera->setClearColor(Math::Vector4(0.08f, 0.09f, 0.12f, 1.0f));
+    previewEntity->getTransform()->setPosition(Math::Vector3(0.0f, 1.5f, 3.0f));
+    previewEntity->getTransform()->setRotation(Math::Quaternion::Identity);
+    return previewEntity;
+}
+
+static Crescent::Entity* EnsureAnimationPreviewLightEntity(Crescent::Scene* scene) {
+    if (!scene) {
+        return nullptr;
+    }
+
+    for (const auto& entry : scene->getAllEntities()) {
+        Crescent::Entity* entity = entry.get();
+        if (!entity) {
+            continue;
+        }
+        if (entity->getName() != "Animation Preview Light") {
+            continue;
+        }
+        if (auto* light = entity->getComponent<Crescent::Light>()) {
+            light->setType(Crescent::Light::Type::Directional);
+            return entity;
+        }
+    }
+
+    Crescent::Entity* lightEntity = scene->createEntity("Animation Preview Light");
+    if (!lightEntity) {
+        return nullptr;
+    }
+
+    auto* light = lightEntity->addComponent<Crescent::Light>();
+    light->setType(Crescent::Light::Type::Directional);
+    light->setColor(Crescent::Math::Vector3(1.0f, 0.97f, 0.92f));
+    light->setIntensity(3.0f);
+    light->setCastShadows(false);
+    lightEntity->getTransform()->setRotation(
+        Crescent::Math::Quaternion::FromEulerAngles(
+            Crescent::Math::Vector3(-38.0f * Crescent::Math::DEG_TO_RAD,
+                                    32.0f * Crescent::Math::DEG_TO_RAD,
+                                    0.0f)));
+    return lightEntity;
+}
+
+Camera* Engine::ensureAnimationPreviewCamera(Scene* scene) {
+    Entity* entity = ensureAnimationPreviewCameraEntity(scene);
+    return entity ? entity->getComponent<Camera>() : nullptr;
+}
+
+Scene* Engine::ensureAnimationPreviewScene(Scene* sourceScene) {
+    if (!sourceScene || m_animationPreviewTargetUUID.empty()) {
+        return nullptr;
+    }
+
+    DestroyLegacyAnimationPreviewArtifacts(sourceScene);
+
+    if (!m_animationPreviewScene) {
+        m_animationPreviewScene = std::make_unique<Scene>("Animation Preview Scene");
+        m_animationPreviewSceneDirty = true;
+    }
+
+    if (m_animationPreviewSceneDirty || m_animationPreviewSourceScene != sourceScene) {
+        std::string snapshot = SceneSerializer::SerializeScene(sourceScene, false);
+        if (!SceneSerializer::DeserializeScene(m_animationPreviewScene.get(), snapshot)) {
+            return nullptr;
+        }
+        Entity* target = resolveAnimationPreviewTarget(m_animationPreviewScene.get());
+        if (!target) {
+            return nullptr;
+        }
+        PruneAnimationPreviewScene(m_animationPreviewScene.get(), target);
+        EnsureAnimationPreviewLightEntity(m_animationPreviewScene.get());
+        m_animationPreviewSourceScene = sourceScene;
+        m_animationPreviewSceneDirty = false;
+    }
+
+    return m_animationPreviewScene.get();
+}
+
+Entity* Engine::resolveAnimationPreviewTarget(Scene* scene) {
+    if (!scene || m_animationPreviewTargetUUID.empty()) {
+        return nullptr;
+    }
+    return SceneCommands::getEntityByUUID(scene, m_animationPreviewTargetUUID);
+}
+
+void Engine::applyAnimationPreviewPlayback(Entity* targetEntity) {
+    if (!targetEntity) {
+        return;
+    }
+
+    if (Animator* animator = FindAnimatorPreviewTarget(targetEntity)) {
+        animator->setEnabled(false);
+    }
+
+    std::vector<SkinnedMeshRenderer*> targets;
+    CollectSkinnedPreviewTargets(targetEntity, targets);
+    for (auto* target : targets) {
+        if (!target) {
+            continue;
+        }
+        target->setDrivenByAnimator(false);
+        target->setActiveClipIndex(m_animationPreviewPlaybackState.clipIndex);
+        target->setTimeSeconds(std::max(0.0f, m_animationPreviewPlaybackState.time));
+        target->setLooping(m_animationPreviewPlaybackState.looping);
+        target->setPlaying(true);
+        target->setPlaybackSpeed(0.0f);
+        target->OnUpdate(Time::fixedDeltaTime());
+    }
+}
+
+void Engine::frameAnimationPreviewCamera(Camera* camera, Entity* targetEntity) {
+    if (!camera || !camera->getEntity() || !targetEntity) {
+        return;
+    }
+
+    AABB bounds = ComputeRenderableHierarchyBounds(targetEntity);
+    Math::Vector3 center = bounds.center();
+    Math::Vector3 size = bounds.size();
+    float radius = std::max(0.35f, 0.5f * std::sqrt(size.x * size.x + size.y * size.y + size.z * size.z));
+
+    Transform* targetTransform = targetEntity->getTransform();
+    Math::Vector3 targetForward = targetTransform ? targetTransform->forward() : Math::Vector3(0.0f, 0.0f, -1.0f);
+    targetForward.y = 0.0f;
+    if (targetForward.lengthSquared() <= Math::EPSILON) {
+        targetForward = Math::Vector3(0.0f, 0.0f, -1.0f);
+    } else {
+        targetForward.normalize();
+    }
+    Math::Vector3 targetRight = targetForward.cross(Math::Vector3::Up).normalized();
+    Math::Vector3 focusPoint = center + Math::Vector3(0.0f, size.y * 0.2f, 0.0f);
+    Math::Vector3 viewDir = (-targetForward * 1.9f) + (targetRight * 0.65f) + (Math::Vector3::Up * 0.32f);
+    if (viewDir.lengthSquared() <= Math::EPSILON) {
+        viewDir = Math::Vector3(0.3f, 0.2f, 1.0f);
+    }
+    viewDir.normalize();
+
+    float distance = std::max(1.25f, radius * 2.6f);
+    Transform* cameraTransform = camera->getEntity()->getTransform();
+    Math::Vector3 cameraPos = focusPoint + viewDir * distance;
+    cameraTransform->setPosition(cameraPos);
+    cameraTransform->setRotation(Math::Quaternion::LookRotation((focusPoint - cameraPos).normalized(), Math::Vector3::Up));
 }
 
 // ============================================================================

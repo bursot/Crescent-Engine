@@ -20,6 +20,8 @@
 #include "../Engine/Components/PhysicsCollider.hpp"
 #include "../Engine/Components/CharacterController.hpp"
 #include "../Engine/Components/FirstPersonController.hpp"
+#include "../Engine/Components/ThirdPersonController.hpp"
+#include "../Engine/Components/BoneAttachment.hpp"
 #include "../Engine/Components/Health.hpp"
 #include "../Engine/Components/AudioSource.hpp"
 #include "../Engine/ECS/Transform.hpp"
@@ -2572,6 +2574,14 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     }];
 }
 
+- (void)setPreviewMetalLayer:(CAMetalLayer *)layer {
+    [self performSync:^{
+        if (_engine) {
+            _engine->setPreviewMetalLayer((__bridge void*)layer);
+        }
+    }];
+}
+
 - (void)resizeSceneWithWidth:(float)width height:(float)height {
     [self performSync:^{
         if (_engine) {
@@ -2584,6 +2594,113 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
     [self performSync:^{
         if (_engine) {
             _engine->resizeGame(width, height);
+        }
+    }];
+}
+
+- (void)resizePreviewWithWidth:(float)width height:(float)height {
+    [self performSync:^{
+        if (_engine) {
+            _engine->resizePreview(width, height);
+        }
+    }];
+}
+
+- (void)setAnimationPreviewTargetUUID:(NSString *)uuid {
+    [self performSync:^{
+        if (_engine) {
+            _engine->setAnimationPreviewTargetUUID(uuid ? uuid.UTF8String : "");
+        }
+    }];
+}
+
+- (void)setAnimationPreviewPlaybackState:(NSDictionary *)info {
+    [self performSync:^{
+        if (!_engine || !info) {
+            return;
+        }
+        Crescent::Engine::AnimationPreviewPlaybackState state;
+        if (NSNumber* clipIndex = info[@"clipIndex"]) {
+            state.clipIndex = clipIndex.intValue;
+        }
+        if (NSNumber* time = info[@"time"]) {
+            state.time = std::max(0.0f, time.floatValue);
+        }
+        if (NSNumber* playing = info[@"playing"]) {
+            state.playing = playing.boolValue;
+        }
+        if (NSNumber* looping = info[@"looping"]) {
+            state.looping = looping.boolValue;
+        }
+        if (NSNumber* speed = info[@"speed"]) {
+            state.speed = std::max(0.0f, speed.floatValue);
+        }
+        _engine->setAnimationPreviewPlaybackState(state);
+    }];
+}
+
+- (NSString *)createAnimationPreviewCloneFromUUID:(NSString *)uuid {
+    return (NSString *)[self performSyncObject:^id{
+        if (!_engine || !uuid || uuid.length == 0) {
+            return @"";
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return @"";
+        }
+
+        Entity* source = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!source) {
+            return @"";
+        }
+
+        std::vector<Entity*> duplicates = SceneSerializer::DuplicateEntities(scene, { source });
+        Entity* clone = duplicates.empty() ? nullptr : duplicates.front();
+        if (!clone) {
+            return @"";
+        }
+
+        std::vector<Transform*> stack;
+        if (Transform* root = clone->getTransform()) {
+            stack.push_back(root);
+        }
+        while (!stack.empty()) {
+            Transform* node = stack.back();
+            stack.pop_back();
+            if (!node) {
+                continue;
+            }
+            if (Entity* entity = node->getEntity()) {
+                entity->setEditorOnly(true);
+            }
+            const auto& children = node->getChildren();
+            for (auto it = children.rbegin(); it != children.rend(); ++it) {
+                stack.push_back(*it);
+            }
+        }
+
+        clone->setName(source->getName() + " Preview");
+        if (Transform* cloneTransform = clone->getTransform()) {
+            Math::Vector3 pos = cloneTransform->getPosition();
+            cloneTransform->setPosition(Math::Vector3(pos.x, pos.y + 10000.0f, pos.z));
+        }
+
+        return [NSString stringWithUTF8String:clone->getUUID().toString().c_str()];
+    }];
+}
+
+- (void)destroyAnimationPreviewCloneUUID:(NSString *)uuid {
+    [self performAsync:^{
+        if (!_engine || !uuid || uuid.length == 0) {
+            return;
+        }
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) {
+            return;
+        }
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (entity) {
+            scene->destroyEntity(entity);
         }
     }];
 }
@@ -6452,7 +6569,14 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         for (const auto& evt : clip->getEvents()) {
             [events addObject:@{
                 @"time": @(evt.time),
-                @"name": [NSString stringWithUTF8String:evt.name.c_str()]
+                @"name": [NSString stringWithUTF8String:evt.name.c_str()],
+                @"eventType": evt.eventType.empty() ? @"" : [NSString stringWithUTF8String:evt.eventType.c_str()],
+                @"eventTag": evt.eventTag.empty() ? @"" : [NSString stringWithUTF8String:evt.eventTag.c_str()],
+                @"payload": evt.payload.empty() ? @"" : [NSString stringWithUTF8String:evt.payload.c_str()],
+                @"volume": @(evt.volume),
+                @"pitchMin": @(evt.pitchMin),
+                @"pitchMax": @(evt.pitchMax),
+                @"spatial": @(evt.spatial)
             }];
         }
         return events;
@@ -6478,6 +6602,22 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
             AnimationEvent evt;
             evt.time = [entry[@"time"] floatValue];
             evt.name = name.UTF8String;
+            NSString* eventType = entry[@"eventType"];
+            NSString* eventTag = entry[@"eventTag"];
+            evt.eventType = eventType ? eventType.UTF8String : "";
+            evt.eventTag = eventTag ? eventTag.UTF8String : "";
+            NSString* payload = entry[@"payload"];
+            evt.payload = payload ? payload.UTF8String : "";
+            evt.volume = entry[@"volume"] ? [entry[@"volume"] floatValue] : 1.0f;
+            evt.pitchMin = entry[@"pitchMin"] ? [entry[@"pitchMin"] floatValue] : 1.0f;
+            evt.pitchMax = entry[@"pitchMax"] ? [entry[@"pitchMax"] floatValue] : 1.0f;
+            evt.spatial = entry[@"spatial"] ? [entry[@"spatial"] boolValue] : YES;
+            if (evt.eventTag.empty() && !evt.name.empty()) {
+                evt.eventTag = evt.name;
+            }
+            if (evt.eventType.empty() && !evt.payload.empty()) {
+                evt.eventType = "audio";
+            }
             clip->addEvent(evt);
         }
         return YES;
@@ -6492,7 +6632,14 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
         for (const auto& evt : animator->getFiredEvents()) {
             [events addObject:@{
                 @"time": @(evt.time),
-                @"name": [NSString stringWithUTF8String:evt.name.c_str()]
+                @"name": [NSString stringWithUTF8String:evt.name.c_str()],
+                @"eventType": evt.eventType.empty() ? @"" : [NSString stringWithUTF8String:evt.eventType.c_str()],
+                @"eventTag": evt.eventTag.empty() ? @"" : [NSString stringWithUTF8String:evt.eventTag.c_str()],
+                @"payload": evt.payload.empty() ? @"" : [NSString stringWithUTF8String:evt.payload.c_str()],
+                @"volume": @(evt.volume),
+                @"pitchMin": @(evt.pitchMin),
+                @"pitchMax": @(evt.pitchMax),
+                @"spatial": @(evt.spatial)
             }];
         }
         animator->clearFiredEvents();
@@ -6563,6 +6710,8 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
             @"mid": [NSString stringWithUTF8String:ik->getMidBone().c_str()],
             @"end": [NSString stringWithUTF8String:ik->getEndBone().c_str()],
             @"target": @[@(target.x), @(target.y), @(target.z)],
+            @"targetEntityUUID": [NSString stringWithUTF8String:ik->getTargetEntityUUID().c_str()],
+            @"targetOffset": @[@(ik->getTargetOffset().x), @(ik->getTargetOffset().y), @(ik->getTargetOffset().z)],
             @"world": @(ik->getTargetInWorld()),
             @"weight": @(ik->getWeight())
         };
@@ -6596,6 +6745,17 @@ static Crescent::Decal* GetDecalByUUID(const std::string& uuidStr) {
                                   [target[1] floatValue],
                                   [target[2] floatValue]);
                 ik->setTargetPosition(pos);
+            }
+        }
+        if (NSString* targetEntityUUID = info[@"targetEntityUUID"]) {
+            ik->setTargetEntityUUID(targetEntityUUID.UTF8String);
+        }
+        if (NSArray* targetOffset = info[@"targetOffset"]) {
+            if (targetOffset.count >= 3) {
+                Math::Vector3 pos([targetOffset[0] floatValue],
+                                  [targetOffset[1] floatValue],
+                                  [targetOffset[2] floatValue]);
+                ik->setTargetOffset(pos);
             }
         }
         if (NSNumber* world = info[@"world"]) {
@@ -7183,6 +7343,272 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
         Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
         if (!entity) return;
         entity->removeComponent<FirstPersonController>();
+    }];
+}
+
+- (NSDictionary *)getThirdPersonControllerInfo:(NSString *)uuid {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return @{};
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return @{};
+        ThirdPersonController* controller = entity->getComponent<ThirdPersonController>();
+        if (!controller) return @{};
+        return @{
+            @"mouseSensitivity": @(controller->getMouseSensitivity()),
+            @"invertY": @(controller->getInvertY()),
+            @"requireLookButton": @(controller->getRequireLookButton()),
+            @"lookButton": @((int)controller->getLookButton()),
+            @"minPitch": @(controller->getMinPitch()),
+            @"maxPitch": @(controller->getMaxPitch()),
+            @"pivotHeight": @(controller->getPivotHeight()),
+            @"lookAhead": @(controller->getLookAhead()),
+            @"shoulderOffset": @(controller->getShoulderOffset()),
+            @"cameraDistance": @(controller->getCameraDistance()),
+            @"minDistance": @(controller->getMinDistance()),
+            @"maxDistance": @(controller->getMaxDistance()),
+            @"zoomSpeed": @(controller->getZoomSpeed()),
+            @"cameraCollisionRadius": @(controller->getCameraCollisionRadius()),
+            @"positionSmoothSpeed": @(controller->getPositionSmoothSpeed()),
+            @"rotationSmoothSpeed": @(controller->getRotationSmoothSpeed()),
+            @"cameraSmoothSpeed": @(controller->getCameraSmoothSpeed()),
+            @"walkSpeed": @(controller->getWalkSpeed()),
+            @"runSpeed": @(controller->getRunSpeed()),
+            @"sprintSpeed": @(controller->getSprintSpeed()),
+            @"enableSprint": @(controller->getEnableSprint()),
+            @"driveCharacterController": @(controller->getDriveCharacterController()),
+            @"weaponGripPositionOffset": @[
+                @(controller->getWeaponGripPositionOffset().x),
+                @(controller->getWeaponGripPositionOffset().y),
+                @(controller->getWeaponGripPositionOffset().z)
+            ],
+            @"weaponGripRotationOffset": @[
+                @(controller->getWeaponGripRotationOffsetDegrees().x),
+                @(controller->getWeaponGripRotationOffsetDegrees().y),
+                @(controller->getWeaponGripRotationOffsetDegrees().z)
+            ],
+            @"weaponSupportHandOffset": @[
+                @(controller->getWeaponSupportHandOffset().x),
+                @(controller->getWeaponSupportHandOffset().y),
+                @(controller->getWeaponSupportHandOffset().z)
+            ]
+        };
+    }];
+}
+
+- (BOOL)setThirdPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene || !info) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        ThirdPersonController* controller = entity->getComponent<ThirdPersonController>();
+        if (!controller) {
+            controller = entity->addComponent<ThirdPersonController>();
+        }
+        if (!entity->getComponent<CharacterController>()) {
+            entity->addComponent<CharacterController>();
+        }
+
+        if (NSNumber* value = info[@"mouseSensitivity"]) {
+            controller->setMouseSensitivity(value.floatValue);
+        }
+        if (NSNumber* value = info[@"invertY"]) {
+            controller->setInvertY(value.boolValue);
+        }
+        if (NSNumber* value = info[@"requireLookButton"]) {
+            controller->setRequireLookButton(value.boolValue);
+        }
+        if (NSNumber* value = info[@"lookButton"]) {
+            controller->setLookButton(static_cast<MouseButton>(value.intValue));
+        }
+        if (NSNumber* value = info[@"minPitch"]) {
+            controller->setMinPitch(value.floatValue);
+        }
+        if (NSNumber* value = info[@"maxPitch"]) {
+            controller->setMaxPitch(value.floatValue);
+        }
+        if (NSNumber* value = info[@"pivotHeight"]) {
+            controller->setPivotHeight(value.floatValue);
+        }
+        if (NSNumber* value = info[@"lookAhead"]) {
+            controller->setLookAhead(value.floatValue);
+        }
+        if (NSNumber* value = info[@"shoulderOffset"]) {
+            controller->setShoulderOffset(value.floatValue);
+        }
+        if (NSNumber* value = info[@"cameraDistance"]) {
+            controller->setCameraDistance(value.floatValue);
+        }
+        if (NSNumber* value = info[@"minDistance"]) {
+            controller->setMinDistance(value.floatValue);
+        }
+        if (NSNumber* value = info[@"maxDistance"]) {
+            controller->setMaxDistance(value.floatValue);
+        }
+        if (NSNumber* value = info[@"zoomSpeed"]) {
+            controller->setZoomSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"cameraCollisionRadius"]) {
+            controller->setCameraCollisionRadius(value.floatValue);
+        }
+        if (NSNumber* value = info[@"positionSmoothSpeed"]) {
+            controller->setPositionSmoothSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"rotationSmoothSpeed"]) {
+            controller->setRotationSmoothSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"cameraSmoothSpeed"]) {
+            controller->setCameraSmoothSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"walkSpeed"]) {
+            controller->setWalkSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"runSpeed"]) {
+            controller->setRunSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"sprintSpeed"]) {
+            controller->setSprintSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"enableSprint"]) {
+            controller->setEnableSprint(value.boolValue);
+        }
+        if (NSNumber* value = info[@"driveCharacterController"]) {
+            controller->setDriveCharacterController(value.boolValue);
+        }
+        if (NSArray* values = info[@"weaponGripPositionOffset"]; values.count >= 3) {
+            controller->setWeaponGripPositionOffset(Math::Vector3(
+                [values[0] floatValue],
+                [values[1] floatValue],
+                [values[2] floatValue]
+            ));
+        }
+        if (NSArray* values = info[@"weaponGripRotationOffset"]; values.count >= 3) {
+            controller->setWeaponGripRotationOffsetDegrees(Math::Vector3(
+                [values[0] floatValue],
+                [values[1] floatValue],
+                [values[2] floatValue]
+            ));
+        }
+        if (NSArray* values = info[@"weaponSupportHandOffset"]; values.count >= 3) {
+            controller->setWeaponSupportHandOffset(Math::Vector3(
+                [values[0] floatValue],
+                [values[1] floatValue],
+                [values[2] floatValue]
+            ));
+        }
+        return YES;
+    }];
+}
+
+- (BOOL)addThirdPersonController:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        if (!entity->getComponent<CharacterController>()) {
+            entity->addComponent<CharacterController>();
+        }
+        if (!entity->getComponent<ThirdPersonController>()) {
+            entity->addComponent<ThirdPersonController>();
+        }
+        return YES;
+    }];
+}
+
+- (void)removeThirdPersonController:(NSString *)uuid {
+    [self performAsync:^{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return;
+        entity->removeComponent<ThirdPersonController>();
+    }];
+}
+
+- (NSDictionary *)getBoneAttachmentInfo:(NSString *)uuid {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return @{};
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return @{};
+        BoneAttachment* attachment = entity->getComponent<BoneAttachment>();
+        if (!attachment) return @{};
+        const Math::Vector3& pos = attachment->getPositionOffset();
+        const Math::Vector3& rot = attachment->getRotationOffsetDegrees();
+        const Math::Vector3& scale = attachment->getScaleOffset();
+        std::string sourceName = attachment->getResolvedSourceEntityName();
+        return @{
+            @"boneName": attachment->getBoneName().empty() ? @"" : [NSString stringWithUTF8String:attachment->getBoneName().c_str()],
+            @"sourceEntityUUID": attachment->getSourceEntityUUID().empty() ? @"" : [NSString stringWithUTF8String:attachment->getSourceEntityUUID().c_str()],
+            @"positionOffset": @[@(pos.x), @(pos.y), @(pos.z)],
+            @"rotationOffset": @[@(rot.x), @(rot.y), @(rot.z)],
+            @"scaleOffset": @[@(scale.x), @(scale.y), @(scale.z)],
+            @"inheritBoneScale": @(attachment->getInheritBoneScale()),
+            @"resolvedSource": sourceName.empty() ? @"" : [NSString stringWithUTF8String:sourceName.c_str()]
+        };
+    }];
+}
+
+- (BOOL)setBoneAttachmentInfo:(NSString *)uuid info:(NSDictionary *)info {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene || !info) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        BoneAttachment* attachment = entity->getComponent<BoneAttachment>();
+        if (!attachment) {
+            attachment = entity->addComponent<BoneAttachment>();
+        }
+        if (NSString* boneName = info[@"boneName"]) {
+            attachment->setBoneName(boneName.UTF8String);
+        }
+        if (NSString* sourceEntityUUID = info[@"sourceEntityUUID"]) {
+            attachment->setSourceEntityUUID(sourceEntityUUID.UTF8String);
+        }
+        if (NSArray* position = info[@"positionOffset"]) {
+            if (position.count >= 3) {
+                attachment->setPositionOffset(Math::Vector3([position[0] floatValue], [position[1] floatValue], [position[2] floatValue]));
+            }
+        }
+        if (NSArray* rotation = info[@"rotationOffset"]) {
+            if (rotation.count >= 3) {
+                attachment->setRotationOffsetDegrees(Math::Vector3([rotation[0] floatValue], [rotation[1] floatValue], [rotation[2] floatValue]));
+            }
+        }
+        if (NSArray* scale = info[@"scaleOffset"]) {
+            if (scale.count >= 3) {
+                attachment->setScaleOffset(Math::Vector3([scale[0] floatValue], [scale[1] floatValue], [scale[2] floatValue]));
+            }
+        }
+        if (NSNumber* inheritBoneScale = info[@"inheritBoneScale"]) {
+            attachment->setInheritBoneScale(inheritBoneScale.boolValue);
+        }
+        return YES;
+    }];
+}
+
+- (BOOL)addBoneAttachment:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        if (!entity->getComponent<BoneAttachment>()) {
+            entity->addComponent<BoneAttachment>();
+        }
+        return YES;
+    }];
+}
+
+- (void)removeBoneAttachment:(NSString *)uuid {
+    [self performAsync:^{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return;
+        entity->removeComponent<BoneAttachment>();
     }];
 }
 

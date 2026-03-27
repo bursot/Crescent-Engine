@@ -35,9 +35,11 @@ struct InspectorEntitySnapshot {
     let hasHealth: Bool
     let hasCharacterController: Bool
     let hasFirstPersonController: Bool
+    let hasThirdPersonController: Bool
+    let hasBoneAttachment: Bool
 
     var hasPhysicsStack: Bool {
-        hasRigidbody || hasCollider || hasHealth || hasCharacterController || hasFirstPersonController
+        hasRigidbody || hasCollider || hasHealth || hasCharacterController || hasFirstPersonController || hasThirdPersonController || hasBoneAttachment
     }
 
     var supportsMaterial: Bool {
@@ -167,7 +169,9 @@ struct InspectorEntitySnapshot {
             hasCollider: bridge.hasInspectorPayload(bridge.getColliderInfo(uuid: entity.uuid)),
             hasHealth: bridge.hasInspectorPayload(bridge.getHealthInfo(uuid: entity.uuid)),
             hasCharacterController: bridge.hasInspectorPayload(bridge.getCharacterControllerInfo(uuid: entity.uuid)),
-            hasFirstPersonController: bridge.hasInspectorPayload(bridge.getFirstPersonControllerInfo(uuid: entity.uuid))
+            hasFirstPersonController: bridge.hasInspectorPayload(bridge.getFirstPersonControllerInfo(uuid: entity.uuid)),
+            hasThirdPersonController: bridge.hasInspectorPayload(bridge.getThirdPersonControllerInfo(uuid: entity.uuid)),
+            hasBoneAttachment: bridge.hasInspectorPayload(bridge.getBoneAttachmentInfo(uuid: entity.uuid))
         )
     }
 }
@@ -178,6 +182,8 @@ enum InspectorQuickAddAction: String, CaseIterable, Identifiable {
     case health
     case characterController
     case firstPersonController
+    case thirdPersonController
+    case boneAttachment
     case audioSource
 
     var id: String { rawValue }
@@ -189,6 +195,8 @@ enum InspectorQuickAddAction: String, CaseIterable, Identifiable {
         case .health: return "Health"
         case .characterController: return "Character Controller"
         case .firstPersonController: return "First Person Controller"
+        case .thirdPersonController: return "Third Person Controller"
+        case .boneAttachment: return "Bone Attachment"
         case .audioSource: return "Audio Source"
         }
     }
@@ -200,6 +208,8 @@ enum InspectorQuickAddAction: String, CaseIterable, Identifiable {
         case .health: return "Simple health and death handling"
         case .characterController: return "Grounded movement and jumping"
         case .firstPersonController: return "Mouse look and FPS controls"
+        case .thirdPersonController: return "Orbit camera and 3P locomotion"
+        case .boneAttachment: return "Attach props to animated skeleton bones"
         case .audioSource: return "3D or 2D playback source"
         }
     }
@@ -211,13 +221,15 @@ enum InspectorQuickAddAction: String, CaseIterable, Identifiable {
         case .health: return "heart.text.square.fill"
         case .characterController: return "figure.stand"
         case .firstPersonController: return "scope"
+        case .thirdPersonController: return "figure.run"
+        case .boneAttachment: return "link.circle.fill"
         case .audioSource: return "speaker.wave.2.fill"
         }
     }
 
     var tint: Color {
         switch self {
-        case .rigidbody, .collider, .characterController, .firstPersonController:
+        case .rigidbody, .collider, .characterController, .firstPersonController, .thirdPersonController, .boneAttachment:
             return Color.orange
         case .health:
             return Color.red
@@ -242,6 +254,8 @@ enum InspectorQuickAddAction: String, CaseIterable, Identifiable {
         case .health: return snapshot.hasHealth
         case .characterController: return snapshot.hasCharacterController
         case .firstPersonController: return snapshot.hasFirstPersonController
+        case .thirdPersonController: return snapshot.hasThirdPersonController
+        case .boneAttachment: return snapshot.hasBoneAttachment
         case .audioSource: return snapshot.hasAudioSource
         }
     }
@@ -259,6 +273,10 @@ enum InspectorQuickAddAction: String, CaseIterable, Identifiable {
             return bridge.addCharacterController(uuid: entityUUID)
         case .firstPersonController:
             return bridge.addFirstPersonController(uuid: entityUUID)
+        case .thirdPersonController:
+            return bridge.addThirdPersonController(uuid: entityUUID)
+        case .boneAttachment:
+            return bridge.addBoneAttachment(uuid: entityUUID)
         case .audioSource:
             return bridge.addAudioSource(uuid: entityUUID)
         }

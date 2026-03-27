@@ -255,9 +255,11 @@ struct SkeletonWindow: View {
             "root": root,
             "mid": mid,
             "end": end,
-            "target": [0.0, 0.0, 0.0],
-            "world": true,
-            "weight": 1.0
+            "target": ikInfo.target,
+            "targetEntityUUID": ikInfo.targetEntityUUID,
+            "targetOffset": ikInfo.targetOffset,
+            "world": ikInfo.targetInWorld,
+            "weight": ikInfo.weight
         ]
         _ = CrescentEngineBridge.shared().setIKConstraintInfo(uuid: uuid, info: info)
         refreshSkeleton()
@@ -274,9 +276,11 @@ struct SkeletonWindow: View {
             "root": rootName,
             "mid": midName,
             "end": endName,
-            "target": [0.0, 0.0, 0.0],
-            "world": true,
-            "weight": 1.0
+            "target": ikInfo.target,
+            "targetEntityUUID": ikInfo.targetEntityUUID,
+            "targetOffset": ikInfo.targetOffset,
+            "world": ikInfo.targetInWorld,
+            "weight": ikInfo.weight
         ]
         _ = CrescentEngineBridge.shared().setIKConstraintInfo(uuid: uuid, info: info)
         refreshSkeleton()
@@ -375,6 +379,11 @@ private struct IKInfo {
     var rootIndex: Int = -1
     var midIndex: Int = -1
     var endIndex: Int = -1
+    var target: [Float] = [0, 0, 0]
+    var targetEntityUUID: String = ""
+    var targetOffset: [Float] = [0, 0, 0]
+    var targetInWorld: Bool = true
+    var weight: Float = 1.0
 
     init() {}
 
@@ -385,6 +394,15 @@ private struct IKInfo {
         rootIndex = bones.first(where: { $0.name == rootName })?.index ?? -1
         midIndex = bones.first(where: { $0.name == midName })?.index ?? -1
         endIndex = bones.first(where: { $0.name == endName })?.index ?? -1
+        if let values = info["target"] as? [NSNumber], values.count >= 3 {
+            target = values.prefix(3).map { $0.floatValue }
+        }
+        targetEntityUUID = info["targetEntityUUID"] as? String ?? ""
+        if let values = info["targetOffset"] as? [NSNumber], values.count >= 3 {
+            targetOffset = values.prefix(3).map { $0.floatValue }
+        }
+        targetInWorld = (info["world"] as? NSNumber)?.boolValue ?? true
+        weight = (info["weight"] as? NSNumber)?.floatValue ?? 1.0
     }
 }
 

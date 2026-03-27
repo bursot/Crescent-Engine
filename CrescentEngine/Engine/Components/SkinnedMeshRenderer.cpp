@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <limits>
 
 namespace Crescent {
 namespace {
@@ -158,6 +159,69 @@ static Math::Matrix4x4 BuildGlobalPose(const Skeleton& skeleton,
     return global;
 }
 
+static void ResetPoseBoneTranslationToBind(const Skeleton& skeleton,
+                                           AnimationLocalPose& pose,
+                                           int boneIndex) {
+    const auto& bones = skeleton.getBones();
+    if (boneIndex < 0 || boneIndex >= static_cast<int>(bones.size()) ||
+        boneIndex >= static_cast<int>(pose.positions.size())) {
+        return;
+    }
+    Math::Vector3 basePos;
+    Math::Quaternion baseRot;
+    Math::Vector3 baseScale;
+    DecomposeTRS(bones[boneIndex].localBind, basePos, baseRot, baseScale);
+    pose.positions[boneIndex] = basePos;
+}
+
+static void ResetPoseChainTranslationsToBind(const Skeleton& skeleton,
+                                             AnimationLocalPose& pose,
+                                             int boneIndex) {
+    const auto& bones = skeleton.getBones();
+    for (int idx = boneIndex; idx >= 0 && idx < static_cast<int>(bones.size()); idx = bones[idx].parentIndex) {
+        ResetPoseBoneTranslationToBind(skeleton, pose, idx);
+    }
+}
+
+static void ResetLikelyRootMotionTranslationsToBind(const Skeleton& skeleton,
+                                                    AnimationLocalPose& pose) {
+    const auto& bones = skeleton.getBones();
+    for (size_t i = 0; i < bones.size(); ++i) {
+        const Bone& bone = bones[i];
+        std::string name = ToLower(bone.name);
+        bool likelyRootMotionBone = bone.parentIndex < 0 ||
+            ContainsToken(name, {"root", "armature", "scene", "hips", "pelvis", "hip"});
+        if (likelyRootMotionBone) {
+            ResetPoseChainTranslationsToBind(skeleton, pose, static_cast<int>(i));
+        }
+    }
+}
+
+static void ComputeWorldAABBFromLocalBounds(const Math::Vector3& localMin,
+                                            const Math::Vector3& localMax,
+                                            const Math::Matrix4x4& worldMatrix,
+                                            Math::Vector3& outMin,
+                                            Math::Vector3& outMax) {
+    const Math::Vector3 corners[8] = {
+        Math::Vector3(localMin.x, localMin.y, localMin.z),
+        Math::Vector3(localMax.x, localMin.y, localMin.z),
+        Math::Vector3(localMin.x, localMax.y, localMin.z),
+        Math::Vector3(localMax.x, localMax.y, localMin.z),
+        Math::Vector3(localMin.x, localMin.y, localMax.z),
+        Math::Vector3(localMax.x, localMin.y, localMax.z),
+        Math::Vector3(localMin.x, localMax.y, localMax.z),
+        Math::Vector3(localMax.x, localMax.y, localMax.z)
+    };
+
+    outMin = Math::Vector3(std::numeric_limits<float>::max());
+    outMax = Math::Vector3(std::numeric_limits<float>::lowest());
+    for (const Math::Vector3& corner : corners) {
+        Math::Vector3 worldCorner = worldMatrix.transformPoint(corner);
+        outMin = Math::Vector3::Min(outMin, worldCorner);
+        outMax = Math::Vector3::Max(outMax, worldCorner);
+    }
+}
+
 } // namespace
 
 SkinnedMeshRenderer::SkinnedMeshRenderer()
@@ -175,6 +239,15 @@ SkinnedMeshRenderer::SkinnedMeshRenderer()
 
 void SkinnedMeshRenderer::setMesh(std::shared_ptr<Mesh> mesh) {
     m_Mesh = mesh;
+    if (m_Mesh) {
+        m_LocalBoundsMin = m_Mesh->getBoundsMin();
+        m_LocalBoundsMax = m_Mesh->getBoundsMax();
+        m_HasDynamicBounds = true;
+    } else {
+        m_LocalBoundsMin = Math::Vector3::Zero;
+        m_LocalBoundsMax = Math::Vector3::Zero;
+        m_HasDynamicBounds = false;
+    }
 }
 
 void SkinnedMeshRenderer::setSkeleton(std::shared_ptr<Skeleton> skeleton) {
@@ -387,10 +460,117 @@ void SkinnedMeshRenderer::applyBoneMatrices(const std::vector<Math::Matrix4x4>& 
         m_PrevBoneMatrices.assign(m_Skeleton->getBoneCount(), Math::Matrix4x4::Identity);
     }
     m_BoneMatrices = matrices;
+    updateDynamicBounds();
+}
+
+Math::Vector3 SkinnedMeshRenderer::getBoundsMin() const {
+    if (!m_Mesh) {
+        return Math::Vector3::Zero;
+    }
+    Transform* transform = m_Entity ? m_Entity->getTransform() : nullptr;
+    if (!transform) {
+        return m_HasDynamicBounds ? m_LocalBoundsMin : m_Mesh->getBoundsMin();
+    }
+    Math::Vector3 worldMin;
+    Math::Vector3 worldMax;
+    const Math::Vector3 localMin = m_HasDynamicBounds ? m_LocalBoundsMin : m_Mesh->getBoundsMin();
+    const Math::Vector3 localMax = m_HasDynamicBounds ? m_LocalBoundsMax : m_Mesh->getBoundsMax();
+    ComputeWorldAABBFromLocalBounds(localMin, localMax, transform->getWorldMatrix(), worldMin, worldMax);
+    return worldMin;
+}
+
+Math::Vector3 SkinnedMeshRenderer::getBoundsMax() const {
+    if (!m_Mesh) {
+        return Math::Vector3::Zero;
+    }
+    Transform* transform = m_Entity ? m_Entity->getTransform() : nullptr;
+    if (!transform) {
+        return m_HasDynamicBounds ? m_LocalBoundsMax : m_Mesh->getBoundsMax();
+    }
+    Math::Vector3 worldMin;
+    Math::Vector3 worldMax;
+    const Math::Vector3 localMin = m_HasDynamicBounds ? m_LocalBoundsMin : m_Mesh->getBoundsMin();
+    const Math::Vector3 localMax = m_HasDynamicBounds ? m_LocalBoundsMax : m_Mesh->getBoundsMax();
+    ComputeWorldAABBFromLocalBounds(localMin, localMax, transform->getWorldMatrix(), worldMin, worldMax);
+    return worldMax;
+}
+
+Math::Vector3 SkinnedMeshRenderer::getBoundsCenter() const {
+    Math::Vector3 worldMin = getBoundsMin();
+    Math::Vector3 worldMax = getBoundsMax();
+    return (worldMin + worldMax) * 0.5f;
+}
+
+Math::Vector3 SkinnedMeshRenderer::getBoundsSize() const {
+    Math::Vector3 worldMin = getBoundsMin();
+    Math::Vector3 worldMax = getBoundsMax();
+    return worldMax - worldMin;
+}
+
+void SkinnedMeshRenderer::updateDynamicBounds() {
+    if (!m_Mesh) {
+        m_LocalBoundsMin = Math::Vector3::Zero;
+        m_LocalBoundsMax = Math::Vector3::Zero;
+        m_HasDynamicBounds = false;
+        return;
+    }
+
+    m_LocalBoundsMin = m_Mesh->getBoundsMin();
+    m_LocalBoundsMax = m_Mesh->getBoundsMax();
+    m_HasDynamicBounds = true;
+
+    if (!m_Mesh->hasSkinWeights() || m_BoneMatrices.empty()) {
+        return;
+    }
+
+    const auto& vertices = m_Mesh->getVertices();
+    const auto& skinWeights = m_Mesh->getSkinWeights();
+    if (vertices.empty() || vertices.size() != skinWeights.size()) {
+        return;
+    }
+
+    Math::Vector3 localMin(std::numeric_limits<float>::max());
+    Math::Vector3 localMax(std::numeric_limits<float>::lowest());
+    bool hasValidVertex = false;
+
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        const Vertex& vertex = vertices[i];
+        const SkinWeight& weights = skinWeights[i];
+        Math::Vector4 localPos4(vertex.position.x, vertex.position.y, vertex.position.z, 1.0f);
+
+        float totalWeight = 0.0f;
+        Math::Vector4 skinnedPos4 = Math::Vector4::Zero;
+        for (int j = 0; j < 4; ++j) {
+            const float weight = weights.weights[static_cast<size_t>(j)];
+            const uint32_t boneIndex = weights.indices[static_cast<size_t>(j)];
+            if (weight <= 0.0f || boneIndex >= m_BoneMatrices.size()) {
+                continue;
+            }
+            skinnedPos4 += (m_BoneMatrices[boneIndex] * localPos4) * weight;
+            totalWeight += weight;
+        }
+
+        Math::Vector3 skinnedPos = vertex.position;
+        if (totalWeight > Math::EPSILON && std::abs(skinnedPos4.w) > Math::EPSILON) {
+            skinnedPos = Math::Vector3(skinnedPos4.x, skinnedPos4.y, skinnedPos4.z) / skinnedPos4.w;
+        }
+
+        localMin = Math::Vector3::Min(localMin, skinnedPos);
+        localMax = Math::Vector3::Max(localMax, skinnedPos);
+        hasValidVertex = true;
+    }
+
+    if (hasValidVertex) {
+        const Math::Vector3 padding(0.05f, 0.05f, 0.05f);
+        m_LocalBoundsMin = localMin - padding;
+        m_LocalBoundsMax = localMax + padding;
+    }
 }
 
 void SkinnedMeshRenderer::applyRootMotion(AnimationLocalPose& pose, float sampleTime) {
-    if (!m_RootMotionEnabled || !m_Skeleton) {
+    bool shouldStripRootMotion = m_Skeleton &&
+        (m_RootMotionEnabled || (!m_RootMotionApplyPosition && !m_RootMotionApplyRotation));
+    if (!shouldStripRootMotion) {
         return;
     }
     if (pose.positions.empty()) {
@@ -411,34 +591,31 @@ void SkinnedMeshRenderer::applyRootMotion(AnimationLocalPose& pose, float sample
     Math::Vector3 currentScale;
     DecomposeTRS(global, currentPos, currentRot, currentScale);
 
-    if (!m_RootMotionValid || sampleTime < m_PrevRootTime) {
-        m_PrevRootPos = currentPos;
-        m_PrevRootRot = currentRot;
-        m_RootMotionValid = true;
-    } else {
-        Math::Vector3 deltaPos = currentPos - m_PrevRootPos;
-        Math::Quaternion deltaRot = currentRot * m_PrevRootRot.inverse();
-        Transform* transform = getEntity() ? getEntity()->getTransform() : nullptr;
-        if (transform) {
-            if (m_RootMotionApplyPosition) {
-                transform->translate(deltaPos, true);
+    if (m_RootMotionEnabled) {
+        if (!m_RootMotionValid || sampleTime < m_PrevRootTime) {
+            m_PrevRootPos = currentPos;
+            m_PrevRootRot = currentRot;
+            m_RootMotionValid = true;
+        } else {
+            Math::Vector3 deltaPos = currentPos - m_PrevRootPos;
+            Math::Quaternion deltaRot = currentRot * m_PrevRootRot.inverse();
+            Transform* transform = getEntity() ? getEntity()->getTransform() : nullptr;
+            if (transform) {
+                if (m_RootMotionApplyPosition) {
+                    transform->translate(deltaPos, true);
+                }
+                if (m_RootMotionApplyRotation) {
+                    transform->rotate(deltaRot, true);
+                }
             }
-            if (m_RootMotionApplyRotation) {
-                transform->rotate(deltaRot, true);
-            }
+            m_PrevRootPos = currentPos;
+            m_PrevRootRot = currentRot;
         }
-        m_PrevRootPos = currentPos;
-        m_PrevRootRot = currentRot;
+        m_PrevRootTime = sampleTime;
     }
-    m_PrevRootTime = sampleTime;
 
-    Math::Vector3 basePos;
-    Math::Quaternion baseRot;
-    Math::Vector3 baseScale;
-    DecomposeTRS(bones[motionIdx].localBind, basePos, baseRot, baseScale);
-    pose.positions[motionIdx] = basePos;
-    pose.rotations[motionIdx] = baseRot;
-    pose.scales[motionIdx] = baseScale;
+    ResetPoseChainTranslationsToBind(*m_Skeleton, pose, motionIdx);
+    ResetLikelyRootMotionTranslationsToBind(*m_Skeleton, pose);
 }
 
 void SkinnedMeshRenderer::OnUpdate(float deltaTime) {
@@ -564,6 +741,7 @@ void SkinnedMeshRenderer::OnUpdate(float deltaTime) {
     if (m_HasPose) {
         BlendLocalPose(m_PrevPose, m_CurrentPose, alpha, m_RenderPose);
         BuildSkinMatrices(*m_Skeleton, m_RenderPose, m_BoneMatrices);
+        updateDynamicBounds();
     }
 }
 

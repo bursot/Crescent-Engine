@@ -498,8 +498,8 @@ void LightingSystem::allocateShadows() {
         float texelWorld = slice.texelWorldSize;
         float normalizedTexel = texelWorld / std::max(0.1f, slice.depthSpan);
         // Keep a modest stability floor for cascades, but let authored values stay effective.
-        float bias = std::max(cascadeBias, std::max(normalizedTexel * biasScale, 0.00035f));
-        float normalBias = std::max(cascadeNormalBias, std::max(normalizedTexel * normalBiasScale, 0.00075f));
+        float bias = std::max(cascadeBias, std::max(normalizedTexel * biasScale, 0.0008f));
+        float normalBias = std::max(cascadeNormalBias, std::max(normalizedTexel * normalBiasScale, 0.0015f));
         gpuShadow.params = Math::Vector4(bias, normalBias, cascadePenumbra, static_cast<float>(i)); // bias/normalBias/penumbra/cascadeId
         gpuShadow.depthRange = Math::Vector4(slice.splitNear, slice.splitFar, texelWorld, static_cast<float>(slice.atlas.layer));
 

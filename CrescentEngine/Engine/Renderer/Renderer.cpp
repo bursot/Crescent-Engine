@@ -97,6 +97,30 @@ bool EndsWithIgnoreCase(const std::string& value, const std::string& suffix) {
     });
 }
 
+void ResolveRendererBounds(Entity* entity,
+                           MeshRenderer* meshRenderer,
+                           Math::Vector3& outCenter,
+                           Math::Vector3& outSize) {
+    outCenter = meshRenderer ? meshRenderer->getBoundsCenter() : Math::Vector3::Zero;
+    outSize = meshRenderer ? meshRenderer->getBoundsSize() : Math::Vector3::Zero;
+    if (!entity) {
+        return;
+    }
+
+    SkinnedMeshRenderer* skinned = entity->getComponent<SkinnedMeshRenderer>();
+    if (!skinned || !skinned->isEnabled()) {
+        return;
+    }
+
+    std::shared_ptr<Mesh> mesh = meshRenderer ? meshRenderer->getMesh() : nullptr;
+    if (!mesh || !mesh->hasSkinWeights() || skinned->getBoneMatrices().empty()) {
+        return;
+    }
+
+    outCenter = skinned->getBoundsCenter();
+    outSize = skinned->getBoundsSize();
+}
+
 float ResolveStaticLightmapEncodingFlag(const std::string& path) {
     if (EndsWithIgnoreCase(path, ".exr") || EndsWithIgnoreCase(path, ".hdr")) {
         return 1.0f;
@@ -955,6 +979,7 @@ Renderer::Renderer()
     m_clusterPass = std::make_unique<ClusteredLightingPass>();
     m_sceneTargets.sceneColorFormat = m_sceneColorFormat;
     m_gameTargets.sceneColorFormat = m_sceneColorFormat;
+    m_previewTargets.sceneColorFormat = m_sceneColorFormat;
     storeRenderTargetState(m_sceneTargets);
 }
 
@@ -2465,7 +2490,15 @@ void Renderer::setMetalLayer(void* layer, bool applySize) {
 }
 
 Renderer::RenderTargetState& Renderer::getRenderTargetState(RenderTargetPool pool) {
-    return pool == RenderTargetPool::Scene ? m_sceneTargets : m_gameTargets;
+    switch (pool) {
+    case RenderTargetPool::Scene:
+        return m_sceneTargets;
+    case RenderTargetPool::Game:
+        return m_gameTargets;
+    case RenderTargetPool::Preview:
+        return m_previewTargets;
+    }
+    return m_sceneTargets;
 }
 
 void Renderer::storeRenderTargetState(RenderTargetState& state) {
@@ -3376,6 +3409,7 @@ void Renderer::applyQualitySettings(const SceneQualitySettings& quality) {
         storeRenderTargetState(getRenderTargetState(m_activePool));
         invalidateRenderTargetState(m_sceneTargets, msaaSamples);
         invalidateRenderTargetState(m_gameTargets, msaaSamples);
+        invalidateRenderTargetState(m_previewTargets, msaaSamples);
         loadRenderTargetState(getRenderTargetState(m_activePool));
     }
     
@@ -4505,8 +4539,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 continue;
             }
 
-            Math::Vector3 boundsCenter = meshRenderer->getBoundsCenter();
-            Math::Vector3 boundsSize = meshRenderer->getBoundsSize();
+            Math::Vector3 boundsCenter;
+            Math::Vector3 boundsSize;
+            ResolveRendererBounds(entity, meshRenderer, boundsCenter, boundsSize);
             float radius = 0.5f * std::sqrt(boundsSize.x * boundsSize.x
                                             + boundsSize.y * boundsSize.y
                                             + boundsSize.z * boundsSize.z);
@@ -5562,8 +5597,9 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         std::shared_ptr<Mesh> mesh = meshRenderer->getMesh();
         if (!mesh) continue;
 
-        Math::Vector3 boundsCenter = meshRenderer->getBoundsCenter();
-        Math::Vector3 boundsSize = meshRenderer->getBoundsSize();
+        Math::Vector3 boundsCenter;
+        Math::Vector3 boundsSize;
+        ResolveRendererBounds(entity, meshRenderer, boundsCenter, boundsSize);
         float radius = 0.5f * std::sqrt(boundsSize.x * boundsSize.x
                                         + boundsSize.y * boundsSize.y
                                         + boundsSize.z * boundsSize.z);
@@ -7679,6 +7715,7 @@ void Renderer::shutdown() {
     storeRenderTargetState(getRenderTargetState(m_activePool));
     releaseRenderTargetState(m_sceneTargets);
     releaseRenderTargetState(m_gameTargets);
+    releaseRenderTargetState(m_previewTargets);
     loadRenderTargetState(getRenderTargetState(m_activePool));
     
     // Release uniform buffers

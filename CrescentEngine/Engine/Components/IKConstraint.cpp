@@ -7,6 +7,8 @@ IKConstraint::IKConstraint()
     , m_MidBone("")
     , m_EndBone("")
     , m_TargetPosition(0.0f, 0.0f, 0.0f)
+    , m_TargetEntityUUID("")
+    , m_TargetOffset(0.0f, 0.0f, 0.0f)
     , m_TargetInWorld(true)
     , m_Weight(1.0f) {
 }

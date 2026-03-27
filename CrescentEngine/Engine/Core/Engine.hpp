@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 #include "GizmoSystem.hpp"
 #include "JobSystem.hpp"
 #include "FramePacer.hpp"
@@ -12,9 +13,20 @@ namespace Crescent {
 class Renderer;
 class SelectionSystem;
 class GizmoSystem;
+class Scene;
+class Entity;
+class Camera;
 
 class Engine {
 public:
+    struct AnimationPreviewPlaybackState {
+        int clipIndex = 0;
+        float time = 0.0f;
+        bool playing = false;
+        bool looping = true;
+        float speed = 1.0f;
+    };
+
     Engine();
     ~Engine();
     
@@ -33,8 +45,12 @@ public:
     // Render surfaces
     void setSceneMetalLayer(void* layer);
     void setGameMetalLayer(void* layer);
+    void setPreviewMetalLayer(void* layer);
     void resizeScene(float width, float height);
     void resizeGame(float width, float height);
+    void resizePreview(float width, float height);
+    void setAnimationPreviewTargetUUID(const std::string& uuid);
+    void setAnimationPreviewPlaybackState(const AnimationPreviewPlaybackState& state);
     
     // Input handling
     void handleKeyDown(unsigned short keyCode);
@@ -86,6 +102,12 @@ private:
 
     RenderSurface m_sceneSurface;
     RenderSurface m_gameSurface;
+    RenderSurface m_previewSurface;
+    std::string m_animationPreviewTargetUUID;
+    AnimationPreviewPlaybackState m_animationPreviewPlaybackState;
+    std::unique_ptr<Scene> m_animationPreviewScene;
+    Scene* m_animationPreviewSourceScene = nullptr;
+    bool m_animationPreviewSceneDirty = true;
 
     JobSystem m_updateJobs;
     JobSystem m_physicsJobs;
@@ -93,6 +115,13 @@ private:
     JobSystem m_renderJobs;
     FramePacer m_framePacer;
     bool m_lastPlaying = false;
+
+    class Camera* ensureAnimationPreviewCamera(Scene* scene);
+    class Entity* ensureAnimationPreviewCameraEntity(Scene* scene);
+    class Entity* resolveAnimationPreviewTarget(Scene* scene);
+    void frameAnimationPreviewCamera(class Camera* camera, class Entity* targetEntity);
+    class Scene* ensureAnimationPreviewScene(Scene* sourceScene);
+    void applyAnimationPreviewPlayback(class Entity* targetEntity);
     
     // Singleton instance
     static Engine* s_instance;

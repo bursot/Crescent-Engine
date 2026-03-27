@@ -12,8 +12,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)tick:(float)deltaTime NS_SWIFT_NAME(tick(deltaTime:));
 - (void)setSceneMetalLayer:(CAMetalLayer *)layer;
 - (void)setGameMetalLayer:(CAMetalLayer *)layer;
+- (void)setPreviewMetalLayer:(CAMetalLayer *)layer;
 - (void)resizeSceneWithWidth:(float)width height:(float)height NS_SWIFT_NAME(resizeScene(withWidth:height:));
 - (void)resizeGameWithWidth:(float)width height:(float)height NS_SWIFT_NAME(resizeGame(withWidth:height:));
+- (void)resizePreviewWithWidth:(float)width height:(float)height NS_SWIFT_NAME(resizePreview(withWidth:height:));
+- (void)setAnimationPreviewTargetUUID:(NSString *)uuid NS_SWIFT_NAME(setAnimationPreviewTarget(uuid:));
 
 - (void)handleKeyDown:(unsigned short)keyCode;
 - (void)handleKeyUp:(unsigned short)keyCode;

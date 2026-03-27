@@ -105,6 +105,15 @@ public:
 
     Math::Vector2 getMoveInput() const { return m_MoveInput; }
     void setMoveInput(const Math::Vector2& input) { m_MoveInput = input; }
+    Math::Vector3 getWorldMoveDirection() const { return m_WorldMoveDirection; }
+    void setWorldMoveDirection(const Math::Vector3& direction) {
+        m_WorldMoveDirection = direction;
+        m_UseWorldMoveDirection = true;
+    }
+    void clearWorldMoveDirection() {
+        m_WorldMoveDirection = Math::Vector3::Zero;
+        m_UseWorldMoveDirection = false;
+    }
 
     void requestJump() { m_JumpQueued = true; }
 
@@ -232,11 +241,35 @@ private:
     }
 
     Math::Vector3 computeMoveDirection(Transform* transform) const {
+        if (m_UseWorldMoveDirection) {
+            Math::Vector3 direction = m_WorldMoveDirection;
+            direction.y = 0.0f;
+            return direction;
+        }
+
         if (!transform) {
             return Math::Vector3::Zero;
         }
+
         Math::Vector3 forward = transform->forward();
+        forward.y = 0.0f;
+        if (forward.lengthSquared() <= Math::EPSILON) {
+            forward = Math::Vector3::Forward;
+        } else {
+            forward.normalize();
+        }
+
         Math::Vector3 right = transform->right();
+        right.y = 0.0f;
+        if (right.lengthSquared() <= Math::EPSILON) {
+            right = forward.cross(Math::Vector3::Up);
+        }
+        if (right.lengthSquared() <= Math::EPSILON) {
+            right = Math::Vector3::Right;
+        } else {
+            right.normalize();
+        }
+
         Math::Vector3 dir = (right * m_MoveInput.x) + (forward * m_MoveInput.y);
         return dir;
     }
@@ -455,6 +488,8 @@ private:
     Math::Vector3 m_GroundNormal = Math::Vector3::Up;
     Math::Vector3 m_Velocity = Math::Vector3::Zero;
     Math::Vector2 m_MoveInput = Math::Vector2::Zero;
+    Math::Vector3 m_WorldMoveDirection = Math::Vector3::Zero;
+    bool m_UseWorldMoveDirection = false;
     bool m_JumpQueued = false;
 };
 

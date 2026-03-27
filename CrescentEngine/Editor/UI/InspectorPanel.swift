@@ -377,8 +377,14 @@ struct AnimationInspector: View {
 
     private struct AnimationEventItem: Identifiable {
         let id = UUID()
-        var name: String
+        var eventType: String
+        var eventTag: String
         var time: Float
+        var payload: String = ""
+        var volume: Float = 1.0
+        var pitchMin: Float = 1.0
+        var pitchMax: Float = 1.0
+        var spatial: Bool = true
     }
     
     @State private var clipNames: [String] = []
@@ -619,9 +625,9 @@ struct AnimationInspector: View {
                         ForEach(clipEvents.indices, id: \.self) { idx in
                             HStack(spacing: 8) {
                                 TextField("Name", text: Binding(
-                                    get: { clipEvents[idx].name },
+                                    get: { clipEvents[idx].eventTag },
                                     set: { newVal in
-                                        clipEvents[idx].name = newVal
+                                        clipEvents[idx].eventTag = newVal
                                         commitEvents()
                                     }))
                                 .textFieldStyle(.roundedBorder)
@@ -649,7 +655,7 @@ struct AnimationInspector: View {
                     }
 
                     HStack(spacing: 8) {
-                        TextField("Event name", text: $newEventName)
+                        TextField("Event tag", text: $newEventName)
                             .textFieldStyle(.roundedBorder)
                             .font(EditorTheme.font(size: 10))
 
@@ -671,7 +677,7 @@ struct AnimationInspector: View {
                                 .font(EditorTheme.font(size: 10, weight: .semibold))
                                 .foregroundColor(EditorTheme.textMuted)
                             ForEach(eventLog) { evt in
-                                Text(String(format: "%.2fs • %@", evt.time, evt.name))
+                                Text(String(format: "%.2fs • %@", evt.time, evt.eventTag))
                                     .font(EditorTheme.mono(size: 9))
                                     .foregroundColor(EditorTheme.textMuted)
                             }
@@ -854,9 +860,16 @@ struct AnimationInspector: View {
             var items: [AnimationEventItem] = []
             for entry in events {
                 let name = (entry["name"] as? String) ?? ""
+                let eventType = (entry["eventType"] as? String) ?? ((entry["payload"] as? String)?.isEmpty == false ? "audio" : "")
+                let eventTag = (entry["eventTag"] as? String) ?? name
                 let time = (entry["time"] as? NSNumber)?.floatValue ?? 0.0
-                if !name.isEmpty {
-                    items.append(AnimationEventItem(name: name, time: time))
+                let payload = (entry["payload"] as? String) ?? ""
+                let volume = (entry["volume"] as? NSNumber)?.floatValue ?? 1.0
+                let pitchMin = (entry["pitchMin"] as? NSNumber)?.floatValue ?? 1.0
+                let pitchMax = (entry["pitchMax"] as? NSNumber)?.floatValue ?? 1.0
+                let spatial = (entry["spatial"] as? NSNumber)?.boolValue ?? true
+                if !eventTag.isEmpty {
+                    items.append(AnimationEventItem(eventType: eventType, eventTag: eventTag, time: time, payload: payload, volume: volume, pitchMin: pitchMin, pitchMax: pitchMax, spatial: spatial))
                 }
             }
             clipEvents = items.sorted { $0.time < $1.time }
@@ -865,9 +878,16 @@ struct AnimationInspector: View {
         if let fired = bridge.pollAnimatorEvents(uuid: entityUUID) as? [[String: Any]], !fired.isEmpty {
             for entry in fired {
                 let name = (entry["name"] as? String) ?? ""
+                let eventType = (entry["eventType"] as? String) ?? ((entry["payload"] as? String)?.isEmpty == false ? "audio" : "")
+                let eventTag = (entry["eventTag"] as? String) ?? name
                 let time = (entry["time"] as? NSNumber)?.floatValue ?? 0.0
-                if !name.isEmpty {
-                    eventLog.append(AnimationEventItem(name: name, time: time))
+                let payload = (entry["payload"] as? String) ?? ""
+                let volume = (entry["volume"] as? NSNumber)?.floatValue ?? 1.0
+                let pitchMin = (entry["pitchMin"] as? NSNumber)?.floatValue ?? 1.0
+                let pitchMax = (entry["pitchMax"] as? NSNumber)?.floatValue ?? 1.0
+                let spatial = (entry["spatial"] as? NSNumber)?.boolValue ?? true
+                if !eventTag.isEmpty {
+                    eventLog.append(AnimationEventItem(eventType: eventType, eventTag: eventTag, time: time, payload: payload, volume: volume, pitchMin: pitchMin, pitchMax: pitchMax, spatial: spatial))
                 }
             }
             if eventLog.count > 6 {
@@ -877,14 +897,26 @@ struct AnimationInspector: View {
     }
 
     private func commitEvents() {
-        let payload = clipEvents.map { ["name": $0.name, "time": $0.time] }
+        let payload = clipEvents.map {
+            [
+                "name": $0.eventTag,
+                "eventType": $0.eventType,
+                "eventTag": $0.eventTag,
+                "time": $0.time,
+                "payload": $0.payload,
+                "volume": $0.volume,
+                "pitchMin": $0.pitchMin,
+                "pitchMax": $0.pitchMax,
+                "spatial": $0.spatial
+            ]
+        }
         _ = CrescentEngineBridge.shared().setAnimationEvents(uuid: entityUUID, clipIndex: clipIndex, events: payload)
     }
 
     private func addEvent() {
         let trimmed = newEventName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let event = AnimationEventItem(name: trimmed, time: max(0.0, newEventTime))
+        let event = AnimationEventItem(eventType: "audio", eventTag: trimmed, time: max(0.0, newEventTime))
         clipEvents.append(event)
         clipEvents.sort { $0.time < $1.time }
         commitEvents()
@@ -982,6 +1014,42 @@ struct PhysicsInspector: View {
     @State private var fpsMuzzleTexturePath: String = ""
     @State private var showMuzzleFileImporter: Bool = false
 
+    @State private var hasThirdPersonController: Bool = false
+    @State private var tpMouseSensitivity: Float = 0.0025
+    @State private var tpInvertY: Bool = false
+    @State private var tpRequireLookButton: Bool = true
+    @State private var tpLookButton: Int = 1
+    @State private var tpMinPitch: Float = -35.0
+    @State private var tpMaxPitch: Float = 70.0
+    @State private var tpPivotHeight: Float = 1.6
+    @State private var tpLookAhead: Float = 0.15
+    @State private var tpShoulderOffset: Float = 0.35
+    @State private var tpCameraDistance: Float = 3.6
+    @State private var tpMinDistance: Float = 1.1
+    @State private var tpMaxDistance: Float = 6.5
+    @State private var tpZoomSpeed: Float = 0.45
+    @State private var tpCameraCollisionRadius: Float = 0.18
+    @State private var tpPositionSmoothSpeed: Float = 10.0
+    @State private var tpRotationSmoothSpeed: Float = 12.0
+    @State private var tpCameraSmoothSpeed: Float = 14.0
+    @State private var tpWalkSpeed: Float = 2.2
+    @State private var tpRunSpeed: Float = 4.4
+    @State private var tpSprintSpeed: Float = 6.1
+    @State private var tpEnableSprint: Bool = true
+    @State private var tpDriveCharacter: Bool = true
+    @State private var tpWeaponGripPositionOffset: [Float] = [0.06, -0.14, -0.10]
+    @State private var tpWeaponGripRotationOffset: [Float] = [-95.0, 5.0, -100.0]
+    @State private var tpWeaponSupportHandOffset: [Float] = [0.20, -0.02, 0.02]
+
+    @State private var hasBoneAttachment: Bool = false
+    @State private var boneAttachmentBoneName: String = "mixamorig:RightHand"
+    @State private var boneAttachmentSourceEntityUUID: String = ""
+    @State private var boneAttachmentPositionOffset: [Float] = [0, 0, 0]
+    @State private var boneAttachmentRotationOffset: [Float] = [0, 0, 0]
+    @State private var boneAttachmentScaleOffset: [Float] = [1, 1, 1]
+    @State private var boneAttachmentInheritScale: Bool = false
+    @State private var boneAttachmentResolvedSource: String = ""
+
     private let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     private let bodyTypes = ["Static", "Dynamic", "Kinematic"]
     private let shapeTypes = ["Box", "Sphere", "Capsule", "Mesh"]
@@ -1013,6 +1081,12 @@ struct PhysicsInspector: View {
             Divider()
                 .overlay(EditorTheme.panelStroke)
             firstPersonControllerSection
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+            thirdPersonControllerSection
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+            boneAttachmentSection
         }
         .onAppear { refresh() }
         .fileImporter(isPresented: $showMuzzleFileImporter, allowedContentTypes: [.image]) { result in
@@ -1578,6 +1652,225 @@ struct PhysicsInspector: View {
         }
     }
 
+    private var thirdPersonControllerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Third Person Controller")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                if hasThirdPersonController {
+                    Button(action: removeThirdPersonController) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if !hasThirdPersonController {
+                Button("Add Third Person Controller") {
+                    let _ = CrescentEngineBridge.shared().addThirdPersonController(uuid: entityUUID)
+                    refresh()
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            } else {
+                SliderRow(title: "Mouse Sensitivity", value: $tpMouseSensitivity, range: 0.0005...0.01, step: 0.0001) { _ in
+                    pushThirdPersonController()
+                }
+
+                Toggle("Invert Y", isOn: Binding(
+                    get: { tpInvertY },
+                    set: { newVal in
+                        tpInvertY = newVal
+                        pushThirdPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Require Look Button", isOn: Binding(
+                    get: { tpRequireLookButton },
+                    set: { newVal in
+                        tpRequireLookButton = newVal
+                        pushThirdPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                HStack {
+                    Text("Look Button")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { tpLookButton },
+                        set: { newVal in
+                            tpLookButton = newVal
+                            pushThirdPersonController()
+                        })) {
+                        Text("Left").tag(0)
+                        Text("Right").tag(1)
+                        Text("Middle").tag(2)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 120)
+                }
+
+                SliderRow(title: "Min Pitch", value: $tpMinPitch, range: -89...0, step: 0.5) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Max Pitch", value: $tpMaxPitch, range: 0...89, step: 0.5) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Pivot Height", value: $tpPivotHeight, range: 0...3, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Look Ahead", value: $tpLookAhead, range: 0...1.5, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Shoulder Offset", value: $tpShoulderOffset, range: -1.5...1.5, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Camera Distance", value: $tpCameraDistance, range: 0.5...8, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Min Distance", value: $tpMinDistance, range: 0.2...5, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Max Distance", value: $tpMaxDistance, range: 1...10, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Zoom Speed", value: $tpZoomSpeed, range: 0...2, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Camera Collision", value: $tpCameraCollisionRadius, range: 0...1, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Pos Smooth", value: $tpPositionSmoothSpeed, range: 0...30, step: 0.1) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Rot Smooth", value: $tpRotationSmoothSpeed, range: 0...30, step: 0.1) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Camera Smooth", value: $tpCameraSmoothSpeed, range: 0...30, step: 0.1) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Walk Speed", value: $tpWalkSpeed, range: 0...10, step: 0.1) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Run Speed", value: $tpRunSpeed, range: 0...15, step: 0.1) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Sprint Speed", value: $tpSprintSpeed, range: 0...20, step: 0.1) { _ in
+                    pushThirdPersonController()
+                }
+
+                Toggle("Enable Sprint", isOn: Binding(
+                    get: { tpEnableSprint },
+                    set: { newVal in
+                        tpEnableSprint = newVal
+                        pushThirdPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Drive Character Controller", isOn: Binding(
+                    get: { tpDriveCharacter },
+                    set: { newVal in
+                        tpDriveCharacter = newVal
+                        pushThirdPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Vector3InputRow(title: "Weapon Grip Pos", values: $tpWeaponGripPositionOffset) {
+                    pushThirdPersonController()
+                }
+                Vector3InputRow(title: "Weapon Grip Rot", values: $tpWeaponGripRotationOffset) {
+                    pushThirdPersonController()
+                }
+                Vector3InputRow(title: "Support Hand", values: $tpWeaponSupportHandOffset) {
+                    pushThirdPersonController()
+                }
+            }
+        }
+    }
+
+    private var boneAttachmentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Bone Attachment")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                if hasBoneAttachment {
+                    Button(action: removeBoneAttachment) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if !hasBoneAttachment {
+                Button("Add Bone Attachment") {
+                    let _ = CrescentEngineBridge.shared().addBoneAttachment(uuid: entityUUID)
+                    refresh()
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            } else {
+                TextField("Bone Name", text: Binding(
+                    get: { boneAttachmentBoneName },
+                    set: { newVal in
+                        boneAttachmentBoneName = newVal
+                        pushBoneAttachment()
+                    }))
+                .textFieldStyle(.roundedBorder)
+
+                TextField("Source Entity UUID", text: Binding(
+                    get: { boneAttachmentSourceEntityUUID },
+                    set: { newVal in
+                        boneAttachmentSourceEntityUUID = newVal
+                        pushBoneAttachment()
+                    }))
+                .textFieldStyle(.roundedBorder)
+
+                Button("Use Selected Source") {
+                    boneAttachmentSourceEntityUUID = CrescentEngineBridge.shared().getSelectedEntityUUID()
+                    pushBoneAttachment()
+                    refresh()
+                }
+                .buttonStyle(.borderless)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+
+                if !boneAttachmentResolvedSource.isEmpty {
+                    HStack {
+                        Text("Source")
+                            .font(EditorTheme.font(size: 11, weight: .medium))
+                            .foregroundColor(EditorTheme.textMuted)
+                        Spacer()
+                        Text(boneAttachmentResolvedSource)
+                            .font(EditorTheme.font(size: 10, weight: .medium))
+                            .foregroundColor(EditorTheme.textPrimary)
+                    }
+                }
+
+                Vector3InputRow(title: "Position Offset", values: $boneAttachmentPositionOffset) {
+                    pushBoneAttachment()
+                }
+                Vector3InputRow(title: "Rotation Offset", values: $boneAttachmentRotationOffset) {
+                    pushBoneAttachment()
+                }
+                Vector3InputRow(title: "Scale Offset", values: $boneAttachmentScaleOffset) {
+                    pushBoneAttachment()
+                }
+
+                Toggle("Inherit Bone Scale", isOn: Binding(
+                    get: { boneAttachmentInheritScale },
+                    set: { newVal in
+                        boneAttachmentInheritScale = newVal
+                        pushBoneAttachment()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+            }
+        }
+    }
+
     private func refresh() {
         let bridge = CrescentEngineBridge.shared()
         if let info = bridge.getRigidbodyInfo(uuid: entityUUID) as? [String: Any],
@@ -1681,6 +1974,65 @@ struct PhysicsInspector: View {
             fpsMuzzleTexturePath = info["muzzleTexture"] as? String ?? fpsMuzzleTexturePath
         } else {
             hasFpsController = false
+        }
+
+        if let info = bridge.getThirdPersonControllerInfo(uuid: entityUUID) as? [String: Any],
+           !info.isEmpty {
+            hasThirdPersonController = true
+            tpMouseSensitivity = (info["mouseSensitivity"] as? NSNumber)?.floatValue ?? tpMouseSensitivity
+            tpInvertY = (info["invertY"] as? NSNumber)?.boolValue ?? tpInvertY
+            tpRequireLookButton = (info["requireLookButton"] as? NSNumber)?.boolValue ?? tpRequireLookButton
+            tpLookButton = (info["lookButton"] as? NSNumber)?.intValue ?? tpLookButton
+            tpMinPitch = (info["minPitch"] as? NSNumber)?.floatValue ?? tpMinPitch
+            tpMaxPitch = (info["maxPitch"] as? NSNumber)?.floatValue ?? tpMaxPitch
+            tpPivotHeight = (info["pivotHeight"] as? NSNumber)?.floatValue ?? tpPivotHeight
+            tpLookAhead = (info["lookAhead"] as? NSNumber)?.floatValue ?? tpLookAhead
+            tpShoulderOffset = (info["shoulderOffset"] as? NSNumber)?.floatValue ?? tpShoulderOffset
+            tpCameraDistance = (info["cameraDistance"] as? NSNumber)?.floatValue ?? tpCameraDistance
+            tpMinDistance = (info["minDistance"] as? NSNumber)?.floatValue ?? tpMinDistance
+            tpMaxDistance = (info["maxDistance"] as? NSNumber)?.floatValue ?? tpMaxDistance
+            tpZoomSpeed = (info["zoomSpeed"] as? NSNumber)?.floatValue ?? tpZoomSpeed
+            tpCameraCollisionRadius = (info["cameraCollisionRadius"] as? NSNumber)?.floatValue ?? tpCameraCollisionRadius
+            tpPositionSmoothSpeed = (info["positionSmoothSpeed"] as? NSNumber)?.floatValue ?? tpPositionSmoothSpeed
+            tpRotationSmoothSpeed = (info["rotationSmoothSpeed"] as? NSNumber)?.floatValue ?? tpRotationSmoothSpeed
+            tpCameraSmoothSpeed = (info["cameraSmoothSpeed"] as? NSNumber)?.floatValue ?? tpCameraSmoothSpeed
+            tpWalkSpeed = (info["walkSpeed"] as? NSNumber)?.floatValue ?? tpWalkSpeed
+            tpRunSpeed = (info["runSpeed"] as? NSNumber)?.floatValue ?? tpRunSpeed
+            tpSprintSpeed = (info["sprintSpeed"] as? NSNumber)?.floatValue ?? tpSprintSpeed
+            tpEnableSprint = (info["enableSprint"] as? NSNumber)?.boolValue ?? tpEnableSprint
+            tpDriveCharacter = (info["driveCharacterController"] as? NSNumber)?.boolValue ?? tpDriveCharacter
+            if let values = info["weaponGripPositionOffset"] as? [NSNumber], values.count >= 3 {
+                tpWeaponGripPositionOffset = values.prefix(3).map { $0.floatValue }
+            }
+            if let values = info["weaponGripRotationOffset"] as? [NSNumber], values.count >= 3 {
+                tpWeaponGripRotationOffset = values.prefix(3).map { $0.floatValue }
+            }
+            if let values = info["weaponSupportHandOffset"] as? [NSNumber], values.count >= 3 {
+                tpWeaponSupportHandOffset = values.prefix(3).map { $0.floatValue }
+            }
+        } else {
+            hasThirdPersonController = false
+        }
+
+        if let info = bridge.getBoneAttachmentInfo(uuid: entityUUID) as? [String: Any],
+           !info.isEmpty {
+            hasBoneAttachment = true
+            boneAttachmentBoneName = info["boneName"] as? String ?? boneAttachmentBoneName
+            boneAttachmentSourceEntityUUID = info["sourceEntityUUID"] as? String ?? boneAttachmentSourceEntityUUID
+            if let values = info["positionOffset"] as? [NSNumber], values.count >= 3 {
+                boneAttachmentPositionOffset = values.prefix(3).map { $0.floatValue }
+            }
+            if let values = info["rotationOffset"] as? [NSNumber], values.count >= 3 {
+                boneAttachmentRotationOffset = values.prefix(3).map { $0.floatValue }
+            }
+            if let values = info["scaleOffset"] as? [NSNumber], values.count >= 3 {
+                boneAttachmentScaleOffset = values.prefix(3).map { $0.floatValue }
+            }
+            boneAttachmentInheritScale = (info["inheritBoneScale"] as? NSNumber)?.boolValue ?? boneAttachmentInheritScale
+            boneAttachmentResolvedSource = info["resolvedSource"] as? String ?? boneAttachmentResolvedSource
+        } else {
+            hasBoneAttachment = false
+            boneAttachmentResolvedSource = ""
         }
 
         debugDraw = bridge.getPhysicsDebugDraw()
@@ -1803,6 +2155,61 @@ struct PhysicsInspector: View {
     private func removeFirstPersonController() {
         CrescentEngineBridge.shared().removeFirstPersonController(uuid: entityUUID)
         hasFpsController = false
+    }
+
+    private func pushThirdPersonController() {
+        let info: [String: Any] = [
+            "mouseSensitivity": tpMouseSensitivity,
+            "invertY": tpInvertY,
+            "requireLookButton": tpRequireLookButton,
+            "lookButton": tpLookButton,
+            "minPitch": tpMinPitch,
+            "maxPitch": tpMaxPitch,
+            "pivotHeight": tpPivotHeight,
+            "lookAhead": tpLookAhead,
+            "shoulderOffset": tpShoulderOffset,
+            "cameraDistance": tpCameraDistance,
+            "minDistance": tpMinDistance,
+            "maxDistance": tpMaxDistance,
+            "zoomSpeed": tpZoomSpeed,
+            "cameraCollisionRadius": tpCameraCollisionRadius,
+            "positionSmoothSpeed": tpPositionSmoothSpeed,
+            "rotationSmoothSpeed": tpRotationSmoothSpeed,
+            "cameraSmoothSpeed": tpCameraSmoothSpeed,
+            "walkSpeed": tpWalkSpeed,
+            "runSpeed": tpRunSpeed,
+            "sprintSpeed": tpSprintSpeed,
+            "enableSprint": tpEnableSprint,
+            "driveCharacterController": tpDriveCharacter,
+            "weaponGripPositionOffset": tpWeaponGripPositionOffset,
+            "weaponGripRotationOffset": tpWeaponGripRotationOffset,
+            "weaponSupportHandOffset": tpWeaponSupportHandOffset
+        ]
+        _ = CrescentEngineBridge.shared().setThirdPersonControllerInfo(uuid: entityUUID, info: info)
+    }
+
+    private func removeThirdPersonController() {
+        CrescentEngineBridge.shared().removeThirdPersonController(uuid: entityUUID)
+        hasThirdPersonController = false
+    }
+
+    private func pushBoneAttachment() {
+        let info: [String: Any] = [
+            "boneName": boneAttachmentBoneName,
+            "sourceEntityUUID": boneAttachmentSourceEntityUUID,
+            "positionOffset": boneAttachmentPositionOffset,
+            "rotationOffset": boneAttachmentRotationOffset,
+            "scaleOffset": boneAttachmentScaleOffset,
+            "inheritBoneScale": boneAttachmentInheritScale
+        ]
+        _ = CrescentEngineBridge.shared().setBoneAttachmentInfo(uuid: entityUUID, info: info)
+    }
+
+    private func removeBoneAttachment() {
+        CrescentEngineBridge.shared().removeBoneAttachment(uuid: entityUUID)
+        hasBoneAttachment = false
+        boneAttachmentSourceEntityUUID = ""
+        boneAttachmentResolvedSource = ""
     }
 
     private func applyMuzzleTextureURL(_ url: URL) {

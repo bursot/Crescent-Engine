@@ -22,8 +22,11 @@
 - (BOOL)tick:(float)deltaTime { return [[self bridge] tick:deltaTime]; }
 - (void)setSceneMetalLayer:(CAMetalLayer *)layer { [[self bridge] setSceneMetalLayer:layer]; }
 - (void)setGameMetalLayer:(CAMetalLayer *)layer { [[self bridge] setGameMetalLayer:layer]; }
+- (void)setPreviewMetalLayer:(CAMetalLayer *)layer { (void)layer; }
 - (void)resizeSceneWithWidth:(float)width height:(float)height { [[self bridge] resizeSceneWithWidth:width height:height]; }
 - (void)resizeGameWithWidth:(float)width height:(float)height { [[self bridge] resizeGameWithWidth:width height:height]; }
+- (void)resizePreviewWithWidth:(float)width height:(float)height { (void)width; (void)height; }
+- (void)setAnimationPreviewTargetUUID:(NSString *)uuid { (void)uuid; }
 - (void)handleKeyDown:(unsigned short)keyCode { [[self bridge] handleKeyDown:keyCode]; }
 - (void)handleKeyUp:(unsigned short)keyCode { [[self bridge] handleKeyUp:keyCode]; }
 - (void)handleMouseMoveWithDeltaX:(float)deltaX deltaY:(float)deltaY { [[self bridge] handleMouseMoveWithDeltaX:deltaX deltaY:deltaY]; }

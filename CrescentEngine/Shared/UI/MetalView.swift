@@ -5,6 +5,7 @@ import QuartzCore
 enum RenderViewKind {
     case scene
     case game
+    case preview
 }
 
 // Protocol for input
@@ -52,7 +53,7 @@ struct MetalView: NSViewRepresentable {
         let metalView = MetalDisplayView()
         metalView.coordinator = context.coordinator
         metalView.allowsPicking = (viewKind == .scene) && isActive
-        metalView.allowsCameraControl = isActive
+        metalView.allowsCameraControl = (viewKind != .preview) && isActive
         metalView.inputDelegate = isActive ? context.coordinator : nil
         metalView.terrainPaintEnabled = terrainPaintConfig.enabled
         metalView.terrainPaintTargetUUID = terrainPaintConfig.targetEntityUUID
@@ -80,7 +81,7 @@ struct MetalView: NSViewRepresentable {
     func updateNSView(_ nsView: MetalDisplayView, context: Context) {
         context.coordinator.applyMetalLayerIfNeeded()
         nsView.allowsPicking = (viewKind == .scene) && isActive
-        nsView.allowsCameraControl = isActive
+        nsView.allowsCameraControl = (viewKind != .preview) && isActive
         nsView.inputDelegate = isActive ? context.coordinator : nil
         nsView.terrainPaintEnabled = terrainPaintConfig.enabled
         nsView.terrainPaintTargetUUID = terrainPaintConfig.targetEntityUUID
@@ -157,6 +158,8 @@ struct MetalView: NSViewRepresentable {
                         bridge.setSceneMetalLayer(metalLayer)
                     case .game:
                         bridge.setGameMetalLayer(metalLayer)
+                    case .preview:
+                        bridge.setPreviewMetalLayer(metalLayer)
                     }
                     lastAppliedMetalLayer = metalLayer
                 }
@@ -206,6 +209,8 @@ struct MetalView: NSViewRepresentable {
                 bridge.resizeScene(withWidth: width, height: height)
             case .game:
                 bridge.resizeGame(withWidth: width, height: height)
+            case .preview:
+                bridge.resizePreview(withWidth: width, height: height)
             }
         }
 
@@ -222,6 +227,8 @@ struct MetalView: NSViewRepresentable {
                 bridge.setSceneMetalLayer(metalLayer)
             case .game:
                 bridge.setGameMetalLayer(metalLayer)
+            case .preview:
+                bridge.setPreviewMetalLayer(metalLayer)
             }
         }
         

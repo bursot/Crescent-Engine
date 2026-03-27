@@ -9,6 +9,8 @@ struct IKInspector: View {
     @State private var midBone: String = ""
     @State private var endBone: String = ""
     @State private var target: [Float] = [0, 0, 0]
+    @State private var targetEntityUUID: String = ""
+    @State private var targetOffset: [Float] = [0, 0, 0]
     @State private var targetInWorld: Bool = true
     @State private var weight: Float = 1.0
 
@@ -58,6 +60,26 @@ struct IKInspector: View {
                     pushIK()
                 }
 
+                TextField("Target Entity UUID", text: Binding(
+                    get: { targetEntityUUID },
+                    set: { newVal in
+                        targetEntityUUID = newVal
+                        pushIK()
+                    }))
+                .textFieldStyle(.roundedBorder)
+                .font(EditorTheme.font(size: 10))
+
+                Button("Use Selected Target") {
+                    targetEntityUUID = CrescentEngineBridge.shared().getSelectedEntityUUID()
+                    pushIK()
+                }
+                .buttonStyle(.borderless)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+
+                Vector3InputRow(title: "Target Offset", values: $targetOffset) {
+                    pushIK()
+                }
+
                 Toggle("Target In World", isOn: Binding(
                     get: { targetInWorld },
                     set: { newVal in
@@ -93,6 +115,10 @@ struct IKInspector: View {
         if let targetValues = info["target"] as? [NSNumber], targetValues.count >= 3 {
             target = targetValues.prefix(3).map { $0.floatValue }
         }
+        targetEntityUUID = info["targetEntityUUID"] as? String ?? targetEntityUUID
+        if let targetOffsetValues = info["targetOffset"] as? [NSNumber], targetOffsetValues.count >= 3 {
+            targetOffset = targetOffsetValues.prefix(3).map { $0.floatValue }
+        }
         targetInWorld = (info["world"] as? NSNumber)?.boolValue ?? targetInWorld
         weight = (info["weight"] as? NSNumber)?.floatValue ?? weight
     }
@@ -103,6 +129,8 @@ struct IKInspector: View {
             "mid": midBone,
             "end": endBone,
             "target": target,
+            "targetEntityUUID": targetEntityUUID,
+            "targetOffset": targetOffset,
             "world": targetInWorld,
             "weight": weight
         ]
@@ -115,6 +143,8 @@ struct IKInspector: View {
             "mid": midBone,
             "end": endBone,
             "target": target,
+            "targetEntityUUID": targetEntityUUID,
+            "targetOffset": targetOffset,
             "world": targetInWorld,
             "weight": weight
         ]

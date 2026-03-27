@@ -3181,6 +3181,202 @@ static std::shared_ptr<Skeleton> BuildSkeleton(const aiScene* scene) {
     return skeleton;
 }
 
+static void DecomposeTRS(const Math::Matrix4x4& matrix,
+                         Math::Vector3& outPos,
+                         Math::Quaternion& outRot,
+                         Math::Vector3& outScale) {
+    outPos = Math::Vector3(matrix.m[12], matrix.m[13], matrix.m[14]);
+
+    Math::Vector3 col0(matrix.m[0], matrix.m[1], matrix.m[2]);
+    Math::Vector3 col1(matrix.m[4], matrix.m[5], matrix.m[6]);
+    Math::Vector3 col2(matrix.m[8], matrix.m[9], matrix.m[10]);
+
+    outScale = Math::Vector3(col0.length(), col1.length(), col2.length());
+    if (outScale.x <= 0.0f) outScale.x = 1.0f;
+    if (outScale.y <= 0.0f) outScale.y = 1.0f;
+    if (outScale.z <= 0.0f) outScale.z = 1.0f;
+
+    Math::Vector3 r0 = col0 / outScale.x;
+    Math::Vector3 r1 = col1 / outScale.y;
+    Math::Vector3 r2 = col2 / outScale.z;
+
+    const float m00 = r0.x;
+    const float m01 = r1.x;
+    const float m02 = r2.x;
+    const float m10 = r0.y;
+    const float m11 = r1.y;
+    const float m12 = r2.y;
+    const float m20 = r0.z;
+    const float m21 = r1.z;
+    const float m22 = r2.z;
+
+    const float trace = m00 + m11 + m22;
+    if (trace > 0.0f) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        outRot.w = 0.25f * s;
+        outRot.x = (m21 - m12) / s;
+        outRot.y = (m02 - m20) / s;
+        outRot.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        outRot.w = (m21 - m12) / s;
+        outRot.x = 0.25f * s;
+        outRot.y = (m01 + m10) / s;
+        outRot.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        outRot.w = (m02 - m20) / s;
+        outRot.x = (m01 + m10) / s;
+        outRot.y = 0.25f * s;
+        outRot.z = (m12 + m21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        outRot.w = (m10 - m01) / s;
+        outRot.x = (m02 + m20) / s;
+        outRot.y = (m12 + m21) / s;
+        outRot.z = 0.25f * s;
+    }
+    outRot.normalize();
+}
+
+struct AnimationImportCompatibilityReport {
+    bool compatible = true;
+    size_t animatedBoneCount = 0;
+    size_t matchedAnimatedBoneCount = 0;
+    size_t sourceBoneCount = 0;
+    size_t matchedSourceBoneCount = 0;
+    size_t hierarchyMismatchCount = 0;
+    float averagePositionDeltaRatio = 0.0f;
+    float averageRotationDeltaDegrees = 0.0f;
+};
+
+static AnimationImportCompatibilityReport EvaluateAnimationCompatibility(const aiScene* scene,
+                                                                         const Skeleton& targetSkeleton) {
+    AnimationImportCompatibilityReport report;
+    if (!scene || scene->mNumAnimations == 0 || targetSkeleton.getBoneCount() == 0) {
+        report.compatible = false;
+        return report;
+    }
+
+    std::unordered_set<std::string> animatedBoneNames;
+    for (unsigned int i = 0; i < scene->mNumAnimations; ++i) {
+        const aiAnimation* anim = scene->mAnimations[i];
+        if (!anim) {
+            continue;
+        }
+        for (unsigned int c = 0; c < anim->mNumChannels; ++c) {
+            const aiNodeAnim* channel = anim->mChannels[c];
+            if (!channel || channel->mNodeName.length == 0) {
+                continue;
+            }
+            animatedBoneNames.insert(channel->mNodeName.C_Str());
+        }
+    }
+
+    report.animatedBoneCount = animatedBoneNames.size();
+    for (const std::string& boneName : animatedBoneNames) {
+        if (targetSkeleton.getBoneIndex(boneName) >= 0) {
+            ++report.matchedAnimatedBoneCount;
+        }
+    }
+
+    if (report.animatedBoneCount == 0) {
+        report.compatible = false;
+        return report;
+    }
+
+    const float animatedCoverage =
+        static_cast<float>(report.matchedAnimatedBoneCount) / static_cast<float>(report.animatedBoneCount);
+    if (animatedCoverage < 0.75f || report.matchedAnimatedBoneCount < std::min<size_t>(report.animatedBoneCount, 3)) {
+        report.compatible = false;
+        return report;
+    }
+
+    std::shared_ptr<Skeleton> sourceSkeleton = BuildSkeleton(scene);
+    if (!sourceSkeleton || sourceSkeleton->getBoneCount() == 0) {
+        return report;
+    }
+
+    report.sourceBoneCount = sourceSkeleton->getBoneCount();
+    const auto& sourceBones = sourceSkeleton->getBones();
+    const auto& targetBones = targetSkeleton.getBones();
+
+    float totalPositionDeltaRatio = 0.0f;
+    float totalRotationDeltaDegrees = 0.0f;
+    size_t comparedBindCount = 0;
+
+    for (const Bone& sourceBone : sourceBones) {
+        const int targetIndex = targetSkeleton.getBoneIndex(sourceBone.name);
+        if (targetIndex < 0 || targetIndex >= static_cast<int>(targetBones.size())) {
+            continue;
+        }
+
+        ++report.matchedSourceBoneCount;
+        const Bone& targetBone = targetBones[static_cast<size_t>(targetIndex)];
+
+        const std::string sourceParentName =
+            (sourceBone.parentIndex >= 0 && sourceBone.parentIndex < static_cast<int>(sourceBones.size()))
+                ? sourceBones[static_cast<size_t>(sourceBone.parentIndex)].name
+                : "";
+        const std::string targetParentName =
+            (targetBone.parentIndex >= 0 && targetBone.parentIndex < static_cast<int>(targetBones.size()))
+                ? targetBones[static_cast<size_t>(targetBone.parentIndex)].name
+                : "";
+        if (sourceParentName != targetParentName) {
+            ++report.hierarchyMismatchCount;
+        }
+
+        Math::Vector3 sourcePos;
+        Math::Quaternion sourceRot;
+        Math::Vector3 sourceScale;
+        DecomposeTRS(sourceBone.localBind, sourcePos, sourceRot, sourceScale);
+
+        Math::Vector3 targetPos;
+        Math::Quaternion targetRot;
+        Math::Vector3 targetScale;
+        DecomposeTRS(targetBone.localBind, targetPos, targetRot, targetScale);
+
+        const float referenceLength = std::max(0.01f, std::max(sourcePos.length(), targetPos.length()));
+        totalPositionDeltaRatio += (sourcePos - targetPos).length() / referenceLength;
+
+        float rotationDot = std::abs(sourceRot.dot(targetRot));
+        rotationDot = std::clamp(rotationDot, -1.0f, 1.0f);
+        const float rotationDeltaDegrees = std::acos(rotationDot) * 2.0f * Math::RAD_TO_DEG;
+        totalRotationDeltaDegrees += rotationDeltaDegrees;
+
+        ++comparedBindCount;
+    }
+
+    if (comparedBindCount > 0) {
+        report.averagePositionDeltaRatio = totalPositionDeltaRatio / static_cast<float>(comparedBindCount);
+        report.averageRotationDeltaDegrees = totalRotationDeltaDegrees / static_cast<float>(comparedBindCount);
+    }
+
+    if (report.sourceBoneCount == 0) {
+        return report;
+    }
+
+    const float sourceCoverage =
+        static_cast<float>(report.matchedSourceBoneCount) / static_cast<float>(report.sourceBoneCount);
+    const float hierarchyMismatchRatio = (report.matchedSourceBoneCount > 0)
+        ? static_cast<float>(report.hierarchyMismatchCount) / static_cast<float>(report.matchedSourceBoneCount)
+        : 1.0f;
+
+    if (sourceCoverage < 0.75f) {
+        report.compatible = false;
+    }
+    if (report.matchedSourceBoneCount >= 6 && hierarchyMismatchRatio > 0.2f) {
+        report.compatible = false;
+    }
+    if (comparedBindCount >= 6 &&
+        report.averagePositionDeltaRatio > 0.6f &&
+        report.averageRotationDeltaDegrees > 50.0f) {
+        report.compatible = false;
+    }
+
+    return report;
+}
+
 static std::string ToLowerAnimString(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -4004,6 +4200,20 @@ std::vector<std::shared_ptr<AnimationClip>> SceneCommands::importAnimationClipsF
     if (!aiScene || aiScene->mNumAnimations == 0) {
         std::cerr << "[AnimationImporter] Failed to read clips: " << path
                   << " (" << importer.GetErrorString() << ")" << std::endl;
+        return {};
+    }
+
+    const AnimationImportCompatibilityReport compatibility = EvaluateAnimationCompatibility(aiScene, skeleton);
+    if (!compatibility.compatible) {
+        std::cerr << "[AnimationImporter] Rejected incompatible animation source: " << path
+                  << " | animated matches " << compatibility.matchedAnimatedBoneCount << "/"
+                  << compatibility.animatedBoneCount
+                  << " | skeleton matches " << compatibility.matchedSourceBoneCount << "/"
+                  << compatibility.sourceBoneCount
+                  << " | hierarchy mismatches " << compatibility.hierarchyMismatchCount
+                  << " | avg bind pos ratio " << compatibility.averagePositionDeltaRatio
+                  << " | avg bind rot deg " << compatibility.averageRotationDeltaDegrees
+                  << std::endl;
         return {};
     }
 
