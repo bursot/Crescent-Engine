@@ -506,6 +506,12 @@ class EditorState: ObservableObject {
         guard let window = (NSApp.keyWindow ?? NSApp.mainWindow) else {
             return true
         }
+        if window is NSPanel {
+            return false
+        }
+        if window.title == "Animation Sequence" {
+            return false
+        }
         if window.firstResponder is NSTextView {
             return false
         }

@@ -219,6 +219,8 @@ private:
         TurnRightSharp,
         Run,
         Sprint,
+        Equip,
+        Disarm,
         Fire,
         Reload,
         Jump,
@@ -248,6 +250,11 @@ private:
         int run = -1;
         int armedRun = -1;
         int sprint = -1;
+        int equip = -1;
+        int disarm = -1;
+        int unarmedJump = -1;
+        int unarmedJumpRunning = -1;
+        int standingJump = -1;
         int fire = -1;
         int reload = -1;
         int jump = -1;
@@ -1092,10 +1099,22 @@ private:
             case AnimAction::TurnRight:
             case AnimAction::TurnLeftSharp:
             case AnimAction::TurnRightSharp:
+            case AnimAction::Equip:
+            case AnimAction::Disarm:
             case AnimAction::Fire:
             case AnimAction::Reload:
             case AnimAction::Jump:
             case AnimAction::Fall:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool isBlockingOneShotAction(AnimAction action) {
+        switch (action) {
+            case AnimAction::Fire:
+            case AnimAction::Reload:
                 return true;
             default:
                 return false;
@@ -1807,6 +1826,8 @@ private:
             case AnimAction::TurnRightSharp: return "TurnRightSharp";
             case AnimAction::Run: return "Run";
             case AnimAction::Sprint: return "Sprint";
+            case AnimAction::Equip: return "Equip";
+            case AnimAction::Disarm: return "Disarm";
             case AnimAction::Fire: return "Fire";
             case AnimAction::Reload: return "Reload";
             case AnimAction::Jump: return "Jump";
@@ -2222,6 +2243,20 @@ private:
         if (m_ClipMapping.sprint < 0) {
             m_ClipMapping.sprint = m_ClipMapping.run;
         }
+        m_ClipMapping.equip = findPrimaryLocomotionClipIndex({"unarmed", "equip", "over", "shoulder"}, {"disarm"});
+        if (m_ClipMapping.equip < 0) {
+            m_ClipMapping.equip = findPrimaryLocomotionClipIndex({"unarmed", "equip", "underarm"}, {"disarm"});
+        }
+        if (m_ClipMapping.equip < 0) {
+            m_ClipMapping.equip = findPrimaryClipIndexAny({"equip"});
+        }
+        m_ClipMapping.disarm = findPrimaryLocomotionClipIndex({"standing", "disarm", "over", "shoulder"}, {"equip"});
+        if (m_ClipMapping.disarm < 0) {
+            m_ClipMapping.disarm = findPrimaryLocomotionClipIndex({"standing", "disarm", "underarm"}, {"equip"});
+        }
+        if (m_ClipMapping.disarm < 0) {
+            m_ClipMapping.disarm = findPrimaryClipIndexAny({"disarm"});
+        }
         m_ClipMapping.fire = findPrimaryClipIndexAny({"firing", "rifle", "gun"});
         if (m_ClipMapping.fire < 0) {
             m_ClipMapping.fire = findPrimaryLocomotionClipIndex({"fire", "gun"}, {"reload"});
@@ -2232,6 +2267,8 @@ private:
         AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "combo", "attack", "ver", "1"}, {"react", "block", "taunt"}));
         AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "combo", "attack", "ver", "2"}, {"react", "block", "taunt"}));
         AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "combo", "attack", "ver", "3"}, {"react", "block", "taunt"}));
+        AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "attack", "kick", "ver", "1"}, {"react", "block", "taunt"}));
+        AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "attack", "kick", "ver", "2"}, {"react", "block", "taunt"}));
         AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "attack", "horizontal"}, {"react", "block", "taunt"}));
         AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "attack", "downward"}, {"react", "block", "taunt"}));
         AddUniqueClipIndex(m_MeleeAttackClips, findPrimaryLocomotionClipIndex({"standing", "melee", "attack", "backhand"}, {"react", "block", "taunt"}));
@@ -2245,9 +2282,21 @@ private:
         if (m_ClipMapping.reload < 0) {
             m_ClipMapping.reload = findPrimaryLocomotionClipIndex({"standing", "block", "idle"}, {"react"});
         }
+        m_ClipMapping.unarmedJump = findPrimaryLocomotionClipIndex({"unarmed", "jump"}, {"running"});
+        m_ClipMapping.unarmedJumpRunning = findPrimaryLocomotionClipIndex({"unarmed", "jump", "running"}, {});
+        m_ClipMapping.standingJump = findPrimaryLocomotionClipIndex({"standing", "jump"}, {});
         m_ClipMapping.jump = findPrimaryClipIndexAny({"jump", "hop"});
         if (m_ClipMapping.jump < 0) {
             m_ClipMapping.jump = findLikelyJumpClipIndex();
+        }
+        if (m_ClipMapping.unarmedJump < 0) {
+            m_ClipMapping.unarmedJump = m_ClipMapping.jump;
+        }
+        if (m_ClipMapping.unarmedJumpRunning < 0) {
+            m_ClipMapping.unarmedJumpRunning = m_ClipMapping.unarmedJump;
+        }
+        if (m_ClipMapping.standingJump < 0) {
+            m_ClipMapping.standingJump = m_ClipMapping.jump;
         }
         m_ClipMapping.fall = findPrimaryClipIndexAny({"fall", "air"});
         if (m_ClipMapping.fall < 0) {
@@ -2604,6 +2653,9 @@ private:
             playbackSpeed = 1.75f;
         } else if (action == AnimAction::Fall) {
             playbackSpeed = 1.3f;
+        } else if (action == AnimAction::Equip || action == AnimAction::Disarm) {
+            playbackSpeed = 1.2f;
+            blendDuration = 0.05f;
         } else if (action == AnimAction::Fire && isMeleeAttackClipIndex(clipIndex)) {
             playbackSpeed = 1.85f;
             blendDuration = 0.06f;
@@ -2721,7 +2773,7 @@ private:
         bool isMoving = moveInput.lengthSquared() > 0.0001f;
         bool hasBackwardIntent = moveInput.y < -0.2f;
         bool wantsRun = isMoving && m_EnableSprint && input.isKeyPressed(KeyCode::Shift) && !hasBackwardIntent;
-        if (input.isKeyDown(KeyCode::Q)) {
+        if (input.isKeyDown(KeyCode::Q) && !isBlockingOneShotAction(m_AnimState)) {
             m_CombatMode = !m_CombatMode;
         }
         bool strafeMode = m_CombatMode;
@@ -2747,11 +2799,13 @@ private:
         float forwardAmount = driveScale;
         m_IsPivotTurnDesired = false;
         m_PivotTurnDirection = 0.0f;
+        m_PivotTurnMagnitude = 0.0f;
         if (desiredMagnitude > Math::EPSILON) {
             desiredMove /= desiredMagnitude;
             float desiredYaw = strafeMode ? YawFromDirection(cameraForward) : YawFromDirection(desiredMove);
             float currentYaw = m_BodyYaw;
             float yawDelta = NormalizeRadians(desiredYaw - currentYaw);
+            m_PivotTurnMagnitude = std::abs(yawDelta);
             bool pivotTurn = !strafeMode && moveInput.y < -0.2f && std::abs(yawDelta) > 0.65f;
             if (pivotTurn) {
                 m_IsPivotTurnDesired = true;
@@ -2765,6 +2819,23 @@ private:
             applyBodyYaw(nextYaw);
         } else {
             m_Controller->clearWorldMoveDirection();
+            if (strafeMode) {
+                float desiredYaw = YawFromDirection(cameraForward);
+                float currentYaw = m_BodyYaw;
+                float yawDelta = NormalizeRadians(desiredYaw - currentYaw);
+                m_PivotTurnMagnitude = std::abs(yawDelta);
+                if (m_PivotTurnMagnitude > 0.12f) {
+                    m_IsPivotTurnDesired = true;
+                    m_PivotTurnDirection = yawDelta < 0.0f ? -1.0f : 1.0f;
+                    float turnSpeed = std::max(2.2f, m_RotationSmoothSpeed * 1.35f);
+                    float nextYaw = MoveTowardsAngleRadians(currentYaw, desiredYaw, turnSpeed * deltaTime);
+                    applyBodyYaw(nextYaw);
+                } else {
+                    m_IsPivotTurnDesired = false;
+                    m_PivotTurnDirection = 0.0f;
+                    m_PivotTurnMagnitude = 0.0f;
+                }
+            }
         }
 
         if (!isMoving || desiredMagnitude <= Math::EPSILON) {
@@ -2782,7 +2853,12 @@ private:
         }
         if (input.isKeyDown(KeyCode::Space)) {
             m_JumpPressedThisFrame = true;
-            int jumpClipIndex = (m_ClipMapping.jump >= 0) ? m_ClipMapping.jump : m_ClipMapping.fall;
+            int jumpClipIndex = m_IsStrafeMode
+                ? m_ClipMapping.standingJump
+                : (wantsRun ? m_ClipMapping.unarmedJumpRunning : m_ClipMapping.unarmedJump);
+            if (jumpClipIndex < 0) {
+                jumpClipIndex = (m_ClipMapping.jump >= 0) ? m_ClipMapping.jump : m_ClipMapping.fall;
+            }
             int jumpStateIndex = (m_Animator && m_AnimatorMapping.jumpState >= 0) ? m_AnimatorMapping.jumpState : -1;
             if (jumpStateIndex < 0 && m_Animator && m_AnimatorMapping.fallState >= 0) {
                 jumpStateIndex = m_AnimatorMapping.fallState;
@@ -2854,7 +2930,7 @@ private:
         float horizontalSpeed = horizontalVelocity.length();
         bool grounded = m_Controller->isGrounded();
         InputManager& input = InputManager::getInstance();
-        if (m_AnimState == AnimAction::Fire || m_AnimState == AnimAction::Reload) {
+        if (isBlockingOneShotAction(m_AnimState)) {
             m_ActionElapsed += deltaTime * std::max(0.01f, m_ActionPlaybackSpeed);
         } else {
             m_ActionElapsed = 0.0f;
@@ -2903,7 +2979,7 @@ private:
         if (needsManualAirborneOverride) {
             setManualAirborneClipOverride(jumpVisualActive || falling);
         } else if (m_ManualAirborneClipOverride && grounded &&
-                   m_AnimState != AnimAction::Fire && m_AnimState != AnimAction::Reload) {
+                   !isBlockingOneShotAction(m_AnimState)) {
             setManualAirborneClipOverride(false);
         }
 
@@ -3024,11 +3100,11 @@ private:
                 }
             }
 
-            if ((m_AnimState == AnimAction::Fire || m_AnimState == AnimAction::Reload) && !isActionClipFinished()) {
+            if (isBlockingOneShotAction(m_AnimState) && !isActionClipFinished()) {
                 return;
             }
 
-            if ((m_AnimState == AnimAction::Fire || m_AnimState == AnimAction::Reload) &&
+            if (isBlockingOneShotAction(m_AnimState) &&
                 isActionClipFinished() && m_ManualAirborneClipOverride && grounded) {
                 setManualAirborneClipOverride(false);
                 m_QueuedMeleeAttack = false;
@@ -3063,17 +3139,28 @@ private:
                 clipIndex = activeAnimator && m_AnimatorMapping.jumpClip >= 0 ? m_AnimatorMapping.jumpClip : m_ClipMapping.jump;
                 stateIndex = activeAnimator ? m_AnimatorMapping.jumpState : -1;
             }
-        } else if (moving && !hasDirectionalAnimator) {
+        } else if ((moving || (m_IsStrafeMode && m_IsPivotTurnDesired)) && !hasDirectionalAnimator) {
+            bool useSharpTurn = m_PivotTurnMagnitude > 0.95f;
             if (m_IsPivotTurnDesired && m_PivotTurnDirection < 0.0f &&
-                       ((activeAnimator && m_AnimatorMapping.turnLeftClip >= 0) || m_ClipMapping.turnLeft >= 0)) {
+                       ((activeAnimator && (useSharpTurn ? m_AnimatorMapping.turnLeftSharpClip >= 0 : m_AnimatorMapping.turnLeftClip >= 0)) ||
+                        (useSharpTurn ? m_ClipMapping.turnLeftSharp >= 0 : m_ClipMapping.turnLeft >= 0))) {
                 movementAction = AnimAction::TurnLeft;
-                clipIndex = activeAnimator && m_AnimatorMapping.turnLeftClip >= 0 ? m_AnimatorMapping.turnLeftClip : m_ClipMapping.turnLeft;
-                stateIndex = activeAnimator ? m_AnimatorMapping.turnLeftState : -1;
+                clipIndex = useSharpTurn
+                    ? (activeAnimator && m_AnimatorMapping.turnLeftSharpClip >= 0 ? m_AnimatorMapping.turnLeftSharpClip : m_ClipMapping.turnLeftSharp)
+                    : (activeAnimator && m_AnimatorMapping.turnLeftClip >= 0 ? m_AnimatorMapping.turnLeftClip : m_ClipMapping.turnLeft);
+                stateIndex = useSharpTurn
+                    ? (activeAnimator ? m_AnimatorMapping.turnLeftSharpState : -1)
+                    : (activeAnimator ? m_AnimatorMapping.turnLeftState : -1);
             } else if (m_IsPivotTurnDesired && m_PivotTurnDirection > 0.0f &&
-                       ((activeAnimator && m_AnimatorMapping.turnRightClip >= 0) || m_ClipMapping.turnRight >= 0)) {
+                       ((activeAnimator && (useSharpTurn ? m_AnimatorMapping.turnRightSharpClip >= 0 : m_AnimatorMapping.turnRightClip >= 0)) ||
+                        (useSharpTurn ? m_ClipMapping.turnRightSharp >= 0 : m_ClipMapping.turnRight >= 0))) {
                 movementAction = AnimAction::TurnRight;
-                clipIndex = activeAnimator && m_AnimatorMapping.turnRightClip >= 0 ? m_AnimatorMapping.turnRightClip : m_ClipMapping.turnRight;
-                stateIndex = activeAnimator ? m_AnimatorMapping.turnRightState : -1;
+                clipIndex = useSharpTurn
+                    ? (activeAnimator && m_AnimatorMapping.turnRightSharpClip >= 0 ? m_AnimatorMapping.turnRightSharpClip : m_ClipMapping.turnRightSharp)
+                    : (activeAnimator && m_AnimatorMapping.turnRightClip >= 0 ? m_AnimatorMapping.turnRightClip : m_ClipMapping.turnRight);
+                stateIndex = useSharpTurn
+                    ? (activeAnimator ? m_AnimatorMapping.turnRightSharpState : -1)
+                    : (activeAnimator ? m_AnimatorMapping.turnRightState : -1);
             } else if (m_IsStrafeMode && hasBackwardIntent && m_LastMoveInput.x < -0.2f &&
                        ((activeAnimator && m_AnimatorMapping.backpedalLeftClip >= 0) || m_ClipMapping.backpedalLeft >= 0)) {
                 movementAction = AnimAction::BackpedalLeft;
@@ -3132,7 +3219,15 @@ private:
             }
         }
 
-        if (!hasDirectionalAnimator && clipIndex >= 0) {
+        bool isTurnAction = movementAction == AnimAction::TurnLeft ||
+                            movementAction == AnimAction::TurnRight ||
+                            movementAction == AnimAction::TurnLeftSharp ||
+                            movementAction == AnimAction::TurnRightSharp;
+
+        if (isTurnAction && clipIndex >= 0) {
+            bool restartAction = shouldRestartActionOnEntry(movementAction) && (movementAction != m_AnimState || clipIndex != m_ActionClipIndex);
+            startAction(movementAction, clipIndex, stateIndex, false, restartAction);
+        } else if (!hasDirectionalAnimator && clipIndex >= 0) {
             bool restartAction = shouldRestartActionOnEntry(movementAction) && (movementAction != m_AnimState);
             startAction(movementAction, clipIndex, stateIndex, movementAction != AnimAction::Jump && movementAction != AnimAction::Fall, restartAction);
         } else if (hasDirectionalAnimator && (rising || falling) && clipIndex >= 0) {
@@ -3269,6 +3364,7 @@ private:
     bool m_IsStrafeMode = false;
     bool m_IsPivotTurnDesired = false;
     float m_PivotTurnDirection = 0.0f;
+    float m_PivotTurnMagnitude = 0.0f;
     bool m_ManualAirborneClipOverride = false;
     bool m_JumpPressedThisFrame = false;
     bool m_JumpPhysicsPending = false;

@@ -25,6 +25,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)playPreviewAudioClip:(NSString *)path
                       volume:(float)volume
                        pitch:(float)pitch NS_SWIFT_NAME(playPreviewAudio(path:volume:pitch:));
+- (float)getPreviewAudioClipDuration:(NSString *)path NS_SWIFT_NAME(getPreviewAudioDuration(path:));
 - (NSString *)createAnimationPreviewCloneFromUUID:(NSString *)uuid NS_SWIFT_NAME(createAnimationPreviewClone(sourceUUID:));
 - (void)destroyAnimationPreviewCloneUUID:(NSString *)uuid NS_SWIFT_NAME(destroyAnimationPreviewClone(uuid:));
 

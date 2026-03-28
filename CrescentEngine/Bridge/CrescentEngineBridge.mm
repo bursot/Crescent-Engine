@@ -53,6 +53,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cstring>
+#include "../../../ThirdParty/miniaudio/miniaudio.h"
 
 using namespace Crescent;
 static const void* kEngineQueueKey = &kEngineQueueKey;
@@ -2662,6 +2663,45 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
                                                       std::max(0.0f, volume),
                                                       std::max(0.01f, pitch));
     }];
+}
+
+- (float)getPreviewAudioClipDuration:(NSString *)path {
+    __block float durationSeconds = 0.0f;
+    [self performSync:^{
+        if (!path || path.length == 0) {
+            return;
+        }
+
+        std::string resolvedPath = path.UTF8String ? path.UTF8String : "";
+        if (resolvedPath.empty()) {
+            return;
+        }
+
+        std::filesystem::path fsPath(resolvedPath);
+        if (!fsPath.is_absolute()) {
+            resolvedPath = AssetDatabase::getInstance().resolvePath(resolvedPath);
+        }
+
+        std::error_code ec;
+        if (resolvedPath.empty() || !std::filesystem::exists(resolvedPath, ec)) {
+            return;
+        }
+
+        ma_decoder decoder;
+        ma_result result = ma_decoder_init_file(resolvedPath.c_str(), nullptr, &decoder);
+        if (result != MA_SUCCESS) {
+            return;
+        }
+        ma_uint32 sampleRate = 0;
+        ma_uint64 frameCount = 0;
+        if (ma_decoder_get_data_format(&decoder, nullptr, nullptr, &sampleRate, nullptr, 0) == MA_SUCCESS &&
+            ma_decoder_get_length_in_pcm_frames(&decoder, &frameCount) == MA_SUCCESS &&
+            sampleRate > 0 && frameCount > 0) {
+            durationSeconds = static_cast<float>(static_cast<double>(frameCount) / static_cast<double>(sampleRate));
+        }
+        ma_decoder_uninit(&decoder);
+    }];
+    return durationSeconds;
 }
 
 - (NSString *)createAnimationPreviewCloneFromUUID:(NSString *)uuid {

@@ -4,6 +4,7 @@ import AppKit
 import simd
 import Combine
 struct ContentView: View {
+    private static var didCloseRestoredAuxWindowsThisLaunch = false
     @ObservedObject var editorState: EditorState
     @State private var hierarchyWidthOverride: CGFloat?
     @State private var inspectorWidthOverride: CGFloat?
@@ -143,6 +144,7 @@ struct ContentView: View {
             editorState.showConsole = true
             syncDockSelection()
             editorState.refreshProjectInfo()
+            closeRestoredAuxiliaryWindowsOnce()
         }
         .onChange(of: editorState.showAssets) { _ in
             syncDockSelection()
@@ -190,6 +192,17 @@ struct ContentView: View {
         let chromeReserve = 132 + (metrics.windowInset * 2) + (metrics.contentInset * 2)
         let availableHeight = size.height - viewportReserve - chromeReserve
         return max(300, min(availableHeight, min(size.height * 0.56, 620)))
+    }
+
+    private func closeRestoredAuxiliaryWindowsOnce() {
+        DispatchQueue.main.async {
+            guard !ContentView.didCloseRestoredAuxWindowsThisLaunch else { return }
+            let auxiliaryTitles: Set<String> = ["Animation Sequence", "Skeleton", "Anim Graph", "Settings"]
+            for window in NSApp.windows where auxiliaryTitles.contains(window.title) {
+                window.close()
+            }
+            ContentView.didCloseRestoredAuxWindowsThisLaunch = true
+        }
     }
 }
 

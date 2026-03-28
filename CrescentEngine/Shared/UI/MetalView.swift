@@ -97,9 +97,6 @@ struct MetalView: NSViewRepresentable {
         nsView.terrainBrushMaskPath = terrainPaintConfig.maskPath
         nsView.terrainBrushAutoNormalize = terrainPaintConfig.autoNormalize
         context.coordinator.setInputMonitoring(active: isActive)
-        if isActive, let window = nsView.window, window.firstResponder !== nsView {
-            window.makeFirstResponder(nsView)
-        }
     }
     
     class Coordinator: NSObject, InputDelegate {
@@ -512,7 +509,13 @@ struct MetalView: NSViewRepresentable {
         }
 
         private func shouldCaptureKeyboardEvent() -> Bool {
-            guard let window = metalView?.window else { return false }
+            guard let window = (NSApp.keyWindow ?? NSApp.mainWindow ?? metalView?.window) else { return false }
+            if window is NSPanel {
+                return false
+            }
+            if window.title == "Animation Sequence" {
+                return false
+            }
             if window.firstResponder is NSTextView {
                 return false
             }
@@ -598,7 +601,7 @@ class MetalDisplayView: NSView {
     private let terrainPreviewDispatchInterval: CFTimeInterval = 1.0 / 90.0
     private let terrainPaintDispatchInterval: CFTimeInterval = 1.0 / 120.0
     
-    override var acceptsFirstResponder: Bool { return true }
+    override var acceptsFirstResponder: Bool { return inputDelegate != nil }
     
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -688,8 +691,9 @@ class MetalDisplayView: NSView {
             // Update drawable size when added to window
             setFrameSize(bounds.size)
             
-            // Become first responder to receive keyboard events
-            window?.makeFirstResponder(self)
+            if inputDelegate != nil {
+                window?.makeFirstResponder(self)
+            }
             
             // Setup mouse tracking
             updateTrackingAreas()
@@ -768,7 +772,9 @@ class MetalDisplayView: NSView {
     }
     
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
+        if inputDelegate != nil {
+            window?.makeFirstResponder(self)
+        }
         isLeftMouseDown = true
         let point = convert(event.locationInWindow, from: nil)
         #if EDITOR_APP
@@ -904,7 +910,9 @@ class MetalDisplayView: NSView {
     
     override func rightMouseDown(with event: NSEvent) {
         guard inputDelegate != nil else { return }
-        window?.makeFirstResponder(self)
+        if inputDelegate != nil {
+            window?.makeFirstResponder(self)
+        }
         isRightMouseDown = true
         
         // Hide cursor (Unity/Unreal style)
