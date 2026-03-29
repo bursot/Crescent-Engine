@@ -792,46 +792,13 @@ private:
     }
 
     void queueMeleeAttackAudio(int clipIndex) {
-        if (clipHasAudioEvents(clipIndex)) {
-            return;
-        }
-        m_PendingMeleeAttackAudio = true;
-        m_PendingMeleeAttackAudioClipIndex = clipIndex;
-        std::string clipName = ToLower(getClipName(clipIndex));
-        float normalizedTriggerTime = 0.16f;
-        if (ContainsAnyToken(clipName, {"360", "downward", "run jump"})) {
-            normalizedTriggerTime = 0.30f;
-        } else if (ContainsAnyToken(clipName, {"horizontal", "backhand", "ver. 2", "ver 2"})) {
-            normalizedTriggerTime = 0.22f;
-        } else if (ContainsAnyToken(clipName, {"ver. 3", "ver 3", "heavy"})) {
-            normalizedTriggerTime = 0.28f;
-        }
-        m_PendingMeleeAttackAudioTriggerTime = (m_ActionDuration > 0.0f)
-            ? (m_ActionDuration * normalizedTriggerTime)
-            : 0.0f;
+        (void)clipIndex;
     }
 
     void flushMeleeAttackAudio() {
-        if (!m_PendingMeleeAttackAudio) {
-            return;
-        }
-        if (m_ActionElapsed < m_PendingMeleeAttackAudioTriggerTime) {
-            return;
-        }
-
-        int clipIndex = m_PendingMeleeAttackAudioClipIndex;
         m_PendingMeleeAttackAudio = false;
         m_PendingMeleeAttackAudioClipIndex = -1;
         m_PendingMeleeAttackAudioTriggerTime = 0.0f;
-
-        const std::string* path = chooseMeleeAttackAudioPath(clipIndex);
-        if (path) {
-            playDirectionalWhooshOneShot(*path, 0.74f, 1.0f, 1.2f, 18.0f, 1.0f);
-        }
-        const std::string* vocalPath = chooseMeleeAttackVocalPath(clipIndex);
-        if (vocalPath) {
-            playSpatialOneShot(*vocalPath, 0.56f, 1.0f, 1.0f, 15.0f, 0.85f, 1.45f, 0.025f, 0.04f);
-        }
     }
 
     void ensureJumpAudioResolved() {
@@ -883,11 +850,7 @@ private:
     }
 
     void playJumpAudio() {
-        if (clipHasEventToken(m_ActionClipIndex, {"jump"})) {
-            return;
-        }
-        playJumpBodyAudio();
-        playJumpVocalAudio();
+        return;
     }
 
     void playFootstepAudioOneShot() {
@@ -947,37 +910,13 @@ private:
     }
 
     void updateFootstepAudio(float deltaTime, bool grounded, bool moving, bool running, bool rising, bool falling) {
-        ensureFootstepAudioResolved();
-        if (m_FootstepAudioPaths.empty()) {
-            return;
-        }
-        if (clipHasEventToken(m_EventClipIndex, {"foot", "step"})) {
-            m_FootstepWasActive = false;
-            m_FootstepTimer = running ? 0.48f : 0.68f;
-            return;
-        }
-
-        bool canPlayFootsteps = grounded && moving && !rising && !falling &&
-                                !isMeleeAttackActive() && m_AnimState != AnimAction::Reload;
-        if (!canPlayFootsteps) {
-            m_FootstepWasActive = false;
-            m_FootstepTimer = running ? 0.48f : 0.68f;
-            return;
-        }
-
-        if (!m_FootstepWasActive) {
-            m_FootstepWasActive = true;
-            m_FootstepTimer = running ? 0.48f : 0.68f;
-            return;
-        }
-
-        m_FootstepTimer -= deltaTime;
-        if (m_FootstepTimer > 0.0f) {
-            return;
-        }
-
-        playFootstepAudioOneShot();
-        m_FootstepTimer = running ? 0.48f : 0.68f;
+        (void)deltaTime;
+        (void)grounded;
+        (void)moving;
+        (void)running;
+        (void)rising;
+        (void)falling;
+        m_FootstepWasActive = false;
     }
 
     void configureClipEventPlayback(int clipIndex, bool looping, float playbackSpeed, bool restart) {
@@ -1002,46 +941,11 @@ private:
     void dispatchClipEvent(const AnimationEvent& event, int clipIndex) {
         std::string type = getEventTypeLower(event);
         std::string tag = getEventTagLower(event);
-        if (ContainsAnyToken(tag, {"foot", "step"})) {
-            if (!playConfiguredEventAudio(event, {}, false)) {
-                playFootstepAudioOneShot();
-            }
-            return;
-        }
-
-        if (ContainsAnyToken(tag, {"jump"})) {
-            const std::string* jumpBodyPath = chooseJumpAudioPath();
-            const std::string* jumpVocalPath = chooseJumpVocalPath();
-            if (ContainsAnyToken(tag, {"vocal", "grunt", "man"})) {
-                if (!playConfiguredEventAudio(event, jumpVocalPath ? *jumpVocalPath : std::string(), false)) {
-                    playJumpVocalAudio();
-                }
-            } else {
-                if (!playConfiguredEventAudio(event, jumpBodyPath ? *jumpBodyPath : std::string(), false)) {
-                    playJumpBodyAudio();
-                }
-            }
-            return;
-        }
-
-        if (isMeleeAttackClipIndex(clipIndex)) {
-            if (ContainsAnyToken(tag, {"vocal", "grunt", "man"})) {
-                const std::string* path = chooseMeleeAttackVocalPath(clipIndex);
-                if (!playConfiguredEventAudio(event, path ? *path : std::string(), false) && path) {
-                    playSpatialOneShot(*path, 0.56f, 1.0f, 1.0f, 15.0f, 0.85f, 1.45f, 0.025f, 0.04f);
-                }
-            } else if (ContainsAnyToken(tag, {"swing", "whoosh", "attack"})) {
-                const std::string* path = chooseMeleeAttackAudioPath(clipIndex);
-                if (!playConfiguredEventAudio(event, path ? *path : std::string(), true) && path) {
-                    playDirectionalWhooshOneShot(*path, 0.74f, 1.0f, 1.2f, 18.0f, 1.0f);
-                }
-            }
-            return;
-        }
-
         if (type == "audio" || !event.payload.empty()) {
-            playConfiguredEventAudio(event, {}, ContainsAnyToken(tag, {"swing", "whoosh", "attack"}));
+            bool directional = ContainsAnyToken(tag, {"swing", "whoosh", "attack"});
+            playConfiguredEventAudio(event, {}, directional);
         }
+        (void)clipIndex;
     }
 
     void processClipEvents(float deltaTime) {

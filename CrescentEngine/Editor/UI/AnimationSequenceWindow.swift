@@ -147,7 +147,20 @@ struct AnimationSequenceWindow: View {
 
             previewControls(uuid: uuid, duration: duration)
 
-            TimelineView(events: events, duration: duration, currentTime: previewTime)
+            TimelineView(
+                events: events,
+                duration: duration,
+                currentTime: previewTime,
+                selectedEventID: selectedEventIndex.flatMap { events.indices.contains($0) ? events[$0].id : nil },
+                onSelectEvent: { id in
+                    if let index = events.firstIndex(where: { $0.id == id }) {
+                        loadDraft(from: index)
+                    }
+                },
+                onMoveEvent: { id, time, isFinal in
+                    moveEvent(id: id, to: time, commit: isFinal, uuid: uuid)
+                }
+            )
                 .frame(height: 120)
 
             HStack(spacing: 8) {
@@ -603,6 +616,25 @@ struct AnimationSequenceWindow: View {
         persistEventBackup(uuid: uuid, clipIndex: clipIdx, payload: payload)
     }
 
+    private func moveEvent(id: UUID, to time: Float, commit: Bool, uuid: String) {
+        guard let index = events.firstIndex(where: { $0.id == id }) else { return }
+        let duration = clips[safe: selectedClipIndex]?.duration ?? time
+        events[index].time = max(0.0, min(time, duration))
+        let movedEvent = events[index]
+        events.sort { lhs, rhs in
+            if abs(lhs.time - rhs.time) > 0.0001 {
+                return lhs.time < rhs.time
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        if let newIndex = events.firstIndex(where: { $0.id == movedEvent.id }) {
+            selectedEventIndex = newIndex
+        }
+        if commit {
+            commitEvents(uuid: uuid)
+        }
+    }
+
     private func persistEventBackup(uuid: String, clipIndex: Int, payload: [[String: Any]]) {
         guard let projectRoot = editorState.projectRootURL else { return }
         let backupDir = projectRoot
@@ -757,6 +789,21 @@ private struct TimelineView: View {
     let events: [SequenceEvent]
     let duration: Float
     let currentTime: Float
+    let selectedEventID: UUID?
+    let onSelectEvent: (UUID) -> Void
+    let onMoveEvent: (UUID, Float, Bool) -> Void
+    @State private var dragStartTimes: [UUID: Float] = [:]
+
+    private var tickStep: Float {
+        if duration <= 0.75 { return 0.05 }
+        if duration <= 2.0 { return 0.1 }
+        if duration <= 5.0 { return 0.25 }
+        return 0.5
+    }
+
+    private var labelFormat: String {
+        duration <= 2.0 ? "%.3f" : "%.2f"
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -764,6 +811,17 @@ private struct TimelineView: View {
             let innerWidth = max(width - 24, 1)
             let playheadRatio = duration > 0 ? CGFloat(min(max(currentTime / duration, 0.0), 1.0)) : 0
             let playheadX = 12 + playheadRatio * innerWidth
+            let tickValues: [Float] = {
+                guard duration > 0 else { return [0] }
+                var values: [Float] = []
+                var t: Float = 0
+                while t < duration {
+                    values.append(t)
+                    t += tickStep
+                }
+                values.append(duration)
+                return values
+            }()
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(EditorTheme.surface)
@@ -772,16 +830,16 @@ private struct TimelineView: View {
                             .stroke(EditorTheme.panelStroke, lineWidth: 1)
                     )
 
-                ForEach(0..<5, id: \.self) { tick in
-                    let ratio = CGFloat(tick) / 4.0
+                ForEach(Array(tickValues.enumerated()), id: \.offset) { _, tickValue in
+                    let ratio = duration > 0 ? CGFloat(min(max(tickValue / duration, 0.0), 1.0)) : 0
                     let x = 12 + ratio * innerWidth
                     Path { path in
                         path.move(to: CGPoint(x: x, y: 16))
                         path.addLine(to: CGPoint(x: x, y: geo.size.height - 16))
                     }
-                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                    .stroke(Color.white.opacity(tickValue == duration ? 0.10 : 0.06), lineWidth: 1)
 
-                    Text(String(format: "%.2f", duration * Float(ratio)))
+                    Text(String(format: labelFormat, tickValue))
                         .font(EditorTheme.mono(size: 8))
                         .foregroundColor(EditorTheme.textMuted)
                         .position(x: min(max(x, 24), width - 24), y: geo.size.height - 10)
@@ -807,13 +865,37 @@ private struct TimelineView: View {
                         let blockWidth = max((endRatio - startRatio) * innerWidth, 6)
                         let label = evt.payload.isEmpty ? evt.eventTag : URL(fileURLWithPath: evt.payload).lastPathComponent
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.teal.opacity(0.35))
+                            .fill((selectedEventID == evt.id ? Color.orange : Color.teal).opacity(0.35))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.teal.opacity(0.85), lineWidth: 1)
+                                    .stroke((selectedEventID == evt.id ? Color.orange : Color.teal).opacity(0.85), lineWidth: 1.5)
                             )
                             .frame(width: blockWidth, height: 22)
                             .position(x: blockX + blockWidth / 2, y: 62)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                onSelectEvent(evt.id)
+                            }
+                            .gesture(
+                                DragGesture(minimumDistance: 6)
+                                    .onChanged { value in
+                                        onSelectEvent(evt.id)
+                                        let startTime = dragStartTimes[evt.id] ?? evt.time
+                                        if dragStartTimes[evt.id] == nil {
+                                            dragStartTimes[evt.id] = evt.time
+                                        }
+                                        let deltaRatio = Float(value.translation.width / innerWidth)
+                                        let newTime = startTime + (deltaRatio * duration)
+                                        onMoveEvent(evt.id, newTime, false)
+                                    }
+                                    .onEnded { value in
+                                        let startTime = dragStartTimes[evt.id] ?? evt.time
+                                        let deltaRatio = Float(value.translation.width / innerWidth)
+                                        let newTime = startTime + (deltaRatio * duration)
+                                        onMoveEvent(evt.id, newTime, true)
+                                        dragStartTimes[evt.id] = nil
+                                    }
+                            )
 
                         Text(label)
                             .font(EditorTheme.font(size: 8, weight: .medium))
@@ -829,13 +911,37 @@ private struct TimelineView: View {
                     let x = 12 + t * innerWidth
                     VStack(spacing: 4) {
                         Circle()
-                            .fill(Color.orange)
+                            .fill(selectedEventID == evt.id ? Color.orange : Color.orange.opacity(0.75))
                             .frame(width: 8, height: 8)
                         Text(evt.eventTag)
                             .font(EditorTheme.font(size: 8))
-                            .foregroundColor(EditorTheme.textMuted)
+                            .foregroundColor(selectedEventID == evt.id ? EditorTheme.textPrimary : EditorTheme.textMuted)
                     }
                     .position(x: x, y: 26)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onSelectEvent(evt.id)
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 6)
+                            .onChanged { value in
+                                onSelectEvent(evt.id)
+                                let startTime = dragStartTimes[evt.id] ?? evt.time
+                                if dragStartTimes[evt.id] == nil {
+                                    dragStartTimes[evt.id] = evt.time
+                                }
+                                let deltaRatio = Float(value.translation.width / innerWidth)
+                                let newTime = startTime + (deltaRatio * duration)
+                                onMoveEvent(evt.id, newTime, false)
+                            }
+                            .onEnded { value in
+                                let startTime = dragStartTimes[evt.id] ?? evt.time
+                                let deltaRatio = Float(value.translation.width / innerWidth)
+                                let newTime = startTime + (deltaRatio * duration)
+                                onMoveEvent(evt.id, newTime, true)
+                                dragStartTimes[evt.id] = nil
+                            }
+                    )
                 }
 
                 Rectangle()
