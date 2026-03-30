@@ -962,6 +962,7 @@ Renderer::Renderer()
     , m_motionHistoryValid(false)
     , m_taaFrameIndex(0)
     , m_frameIndex(0)
+    , m_bufferFrameIndex(0)
     , m_qualitySettings()
     , m_shadowAtlasResolution(0)
     , m_renderTargetWidth(0)
@@ -1023,10 +1024,15 @@ bool Renderer::initialize() {
     
     // Create uniform buffers
     m_modelUniformBuffer = m_device->newBuffer(sizeof(ModelUniforms), MTL::ResourceStorageModeShared);
-    m_cameraUniformBuffer = m_device->newBuffer(sizeof(CameraUniforms), MTL::ResourceStorageModeShared);
     m_materialUniformBuffer = m_device->newBuffer(sizeof(MaterialUniformsGPU), MTL::ResourceStorageModeShared);
-    m_lightUniformBuffer = m_device->newBuffer(sizeof(LightDataGPU), MTL::ResourceStorageModeShared);
-    m_environmentUniformBuffer = m_device->newBuffer(sizeof(EnvironmentUniformsGPU), MTL::ResourceStorageModeShared);
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        m_cameraUniformBuffers[i] = m_device->newBuffer(sizeof(CameraUniforms), MTL::ResourceStorageModeShared);
+        m_lightUniformBuffers[i] = m_device->newBuffer(sizeof(LightDataGPU), MTL::ResourceStorageModeShared);
+        m_environmentUniformBuffers[i] = m_device->newBuffer(sizeof(EnvironmentUniformsGPU), MTL::ResourceStorageModeShared);
+    }
+    m_cameraUniformBuffer = m_cameraUniformBuffers[0];
+    m_lightUniformBuffer = m_lightUniformBuffers[0];
+    m_environmentUniformBuffer = m_environmentUniformBuffers[0];
     ProbeAmbientCubeDataGPU zeroProbe{};
     m_probeVolumeFallbackBuffer = m_device->newBuffer(&zeroProbe,
                                                       sizeof(ProbeAmbientCubeDataGPU),
@@ -3700,6 +3706,26 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             resolveToDrawable = false;
         }
     }
+
+    const uint32_t bufferSlot = m_bufferFrameIndex % kMaxFramesInFlight;
+    if (m_inFlightCommandBuffers[bufferSlot]) {
+        m_inFlightCommandBuffers[bufferSlot]->waitUntilCompleted();
+        m_inFlightCommandBuffers[bufferSlot]->release();
+        m_inFlightCommandBuffers[bufferSlot] = nullptr;
+    }
+
+    m_cameraUniformBuffer = m_cameraUniformBuffers[bufferSlot];
+    m_lightUniformBuffer = m_lightUniformBuffers[bufferSlot];
+    m_environmentUniformBuffer = m_environmentUniformBuffers[bufferSlot];
+    m_lightGPUBuffer = m_lightGPUBuffers[bufferSlot];
+    m_shadowGPUBuffer = m_shadowGPUBuffers[bufferSlot];
+    m_clusterParamsBuffer = m_clusterParamsBuffers[bufferSlot];
+    m_skinningBuffer = m_skinningBuffers[bufferSlot];
+    m_prevSkinningBuffer = m_prevSkinningBuffers[bufferSlot];
+    m_instanceBuffer = m_instanceBuffers[bufferSlot];
+    m_skinningBufferCapacity = m_skinningBufferCapacities[bufferSlot];
+    m_prevSkinningBufferCapacity = m_prevSkinningBufferCapacities[bufferSlot];
+    m_instanceBufferCapacity = m_instanceBufferCapacities[bufferSlot];
     
     // Create command buffer
     MTL::CommandBuffer* commandBuffer = m_commandQueue->commandBuffer();
@@ -3722,6 +3748,13 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
             buffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
             capacity = buffer ? buffer->length() : 0;
+            if (&buffer == &m_skinningBuffer) {
+                m_skinningBuffers[bufferSlot] = buffer;
+                m_skinningBufferCapacities[bufferSlot] = capacity;
+            } else if (&buffer == &m_prevSkinningBuffer) {
+                m_prevSkinningBuffers[bufferSlot] = buffer;
+                m_prevSkinningBufferCapacities[bufferSlot] = capacity;
+            }
             alignedOffset = 0;
             required = bytes;
         }
@@ -3744,6 +3777,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
             m_instanceBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
             m_instanceBufferCapacity = m_instanceBuffer ? m_instanceBuffer->length() : 0;
+            m_instanceBuffers[bufferSlot] = m_instanceBuffer;
+            m_instanceBufferCapacities[bufferSlot] = m_instanceBufferCapacity;
             alignedOffset = 0;
             required = bytes;
         }
@@ -3767,6 +3802,13 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             if (!buf || buf->length() < bytes) {
                 if (buf) { buf->release(); }
                 buf = m_device->newBuffer(bytes, MTL::ResourceStorageModeShared);
+                if (&buf == &m_lightGPUBuffer) {
+                    m_lightGPUBuffers[bufferSlot] = buf;
+                } else if (&buf == &m_shadowGPUBuffer) {
+                    m_shadowGPUBuffers[bufferSlot] = buf;
+                } else if (&buf == &m_clusterParamsBuffer) {
+                    m_clusterParamsBuffers[bufferSlot] = buf;
+                }
             }
             if (buf && src) {
                 std::memcpy(buf->contents(), src, bytes);
@@ -4330,6 +4372,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     // Render shadow maps first
     if (m_shadowPass && m_lightingSystem) {
         m_shadowPass->setExtraHiddenEntities(gpuCulledStaticIds);
+        m_shadowPass->setFrameSlot(bufferSlot);
         m_shadowPass->execute(commandBuffer, scene, camera, *m_lightingSystem, instancedShadowDraws);
     }
 
@@ -7066,7 +7109,10 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
     // Present
     commandBuffer->presentDrawable(drawable);
+    commandBuffer->retain();
+    m_inFlightCommandBuffers[bufferSlot] = commandBuffer;
     commandBuffer->commit();
+    m_bufferFrameIndex++;
     
     // Cleanup
     renderPass->release();
@@ -7730,29 +7776,9 @@ void Renderer::shutdown() {
         m_modelUniformBuffer->release();
         m_modelUniformBuffer = nullptr;
     }
-    if (m_cameraUniformBuffer) {
-        m_cameraUniformBuffer->release();
-        m_cameraUniformBuffer = nullptr;
-    }
     if (m_materialUniformBuffer) {
         m_materialUniformBuffer->release();
         m_materialUniformBuffer = nullptr;
-    }
-    if (m_lightUniformBuffer) {
-        m_lightUniformBuffer->release();
-        m_lightUniformBuffer = nullptr;
-    }
-    if (m_environmentUniformBuffer) {
-        m_environmentUniformBuffer->release();
-        m_environmentUniformBuffer = nullptr;
-    }
-    if (m_lightGPUBuffer) {
-        m_lightGPUBuffer->release();
-        m_lightGPUBuffer = nullptr;
-    }
-    if (m_shadowGPUBuffer) {
-        m_shadowGPUBuffer->release();
-        m_shadowGPUBuffer = nullptr;
     }
     if (m_lightCountBuffer) {
         m_lightCountBuffer->release();
@@ -7760,10 +7786,6 @@ void Renderer::shutdown() {
     }
     m_clusterHeaderBuffer = nullptr;
     m_clusterIndexBuffer = nullptr;
-    if (m_clusterParamsBuffer) {
-        m_clusterParamsBuffer->release();
-        m_clusterParamsBuffer = nullptr;
-    }
     if (m_probeVolumeBuffer) {
         m_probeVolumeBuffer->release();
         m_probeVolumeBuffer = nullptr;
@@ -7772,22 +7794,38 @@ void Renderer::shutdown() {
         m_probeVolumeFallbackBuffer->release();
         m_probeVolumeFallbackBuffer = nullptr;
     }
-    if (m_skinningBuffer) {
-        m_skinningBuffer->release();
-        m_skinningBuffer = nullptr;
-        m_skinningBufferCapacity = 0;
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        if (m_inFlightCommandBuffers[i]) {
+            m_inFlightCommandBuffers[i]->waitUntilCompleted();
+            m_inFlightCommandBuffers[i]->release();
+            m_inFlightCommandBuffers[i] = nullptr;
+        }
+        if (m_cameraUniformBuffers[i]) { m_cameraUniformBuffers[i]->release(); m_cameraUniformBuffers[i] = nullptr; }
+        if (m_lightUniformBuffers[i]) { m_lightUniformBuffers[i]->release(); m_lightUniformBuffers[i] = nullptr; }
+        if (m_environmentUniformBuffers[i]) { m_environmentUniformBuffers[i]->release(); m_environmentUniformBuffers[i] = nullptr; }
+        if (m_lightGPUBuffers[i]) { m_lightGPUBuffers[i]->release(); m_lightGPUBuffers[i] = nullptr; }
+        if (m_shadowGPUBuffers[i]) { m_shadowGPUBuffers[i]->release(); m_shadowGPUBuffers[i] = nullptr; }
+        if (m_clusterParamsBuffers[i]) { m_clusterParamsBuffers[i]->release(); m_clusterParamsBuffers[i] = nullptr; }
+        if (m_skinningBuffers[i]) { m_skinningBuffers[i]->release(); m_skinningBuffers[i] = nullptr; }
+        if (m_prevSkinningBuffers[i]) { m_prevSkinningBuffers[i]->release(); m_prevSkinningBuffers[i] = nullptr; }
+        if (m_instanceBuffers[i]) { m_instanceBuffers[i]->release(); m_instanceBuffers[i] = nullptr; }
+        m_skinningBufferCapacities[i] = 0;
+        m_prevSkinningBufferCapacities[i] = 0;
+        m_instanceBufferCapacities[i] = 0;
     }
-    if (m_prevSkinningBuffer) {
-        m_prevSkinningBuffer->release();
-        m_prevSkinningBuffer = nullptr;
-        m_prevSkinningBufferCapacity = 0;
-    }
-    if (m_instanceBuffer) {
-        m_instanceBuffer->release();
-        m_instanceBuffer = nullptr;
-        m_instanceBufferCapacity = 0;
-        m_instanceBufferOffset = 0;
-    }
+    m_cameraUniformBuffer = nullptr;
+    m_lightUniformBuffer = nullptr;
+    m_environmentUniformBuffer = nullptr;
+    m_lightGPUBuffer = nullptr;
+    m_shadowGPUBuffer = nullptr;
+    m_clusterParamsBuffer = nullptr;
+    m_skinningBuffer = nullptr;
+    m_prevSkinningBuffer = nullptr;
+    m_instanceBuffer = nullptr;
+    m_skinningBufferCapacity = 0;
+    m_prevSkinningBufferCapacity = 0;
+    m_instanceBufferCapacity = 0;
+    m_instanceBufferOffset = 0;
     if (m_instanceCullBuffer) {
         m_instanceCullBuffer->release();
         m_instanceCullBuffer = nullptr;

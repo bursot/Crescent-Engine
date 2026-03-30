@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <array>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -12,6 +13,7 @@
 namespace MTL {
     class Device;
     class CommandQueue;
+    class CommandBuffer;
     class RenderPipelineState;
     class ComputePipelineState;
     class RenderCommandEncoder;
@@ -98,6 +100,7 @@ struct PipelineStateKeyHash {
 
 class Renderer {
 public:
+    static constexpr uint32_t kMaxFramesInFlight = 4;
     enum class RenderTargetPool {
         Scene,
         Game,
@@ -500,6 +503,7 @@ private:
     bool m_motionHistoryValid;
     uint32_t m_taaFrameIndex;
     uint32_t m_frameIndex;
+    uint32_t m_bufferFrameIndex;
 
     // Active quality settings
     SceneQualitySettings m_qualitySettings;
@@ -532,6 +536,20 @@ private:
     RenderTargetState m_gameTargets;
     RenderTargetState m_previewTargets;
     RenderTargetPool m_activePool;
+
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_cameraUniformBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_lightUniformBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_environmentUniformBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_lightGPUBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_shadowGPUBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_clusterParamsBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_skinningBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_prevSkinningBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceBuffers{};
+    std::array<size_t, kMaxFramesInFlight> m_skinningBufferCapacities{};
+    std::array<size_t, kMaxFramesInFlight> m_prevSkinningBufferCapacities{};
+    std::array<size_t, kMaxFramesInFlight> m_instanceBufferCapacities{};
+    std::array<MTL::CommandBuffer*, kMaxFramesInFlight> m_inFlightCommandBuffers{};
 };
 
 } // namespace Crescent

@@ -2,6 +2,7 @@
 
 #include "../Math/Math.hpp"
 #include "LightingSystem.hpp"
+#include <array>
 #include <vector>
 #include <memory>
 #include <cstddef>
@@ -41,6 +42,7 @@ struct InstancedShadowDraw {
 // Handles rendering shadow maps into atlas textures using LightingSystem prepared data.
 class ShadowRenderPass {
 public:
+    static constexpr uint32_t kMaxFramesInFlight = 4;
     ShadowRenderPass();
     ~ShadowRenderPass();
     
@@ -53,6 +55,7 @@ public:
                  Camera* camera,
                  const LightingSystem& lighting,
                  const std::vector<InstancedShadowDraw>& instancedDraws);
+    void setFrameSlot(uint32_t frameSlot);
 
     void setExtraHiddenEntities(const std::unordered_set<std::string>& hidden);
     
@@ -135,6 +138,9 @@ private:
     MTL::SamplerState* m_alphaSampler;
     size_t m_skinningBufferCapacity;
     size_t m_skinningBufferOffset;
+    uint32_t m_frameSlot;
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_skinningBuffers{};
+    std::array<size_t, kMaxFramesInFlight> m_skinningBufferCapacities{};
 
     std::unordered_set<std::string> m_hlodHidden;
     std::unordered_set<std::string> m_hlodActiveProxies;

@@ -286,6 +286,7 @@ ShadowRenderPass::ShadowRenderPass()
     , m_alphaSampler(nullptr)
     , m_skinningBufferCapacity(0)
     , m_skinningBufferOffset(0)
+    , m_frameSlot(0)
     , m_atlasResolution(4096)
     , m_atlasLayers(1) {
 }
@@ -377,10 +378,20 @@ void ShadowRenderPass::shutdown() {
     if (m_instanceCullBuffer) { m_instanceCullBuffer->release(); m_instanceCullBuffer = nullptr; m_instanceCullCapacity = 0; }
     if (m_instanceCountBuffer) { m_instanceCountBuffer->release(); m_instanceCountBuffer = nullptr; m_instanceCountCapacity = 0; }
     if (m_instanceIndirectBuffer) { m_instanceIndirectBuffer->release(); m_instanceIndirectBuffer = nullptr; m_instanceIndirectCapacity = 0; }
-    if (m_skinningBuffer) { m_skinningBuffer->release(); m_skinningBuffer = nullptr; }
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        if (m_skinningBuffers[i]) { m_skinningBuffers[i]->release(); m_skinningBuffers[i] = nullptr; }
+        m_skinningBufferCapacities[i] = 0;
+    }
+    m_skinningBuffer = nullptr;
     if (m_alphaSampler) { m_alphaSampler->release(); m_alphaSampler = nullptr; }
     m_skinningBufferCapacity = 0;
     m_skinningBufferOffset = 0;
+}
+
+void ShadowRenderPass::setFrameSlot(uint32_t frameSlot) {
+    m_frameSlot = frameSlot % kMaxFramesInFlight;
+    m_skinningBuffer = m_skinningBuffers[m_frameSlot];
+    m_skinningBufferCapacity = m_skinningBufferCapacities[m_frameSlot];
 }
 
 void ShadowRenderPass::buildDepthState() {
@@ -402,6 +413,8 @@ bool ShadowRenderPass::allocateSkinningSlice(size_t bytes, size_t& outOffset) {
         }
         m_skinningBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
         m_skinningBufferCapacity = m_skinningBuffer ? m_skinningBuffer->length() : 0;
+        m_skinningBuffers[m_frameSlot] = m_skinningBuffer;
+        m_skinningBufferCapacities[m_frameSlot] = m_skinningBufferCapacity;
         alignedOffset = 0;
         required = bytes;
     }
