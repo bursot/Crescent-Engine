@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../ECS/Component.hpp"
+#include "../Audio/AudioSystem.hpp"
 #include <string>
 
 struct ma_sound;
@@ -35,6 +36,9 @@ public:
     bool isStreaming() const { return m_Stream; }
     void setStreaming(bool value);
 
+    AudioBus getBus() const { return m_Bus; }
+    void setBus(AudioBus value);
+
     float getMinDistance() const { return m_MinDistance; }
     void setMinDistance(float value);
 
@@ -67,6 +71,7 @@ private:
     bool m_PlayOnStart = false;
     bool m_Spatial = true;
     bool m_Stream = false;
+    AudioBus m_Bus = AudioBus::SFX;
     float m_MinDistance = 1.0f;
     float m_MaxDistance = 50.0f;
     float m_Rolloff = 1.0f;

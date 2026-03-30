@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 import UniformTypeIdentifiers
 import AppKit
+import ObjectiveC
 
 struct AnimationSequenceWindow: View {
     @ObservedObject var editorState: EditorState
@@ -1023,6 +1024,14 @@ private struct SequenceEvent: Identifiable {
 }
 
 private enum AnimationEventEditorDialog {
+    private final class ModalCloseInterceptor: NSObject, NSWindowDelegate {
+        var onClose: (() -> Void)?
+
+        func windowWillClose(_ notification: Notification) {
+            onClose?()
+        }
+    }
+
     static func runModal(title: String,
                          initial: SequenceEvent,
                          duration: Float) -> SequenceEvent? {
@@ -1140,6 +1149,23 @@ private enum AnimationEventEditorDialog {
         panel.initialFirstResponder = tagField
         panel.center()
 
+        var accepted = false
+        var modalResolved = false
+        let closeInterceptor = ModalCloseInterceptor()
+        closeInterceptor.onClose = {
+            if modalResolved {
+                return
+            }
+            accepted = false
+            modalResolved = true
+            NSApp.stopModal()
+        }
+        panel.delegate = closeInterceptor
+        objc_setAssociatedObject(panel,
+                                 Unmanaged.passUnretained(panel).toOpaque(),
+                                 closeInterceptor,
+                                 .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
         let rootView = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 420))
         rootView.wantsLayer = true
         rootView.layer?.backgroundColor = panelBackground.cgColor
@@ -1163,7 +1189,6 @@ private enum AnimationEventEditorDialog {
             }
         }
 
-        var accepted = false
         final class ModalButtonTarget: NSObject {
             var onPress: (() -> Void)?
             @objc func press(_ sender: Any?) { onPress?() }
@@ -1171,6 +1196,7 @@ private enum AnimationEventEditorDialog {
         let okTarget = ModalButtonTarget()
         okTarget.onPress = {
             accepted = true
+            modalResolved = true
             panel.makeFirstResponder(nil)
             NSApp.stopModal()
             panel.close()
@@ -1178,6 +1204,7 @@ private enum AnimationEventEditorDialog {
         let cancelTarget = ModalButtonTarget()
         cancelTarget.onPress = {
             accepted = false
+            modalResolved = true
             panel.makeFirstResponder(nil)
             NSApp.stopModal()
             panel.close()

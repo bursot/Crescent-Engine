@@ -60,7 +60,7 @@ public:
         , m_EnableSprint(true)
         , m_DriveCharacterController(true)
         , m_UseCharacterFireAnimation(false)
-        , m_DebugLogging(true) {
+        , m_DebugLogging(false) {
     }
 
     float getMouseSensitivity() const { return m_MouseSensitivity; }
@@ -475,6 +475,23 @@ private:
         return std::max(0.01f, center + nextAudioJitter(amplitude));
     }
 
+    AudioBus resolveEventBus(const AnimationEvent& event) const {
+        std::string tag = getEventTagLower(event);
+        if (ContainsAnyToken(tag, {"vocal", "grunt", "man", "voice"})) {
+            return AudioBus::Vocal;
+        }
+        if (ContainsAnyToken(tag, {"ui"})) {
+            return AudioBus::UI;
+        }
+        if (ContainsAnyToken(tag, {"music"})) {
+            return AudioBus::Music;
+        }
+        if (ContainsAnyToken(tag, {"ambience", "ambient"})) {
+            return AudioBus::Ambience;
+        }
+        return AudioBus::SFX;
+    }
+
     bool playConfiguredEventAudio(const AnimationEvent& event,
                                   const std::string& fallbackPath,
                                   bool directional) {
@@ -488,8 +505,9 @@ private:
 
         float volume = std::max(0.0f, event.volume);
         float pitch = resolveEventPitch(event);
+        AudioBus bus = resolveEventBus(event);
         if (!event.spatial) {
-            return AudioSystem::getInstance().playOneShot(path, volume, pitch);
+            return AudioSystem::getInstance().playOneShot(path, bus, volume, pitch);
         }
         if (directional) {
             Math::Vector3 forward = m_BodyTransform ? FlattenDirection(m_BodyTransform->forward()) : Math::Vector3(0.0f, 0.0f, -1.0f);
@@ -497,6 +515,7 @@ private:
                 path,
                 getAudioOrigin(1.1f),
                 forward,
+                bus,
                 volume,
                 pitch,
                 1.2f,
@@ -510,6 +529,7 @@ private:
         return AudioSystem::getInstance().playOneShot3D(
             path,
             getAudioOrigin(ContainsAnyToken(ToLower(event.name), {"jump"}) ? 1.0f : 1.15f),
+            bus,
             volume,
             pitch,
             1.0f,
@@ -995,6 +1015,21 @@ private:
         for (const auto& evt : firedEvents) {
             dispatchClipEvent(evt, m_EventClipIndex);
         }
+    }
+
+    void processAnimatorFiredEvents(Animator* animator) {
+        if (!animator) {
+            return;
+        }
+        const auto& fired = animator->getFiredEvents();
+        if (fired.empty()) {
+            return;
+        }
+        int clipIndex = m_ActionClipIndex >= 0 ? m_ActionClipIndex : m_EventClipIndex;
+        for (const auto& evt : fired) {
+            dispatchClipEvent(evt, clipIndex);
+        }
+        animator->clearFiredEvents();
     }
 
     static bool shouldRestartActionOnEntry(AnimAction action) {
@@ -2551,22 +2586,33 @@ private:
         m_ActionClipIndex = clipIndex;
         m_ActionDuration = resolveClipDuration(clipIndex);
         m_ActionElapsed = 0.0f;
-        float playbackSpeed = 1.0f;
+        float playbackSpeed = resolveActionPlaybackSpeed(action, clipIndex);
         float blendDuration = 0.0f;
-        if (action == AnimAction::Jump) {
-            playbackSpeed = 1.75f;
-        } else if (action == AnimAction::Fall) {
-            playbackSpeed = 1.3f;
-        } else if (action == AnimAction::Equip || action == AnimAction::Disarm) {
+        if (action == AnimAction::Equip || action == AnimAction::Disarm) {
             playbackSpeed = 1.2f;
             blendDuration = 0.05f;
         } else if (action == AnimAction::Fire && isMeleeAttackClipIndex(clipIndex)) {
-            playbackSpeed = 1.85f;
             blendDuration = 0.06f;
         }
         m_ActionPlaybackSpeed = playbackSpeed;
         configureClipEventPlayback(clipIndex, looping, playbackSpeed, restart);
         setTargetsClip(clipIndex, stateIndex, looping, restart, playbackSpeed, blendDuration);
+    }
+
+    float resolveActionPlaybackSpeed(AnimAction action, int clipIndex) const {
+        if (action == AnimAction::Jump) {
+            return 1.75f;
+        }
+        if (action == AnimAction::Fall) {
+            return 1.3f;
+        }
+        if (action == AnimAction::Equip || action == AnimAction::Disarm) {
+            return 1.2f;
+        }
+        if (action == AnimAction::Fire && isMeleeAttackClipIndex(clipIndex)) {
+            return 1.85f;
+        }
+        return 1.0f;
     }
 
     bool isActionClipFinished() const {
@@ -2843,7 +2889,6 @@ private:
             m_PendingMeleeAttackAudioClipIndex = -1;
             m_PendingMeleeAttackAudioTriggerTime = 0.0f;
         }
-        processClipEvents(deltaTime);
         flushMeleeAttackAudio();
         if (m_JumpAnimationLockTimer > 0.0f) {
             m_JumpAnimationLockTimer = std::max(0.0f, m_JumpAnimationLockTimer - deltaTime);
@@ -2888,6 +2933,11 @@ private:
         }
 
         Animator* activeAnimator = (m_Animator && m_Animator->isEnabled() && !m_ManualAirborneClipOverride) ? m_Animator : nullptr;
+        if (activeAnimator) {
+            processAnimatorFiredEvents(activeAnimator);
+        } else {
+            processClipEvents(deltaTime);
+        }
 
         if (activeAnimator) {
             resolveAnimatorParameters();
@@ -3137,6 +3187,14 @@ private:
         } else if (hasDirectionalAnimator && (rising || falling) && clipIndex >= 0) {
             bool restartAction = shouldRestartActionOnEntry(movementAction) && (movementAction != m_AnimState);
             startAction(movementAction, clipIndex, stateIndex, false, restartAction);
+        } else if (hasDirectionalAnimator && clipIndex >= 0) {
+            bool looping = movementAction != AnimAction::Jump && movementAction != AnimAction::Fall &&
+                           movementAction != AnimAction::Fire && movementAction != AnimAction::Reload;
+            bool restartEvents = (clipIndex != m_EventClipIndex);
+            configureClipEventPlayback(clipIndex,
+                                       looping,
+                                       resolveActionPlaybackSpeed(movementAction, clipIndex),
+                                       restartEvents);
         }
 
         m_PreviousGrounded = grounded;

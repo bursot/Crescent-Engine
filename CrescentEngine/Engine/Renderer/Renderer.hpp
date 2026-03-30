@@ -198,6 +198,7 @@ public:
         std::string cookedIBLPath;
         int skyMode = 0; // 0 = Procedural, 1 = HDRI
         bool autoSunColor = true;
+        int shadowDebugMode = 0;
     };
     
     EnvironmentSettings& getEnvironmentSettings() { return m_environmentSettings; }
@@ -219,6 +220,7 @@ public:
     void setEnvironmentSkyboxVisible(bool visible);
     void setEnvironmentSkyMode(int mode);
     void setEnvironmentAutoSunColor(bool enabled);
+    void setShadowDebugMode(int mode);
     void setColorGradingLUT(const std::string& path);
     std::string getEnvironmentPath() const { return m_environmentSettings.sourcePath; }
 

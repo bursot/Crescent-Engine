@@ -2252,6 +2252,7 @@ struct AudioInspector: View {
     @State private var looping: Bool = false
     @State private var playOnStart: Bool = false
     @State private var spatial: Bool = true
+    @State private var bus: String = "SFX"
     @State private var stream: Bool = false
     @State private var minDistance: Float = 1.0
     @State private var maxDistance: Float = 50.0
@@ -2360,6 +2361,26 @@ struct AudioInspector: View {
                     }))
                 .font(EditorTheme.font(size: 11, weight: .medium))
 
+                HStack {
+                    Text("Bus")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { bus },
+                        set: { newVal in
+                            bus = newVal
+                            pushAudioSource()
+                        })) {
+                        Text("SFX").tag("SFX")
+                        Text("Vocal").tag("Vocal")
+                        Text("Music").tag("Music")
+                        Text("Ambience").tag("Ambience")
+                        Text("UI").tag("UI")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 120)
+                }
+
                 Toggle("Stream From Disk", isOn: Binding(
                     get: { stream },
                     set: { newVal in
@@ -2401,6 +2422,7 @@ struct AudioInspector: View {
             looping = (info["looping"] as? NSNumber)?.boolValue ?? looping
             playOnStart = (info["playOnStart"] as? NSNumber)?.boolValue ?? playOnStart
             spatial = (info["spatial"] as? NSNumber)?.boolValue ?? spatial
+            bus = info["bus"] as? String ?? bus
             stream = (info["stream"] as? NSNumber)?.boolValue ?? stream
             minDistance = (info["minDistance"] as? NSNumber)?.floatValue ?? minDistance
             maxDistance = (info["maxDistance"] as? NSNumber)?.floatValue ?? maxDistance
@@ -2413,6 +2435,7 @@ struct AudioInspector: View {
             looping = false
             playOnStart = false
             spatial = true
+            bus = "SFX"
             stream = false
             minDistance = 1.0
             maxDistance = 50.0
@@ -2428,6 +2451,7 @@ struct AudioInspector: View {
             "looping": looping,
             "playOnStart": playOnStart,
             "spatial": spatial,
+            "bus": bus,
             "stream": stream,
             "minDistance": minDistance,
             "maxDistance": maxDistance,

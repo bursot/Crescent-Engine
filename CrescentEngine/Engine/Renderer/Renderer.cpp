@@ -560,7 +560,7 @@ struct EnvironmentUniformsGPU {
     Math::Vector4 ambientColorIntensity; // ambient color rgb, ambient intensity
     Math::Vector4 colorControl;      // tint rgb, saturation
     Math::Vector4 toneControl;       // contrast, unused, skyboxVisible flag, padding
-    Math::Vector4 skyParams;         // skyMode, reserved
+    Math::Vector4 skyParams;         // skyMode, shadowDebugMode, reserved
     Math::Vector4 rot0;
     Math::Vector4 rot1;
     Math::Vector4 rot2;
@@ -3308,14 +3308,14 @@ void Renderer::ensureFogVolume(uint32_t width, uint32_t height, int quality) {
     }
 
     int clampedQuality = std::max(0, std::min(2, quality));
-    float scale = 0.25f;
-    uint32_t depth = 64;
+    float scale = 0.35f;
+    uint32_t depth = 80;
     if (clampedQuality == 0) {
         scale = 0.2f;
         depth = 32;
     } else if (clampedQuality == 2) {
-        scale = 0.5f;
-        depth = 96;
+        scale = 0.6f;
+        depth = 128;
     }
 
     uint32_t desiredWidth = std::max(1u, static_cast<uint32_t>(std::round(width * scale)));
@@ -6598,12 +6598,15 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             float sunDelta = std::acos(Math::Clamp(sunDirNorm.dot(m_prevFogSunDir), -1.0f, 1.0f));
             float intensityDelta = std::abs(sunIntensity - m_prevFogSunIntensity);
 
-            if (posDelta > 0.05f || rotDelta > 0.02f || sunDelta > 0.01f || intensityDelta > 0.1f) {
+            // Only fully invalidate fog history on large jumps/cuts. Small camera
+            // motion should keep history alive and just reduce its weight; otherwise
+            // the raw froxel grid becomes visible during normal play.
+            if (posDelta > 1.25f || rotDelta > 0.28f || sunDelta > 0.08f || intensityDelta > 0.5f) {
                 m_fogVolumeHistoryValid = false;
             }
             historyValid = m_fogVolumeHistoryValid ? 1.0f : 0.0f;
             if (historyValid > 0.5f) {
-                float motionScore = posDelta * 8.0f + rotDelta * 5.0f + sunDelta * 3.0f + intensityDelta * 0.05f;
+                float motionScore = posDelta * 1.75f + rotDelta * 2.5f + sunDelta * 1.5f + intensityDelta * 0.05f;
                 float historyScale = Math::Clamp(1.0f - motionScore, 0.0f, 1.0f);
                 historyWeight *= historyScale;
             } else {
@@ -7332,7 +7335,7 @@ void Renderer::updateEnvironmentUniforms() {
     );
     env->skyParams = Math::Vector4(
         static_cast<float>(m_environmentSettings.skyMode),
-        0.0f,
+        static_cast<float>(m_environmentSettings.shadowDebugMode),
         0.0f,
         0.0f
     );
@@ -7532,6 +7535,10 @@ void Renderer::setEnvironmentSkyMode(int mode) {
 
 void Renderer::setEnvironmentAutoSunColor(bool enabled) {
     m_environmentSettings.autoSunColor = enabled;
+}
+
+void Renderer::setShadowDebugMode(int mode) {
+    m_environmentSettings.shadowDebugMode = Math::Clamp(mode, 0, 5);
 }
 
 void Renderer::setColorGradingLUT(const std::string& path) {

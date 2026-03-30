@@ -402,6 +402,7 @@ void Scene::applySettings() {
     renderer->setEnvironmentSkyboxVisible(env.skyboxVisible);
     renderer->setEnvironmentSkyMode(env.skyMode);
     renderer->setEnvironmentAutoSunColor(env.autoSunColor);
+    renderer->setShadowDebugMode(m_Settings.postProcess.shadowDebugMode);
     renderer->setColorGradingLUT(m_Settings.postProcess.colorGradingLUT);
     renderer->applyQualitySettings(quality);
 }

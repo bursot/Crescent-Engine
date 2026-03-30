@@ -307,19 +307,10 @@ void LightingSystem::buildDirectionalCascades(const PreparedLight& light, Camera
 
         Math::Matrix4x4 proj = Math::Matrix4x4::Orthographic(minX, maxX, minY, maxY, lightNear, lightFar);
 
-        // Final clip-space snap keeps the whole light matrix locked to shadow texels.
+        // The light-space center snap above already stabilizes the cascade.
+        // A second clip-space snap was over-constraining the cascade transform
+        // and causing visible split-aligned blocks on large flat receivers.
         Math::Matrix4x4 viewProj = proj * view;
-        Math::Vector4 shadowOrigin = viewProj * Math::Vector4(0.0f, 0.0f, 0.0f, 1.0f);
-        float texelScale = static_cast<float>(cascadeRes) * 0.5f;
-        shadowOrigin.x *= texelScale;
-        shadowOrigin.y *= texelScale;
-        float roundedX = std::round(shadowOrigin.x);
-        float roundedY = std::round(shadowOrigin.y);
-        float offsetX = (roundedX - shadowOrigin.x) * (2.0f / static_cast<float>(cascadeRes));
-        float offsetY = (roundedY - shadowOrigin.y) * (2.0f / static_cast<float>(cascadeRes));
-        proj(0, 3) += offsetX;
-        proj(1, 3) += offsetY;
-        viewProj = proj * view;
         
         CascadedSlice slice;
         slice.view = view;
@@ -388,13 +379,13 @@ void LightingSystem::allocateShadows() {
             ShadowGPUData gpuShadow{};
             float farPlane = std::min(light->getShadowFarPlane(), light->getRange());
             farPlane = std::max(farPlane, 0.1f);
-            float nearPlane = std::max(0.01f, light->getShadowNearPlane());
+            float nearPlane = std::max(0.1f, light->getShadowNearPlane());
             nearPlane = std::min(nearPlane, farPlane - 0.05f);
             float texelWorld = (2.0f * farPlane) / static_cast<float>(res);
             float depthSpan = std::max(farPlane - nearPlane, 0.1f);
             float normalizedTexel = texelWorld / depthSpan;
-            float bias = std::max(light->getShadowBias(), normalizedTexel * 1.5f);
-            float normalBias = std::max(light->getShadowNormalBias(), normalizedTexel * 2.25f);
+            float bias = std::max(light->getShadowBias(), normalizedTexel * 2.5f);
+            float normalBias = std::max(light->getShadowNormalBias(), normalizedTexel * 3.75f);
             gpuShadow.params = Math::Vector4(bias, normalBias, light->getPenumbra(), 3.0f); // type=point cube
             gpuShadow.depthRange = Math::Vector4(nearPlane, farPlane, static_cast<float>(m_pointCubeCounts[tier]), (float)tier); // cube index in z, tier in w
             gpuShadow.atlasUV = Math::Vector4((float)res, 0.0f, 0.0f, 0.0f); // store resolution

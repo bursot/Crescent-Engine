@@ -421,6 +421,8 @@ struct BuildSceneOptions {
     struct CookedMeshWriter* cookedMeshWriter = nullptr;
 };
 
+using RuntimeSkinnedBankMap = std::unordered_map<std::string, json>;
+
 json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildSceneOptions& options);
 json SerializeMeshData(const Mesh& mesh);
 std::shared_ptr<Mesh> DeserializeMeshData(const json& j);
@@ -1799,6 +1801,7 @@ json SerializeFogSettings(const SceneFogSettings& fog) {
 
 json SerializePostProcessSettings(const ScenePostProcessSettings& post) {
     json j = {
+        {"shadowDebugMode", post.shadowDebugMode},
         {"enabled", post.enabled},
         {"bloom", post.bloom},
         {"bloomIntensity", post.bloomIntensity},
@@ -1963,6 +1966,7 @@ ScenePostProcessSettings DeserializePostProcessSettings(const json& j) {
     if (!j.is_object()) {
         return post;
     }
+    post.shadowDebugMode = j.value("shadowDebugMode", post.shadowDebugMode);
     post.enabled = j.value("enabled", post.enabled);
     post.bloom = j.value("bloom", post.bloom);
     post.bloomIntensity = j.value("bloomIntensity", post.bloomIntensity);
@@ -2580,7 +2584,8 @@ void ApplyEntityComponents(Entity* entity,
                            const std::string& scenePath,
                            TextureLoader* textureLoader,
                            std::unordered_map<std::string, ModelCacheEntry>& modelCache,
-                           std::unordered_map<std::string, std::shared_ptr<Mesh>>& cookedMeshCache);
+                           std::unordered_map<std::string, std::shared_ptr<Mesh>>& cookedMeshCache,
+                           const RuntimeSkinnedBankMap* runtimeSkinnedBanks);
 
 bool EnvEnabled(const char* key) {
     const char* value = std::getenv(key);
@@ -2588,6 +2593,12 @@ bool EnvEnabled(const char* key) {
         return false;
     }
     return !(value[0] == '0' && value[1] == '\0');
+}
+
+void StartupLog(const std::string& message) {
+    if (EnvEnabled("CRESCENT_RUNTIME_STARTUP_LOG")) {
+        std::cout << "[RuntimeStartup] " << message << std::endl;
+    }
 }
 
 bool HasCookedMeshPayload(const json& components) {
@@ -2621,6 +2632,7 @@ bool DeserializeSceneRoot(Scene* scene, const json& root, const std::string& sce
     if (!scene || !root.is_object()) {
         return false;
     }
+    auto deserializeStart = std::chrono::steady_clock::now();
 
     if (root.contains("assetRoot")) {
         AssetDatabase& db = AssetDatabase::getInstance();
@@ -2693,13 +2705,22 @@ bool DeserializeSceneRoot(Scene* scene, const json& root, const std::string& sce
     TextureLoader* textureLoader = renderer ? renderer->getTextureLoader() : nullptr;
     std::unordered_map<std::string, ModelCacheEntry> modelCache;
     std::unordered_map<std::string, std::shared_ptr<Mesh>> cookedMeshCache;
+    RuntimeSkinnedBankMap runtimeSkinnedBanks;
 
+    if (root.contains("runtimeSkinnedBanks") && root["runtimeSkinnedBanks"].is_object()) {
+        for (auto it = root["runtimeSkinnedBanks"].begin(); it != root["runtimeSkinnedBanks"].end(); ++it) {
+            runtimeSkinnedBanks[it.key()] = it.value();
+        }
+    }
+
+    size_t appliedEntityCount = 0;
     for (auto& [uuid, record] : records) {
         if (!record.entity) {
             continue;
         }
         record.entity->setEditorOnly(record.editorOnly);
-        ApplyEntityComponents(record.entity, record.components, scene, scenePath, textureLoader, modelCache, cookedMeshCache);
+        ApplyEntityComponents(record.entity, record.components, scene, scenePath, textureLoader, modelCache, cookedMeshCache, &runtimeSkinnedBanks);
+        ++appliedEntityCount;
     }
 
     if (wasActive) {
@@ -2712,6 +2733,11 @@ bool DeserializeSceneRoot(Scene* scene, const json& root, const std::string& sce
         }
     }
 
+    auto deserializeMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - deserializeStart).count();
+    StartupLog("DeserializeSceneRoot entities=" + std::to_string(appliedEntityCount) +
+               " modelCaches=" + std::to_string(modelCache.size()) +
+               " cookedMeshes=" + std::to_string(cookedMeshCache.size()) +
+               " in " + std::to_string(deserializeMs) + "ms");
     return true;
 }
 
@@ -2804,10 +2830,13 @@ bool SceneSerializer::LoadScene(Scene* scene, const std::string& path) {
     if (!scene) {
         return false;
     }
+    auto loadStart = std::chrono::steady_clock::now();
     std::string resolvedPath = ResolveSceneLoadPath(path);
     if (resolvedPath.empty()) {
+        StartupLog("LoadScene resolve failed for path: " + path);
         return false;
     }
+    StartupLog("LoadScene path: " + resolvedPath);
     std::filesystem::path scenePath(resolvedPath);
     if (scenePath.extension() == ".ccscene") {
         std::ifstream in(resolvedPath, std::ios::binary);
@@ -2815,14 +2844,20 @@ bool SceneSerializer::LoadScene(Scene* scene, const std::string& path) {
             return false;
         }
         std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        return DeserializeSceneBinary(scene, data, resolvedPath);
+        bool ok = DeserializeSceneBinary(scene, data, resolvedPath);
+        auto loadMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - loadStart).count();
+        StartupLog("LoadSceneBinary done in " + std::to_string(loadMs) + "ms");
+        return ok;
     }
     std::ifstream in(resolvedPath);
     if (!in.is_open()) {
         return false;
     }
     std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    return DeserializeScene(scene, data, resolvedPath);
+    bool ok = DeserializeScene(scene, data, resolvedPath);
+    auto loadMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - loadStart).count();
+    StartupLog("LoadSceneText done in " + std::to_string(loadMs) + "ms");
+    return ok;
 }
 
 namespace {
@@ -2893,7 +2928,8 @@ void ApplyEntityComponents(Entity* entity,
                            const std::string& scenePath,
                            TextureLoader* textureLoader,
                            std::unordered_map<std::string, ModelCacheEntry>& modelCache,
-                           std::unordered_map<std::string, std::shared_ptr<Mesh>>& cookedMeshCache) {
+                           std::unordered_map<std::string, std::shared_ptr<Mesh>>& cookedMeshCache,
+                           const RuntimeSkinnedBankMap* runtimeSkinnedBanks) {
     if (!entity) {
         return;
     }
@@ -2961,7 +2997,10 @@ void ApplyEntityComponents(Entity* entity,
         std::string cacheKey = MakeModelCacheKey(modelMeshReference->getSourcePath(), modelMeshReference->getImportOptions());
         auto it = modelCache.find(cacheKey);
         if (it == modelCache.end()) {
+            auto modelCacheStart = std::chrono::steady_clock::now();
             modelCache[cacheKey] = BuildModelCache(modelMeshReference->getSourcePath(), modelMeshReference->getImportOptions());
+            auto modelCacheMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - modelCacheStart).count();
+            StartupLog("BuildModelCache " + modelMeshReference->getSourcePath() + " in " + std::to_string(modelCacheMs) + "ms");
             it = modelCache.find(cacheKey);
         }
         const ModelCacheEntry& cache = it->second;
@@ -3153,7 +3192,8 @@ void ApplyEntityComponents(Entity* entity,
     if (components.contains("SkinnedMeshRenderer")) {
         const json& s = components["SkinnedMeshRenderer"];
         if (!skinnedRenderer && (s.contains("mesh") || s.contains("meshRef") ||
-                                 s.contains("skeleton") || s.contains("animationClips"))) {
+                                 s.contains("skeleton") || s.contains("animationClips") ||
+                                 s.contains("runtimeBankRef"))) {
             skinnedRenderer = entity->addComponent<SkinnedMeshRenderer>();
         }
         if (skinnedRenderer && s.contains("meshRef")) {
@@ -3173,15 +3213,27 @@ void ApplyEntityComponents(Entity* entity,
                 meshRenderer->setMesh(mesh);
             }
         }
-        if (skinnedRenderer && s.contains("skeleton")) {
-            if (auto skeleton = DeserializeSkeletonData(s["skeleton"])) {
+        const json* skinnedPayload = &s;
+        json resolvedRuntimeBank;
+        if (skinnedRenderer && s.contains("runtimeBankRef") && runtimeSkinnedBanks) {
+            std::string bankKey = s.value("runtimeBankRef", std::string());
+            if (!bankKey.empty()) {
+                auto bankIt = runtimeSkinnedBanks->find(bankKey);
+                if (bankIt != runtimeSkinnedBanks->end()) {
+                    resolvedRuntimeBank = bankIt->second;
+                    skinnedPayload = &resolvedRuntimeBank;
+                }
+            }
+        }
+        if (skinnedRenderer && skinnedPayload->contains("skeleton")) {
+            if (auto skeleton = DeserializeSkeletonData((*skinnedPayload)["skeleton"])) {
                 skinnedRenderer->setSkeleton(skeleton);
             }
         }
-        if (skinnedRenderer && s.contains("animationClips") && s["animationClips"].is_array()) {
+        if (skinnedRenderer && skinnedPayload->contains("animationClips") && (*skinnedPayload)["animationClips"].is_array()) {
             std::vector<std::shared_ptr<AnimationClip>> clips;
-            clips.reserve(s["animationClips"].size());
-            for (const auto& clipData : s["animationClips"]) {
+            clips.reserve((*skinnedPayload)["animationClips"].size());
+            for (const auto& clipData : (*skinnedPayload)["animationClips"]) {
                 clips.push_back(DeserializeAnimationClipData(clipData));
             }
             skinnedRenderer->setAnimationClips(clips);
@@ -3592,6 +3644,9 @@ void ApplyEntityComponents(Entity* entity,
         audio->setLooping(a.value("looping", audio->isLooping()));
         audio->setPlayOnStart(a.value("playOnStart", audio->getPlayOnStart()));
         audio->setSpatial(a.value("spatial", audio->isSpatial()));
+        if (a.contains("bus") && a["bus"].is_string()) {
+            audio->setBus(AudioSystem::audioBusFromString(a["bus"].get<std::string>()));
+        }
         audio->setMinDistance(a.value("minDistance", audio->getMinDistance()));
         audio->setMaxDistance(a.value("maxDistance", audio->getMaxDistance()));
         audio->setRolloff(a.value("rolloff", audio->getRolloff()));
@@ -3732,6 +3787,7 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
         root["runtimeCooked"] = true;
     }
     json entities = json::array();
+    RuntimeSkinnedBankMap runtimeSkinnedBanks;
 
     if (!scene) {
         root["entities"] = entities;
@@ -3916,20 +3972,32 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                         skinnedData["mesh"] = SerializeMeshData(*mesh);
                     }
                 }
-                if (auto skeleton = skinned->getSkeleton()) {
-                    skinnedData["skeleton"] = SerializeSkeletonData(*skeleton);
+                std::string runtimeBankKey;
+                if (modelMeshReference && !modelMeshReference->getSourcePath().empty()) {
+                    runtimeBankKey = "model:" + MakeModelCacheKey(modelMeshReference->getSourcePath(),
+                                                                  modelMeshReference->getImportOptions());
+                } else {
+                    runtimeBankKey = "entity:" + entity->getUUID().toString();
                 }
-                const auto& clips = skinned->getAnimationClips();
-                if (!clips.empty()) {
-                    json clipData = json::array();
-                    for (const auto& clip : clips) {
-                        if (clip) {
-                            clipData.push_back(SerializeAnimationClipData(*clip));
-                        } else {
-                            clipData.push_back(json::object());
-                        }
+                skinnedData["runtimeBankRef"] = runtimeBankKey;
+                if (runtimeSkinnedBanks.find(runtimeBankKey) == runtimeSkinnedBanks.end()) {
+                    json bank = json::object();
+                    if (auto skeleton = skinned->getSkeleton()) {
+                        bank["skeleton"] = SerializeSkeletonData(*skeleton);
                     }
-                    skinnedData["animationClips"] = clipData;
+                    const auto& clips = skinned->getAnimationClips();
+                    if (!clips.empty()) {
+                        json clipData = json::array();
+                        for (const auto& clip : clips) {
+                            if (clip) {
+                                clipData.push_back(SerializeAnimationClipData(*clip));
+                            } else {
+                                clipData.push_back(json::object());
+                            }
+                        }
+                        bank["animationClips"] = clipData;
+                    }
+                    runtimeSkinnedBanks[runtimeBankKey] = std::move(bank);
                 }
             } else {
                 const auto& sources = skinned->getAnimationClipSources();
@@ -3963,7 +4031,14 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 for (const auto& evt : events) {
                     eventsJson.push_back({
                         {"time", evt.time},
-                        {"name", evt.name}
+                        {"name", evt.name},
+                        {"eventType", evt.eventType},
+                        {"eventTag", evt.eventTag},
+                        {"payload", evt.payload},
+                        {"volume", evt.volume},
+                        {"pitchMin", evt.pitchMin},
+                        {"pitchMax", evt.pitchMax},
+                        {"spatial", evt.spatial}
                     });
                 }
                 clipEvents.push_back({
@@ -4248,6 +4323,7 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 {"looping", audio->isLooping()},
                 {"playOnStart", audio->getPlayOnStart()},
                 {"spatial", audio->isSpatial()},
+                {"bus", AudioSystem::audioBusToString(audio->getBus())},
                 {"stream", audio->isStreaming()},
                 {"minDistance", audio->getMinDistance()},
                 {"maxDistance", audio->getMaxDistance()},
@@ -4368,6 +4444,13 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
     }
 
     root["entities"] = entities;
+    if (!runtimeSkinnedBanks.empty()) {
+        json banks = json::object();
+        for (const auto& [key, value] : runtimeSkinnedBanks) {
+            banks[key] = value;
+        }
+        root["runtimeSkinnedBanks"] = std::move(banks);
+    }
 
     if (options.includeAssetRoot) {
         AssetDatabase& db = AssetDatabase::getInstance();
@@ -4470,7 +4553,11 @@ bool SceneSerializer::DeserializeSceneBinary(Scene* scene, const std::vector<uin
     if (!scene || data.empty()) {
         return false;
     }
+    auto parseStart = std::chrono::steady_clock::now();
+    StartupLog("DeserializeSceneBinary bytes=" + std::to_string(data.size()));
     json root = json::from_msgpack(data, true, false);
+    auto parseMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - parseStart).count();
+    StartupLog("ParseSceneBinary msgpack in " + std::to_string(parseMs) + "ms");
     if (root.is_discarded() || !root.is_object()) {
         return false;
     }
@@ -4729,7 +4816,7 @@ std::vector<Entity*> SceneSerializer::DuplicateEntities(Scene* scene, const std:
             continue;
         }
         record.entity->setEditorOnly(record.editorOnly);
-        ApplyEntityComponents(record.entity, record.components, scene, "", textureLoader, modelCache, cookedMeshCache);
+        ApplyEntityComponents(record.entity, record.components, scene, "", textureLoader, modelCache, cookedMeshCache, nullptr);
     }
 
     for (auto& [uuid, record] : records) {

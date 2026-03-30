@@ -346,6 +346,7 @@ final class SceneSettingsViewModel: ObservableObject {
     @Published var fogQuality: Int = 1
     
     @Published var postEnabled: Bool = true
+    @Published var shadowDebugMode: Int = 0
     @Published var bloom: Bool = false
     @Published var bloomIntensity: Double = 0.8
     @Published var bloomThreshold: Double = 1.0
@@ -443,6 +444,7 @@ final class SceneSettingsViewModel: ObservableObject {
             fogQuality = fog["volumetricQuality"] as? Int ?? fogQuality
         }
         if let post = dict["postProcess"] as? [String: Any] {
+            shadowDebugMode = post["shadowDebugMode"] as? Int ?? shadowDebugMode
             postEnabled = post["enabled"] as? Bool ?? postEnabled
             bloom = post["bloom"] as? Bool ?? bloom
             bloomIntensity = post["bloomIntensity"] as? Double ?? bloomIntensity
@@ -526,6 +528,7 @@ final class SceneSettingsViewModel: ObservableObject {
                 "volumetricQuality": fogQuality
             ],
             "postProcess": [
+                "shadowDebugMode": shadowDebugMode,
                 "enabled": postEnabled,
                 "bloom": bloom,
                 "bloomIntensity": bloomIntensity,
@@ -995,6 +998,19 @@ private struct SceneSettingsPanel: View {
             }
             
             SettingsGroup(title: "Post-Process") {
+                SettingsRow(title: "Shadow Debug") {
+                    Picker("", selection: $viewModel.shadowDebugMode) {
+                        Text("Off").tag(0)
+                        Text("Raw Shadow").tag(1)
+                        Text("Directional Only").tag(2)
+                        Text("Point Only").tag(3)
+                        Text("Cascade Index").tag(4)
+                        Text("Point Face").tag(5)
+                    }
+                    .frame(width: 220)
+                    .onChange(of: viewModel.shadowDebugMode) { _ in viewModel.apply() }
+                }
+
                 Toggle("Enabled", isOn: $viewModel.postEnabled)
                     .onChange(of: viewModel.postEnabled) { _ in viewModel.apply() }
                 

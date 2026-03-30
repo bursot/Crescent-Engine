@@ -82,6 +82,14 @@ void AudioSource::setStreaming(bool value) {
     loadSound();
 }
 
+void AudioSource::setBus(AudioBus value) {
+    if (m_Bus == value) {
+        return;
+    }
+    m_Bus = value;
+    loadSound();
+}
+
 void AudioSource::setMinDistance(float value) {
     m_MinDistance = std::max(0.01f, value);
     if (m_MaxDistance < m_MinDistance) {
@@ -156,7 +164,12 @@ bool AudioSource::loadSound() {
 
     m_Sound = new ma_sound();
     ma_uint32 flags = m_Stream ? MA_SOUND_FLAG_STREAM : MA_SOUND_FLAG_DECODE;
-    ma_result result = ma_sound_init_from_file(engine, m_FilePath.c_str(), flags, NULL, NULL, m_Sound);
+    ma_result result = ma_sound_init_from_file(engine,
+                                               m_FilePath.c_str(),
+                                               flags,
+                                               audio.getBusGroup(m_Bus),
+                                               NULL,
+                                               m_Sound);
     if (result != MA_SUCCESS) {
         std::cerr << "Failed to load audio: " << m_FilePath << " (" << result << ")" << std::endl;
         delete m_Sound;

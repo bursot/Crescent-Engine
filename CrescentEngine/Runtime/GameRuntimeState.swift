@@ -252,11 +252,17 @@ final class GameRuntimeState: ObservableObject {
     private var graphicsSettingsStorageKey = "crescent.runtime.graphics.default"
     private var pendingGraphicsApplyWorkItem: DispatchWorkItem?
 
+    private func startupLog(_ message: String) {
+        print("[RuntimeStartup] \(message)")
+    }
+
     func bootstrapIfNeeded() {
         guard !didBootstrap else {
             return
         }
         didBootstrap = true
+        let bootstrapStart = ProcessInfo.processInfo.systemUptime
+        setenv("CRESCENT_RUNTIME_STARTUP_LOG", "1", 1)
 
         let bridge = AppBridge.shared()
         guard let resourceURL = Bundle.main.resourceURL else {
@@ -270,6 +276,8 @@ final class GameRuntimeState: ObservableObject {
             setenv("CRESCENT_REQUIRE_COOKED_TEXTURES", "1", 1)
             setenv("CRESCENT_PREFER_COOKED_SCENES", "1", 1)
             setenv("CRESCENT_REQUIRE_COOKED_SCENES", "1", 1)
+            setenv("CRESCENT_SKIP_ASSET_RESCAN", "1", 1)
+            setenv("CRESCENT_DIRECT_RUNTIME_PLAY", "1", 1)
         }
         let bundledProjectURL = gameDataURL.appendingPathComponent("Project.cproj")
         guard FileManager.default.fileExists(atPath: bundledProjectURL.path) else {
@@ -277,10 +285,12 @@ final class GameRuntimeState: ObservableObject {
             return
         }
 
+        let openProjectStart = ProcessInfo.processInfo.systemUptime
         guard bridge.openProject(path: bundledProjectURL.path) else {
             fail("Bundled project could not be opened.")
             return
         }
+        startupLog(String(format: "openProject %.3fs", ProcessInfo.processInfo.systemUptime - openProjectStart))
 
         let settings = bridge.getProjectSettings() as? [String: Any] ?? [:]
         if let productName = settings["productName"] as? String, !productName.isEmpty {
@@ -306,10 +316,13 @@ final class GameRuntimeState: ObservableObject {
             return
         }
 
+        startupLog("startupScene \(sceneURL.lastPathComponent)")
+        let loadSceneStart = ProcessInfo.processInfo.systemUptime
         guard bridge.loadScene(path: sceneURL.path) else {
             fail("Startup scene could not be loaded.")
             return
         }
+        startupLog(String(format: "loadScene %.3fs", ProcessInfo.processInfo.systemUptime - loadSceneStart))
 
         let sceneSettings = bridge.getSceneSettings() as? [String: Any] ?? [:]
         sceneDefaultGraphicsSettings = RuntimeGraphicsSettings(sceneSettings: sceneSettings)
@@ -320,9 +333,12 @@ final class GameRuntimeState: ObservableObject {
         commitGraphicsSettings(graphicsSettings, persist: false)
 
         bridge.setViewMode(1)
+        let enterPlayStart = ProcessInfo.processInfo.systemUptime
         bridge.enterPlayMode()
+        startupLog(String(format: "enterPlayMode %.3fs", ProcessInfo.processInfo.systemUptime - enterPlayStart))
         isRunning = true
         isLoading = false
+        startupLog(String(format: "bootstrap total %.3fs", ProcessInfo.processInfo.systemUptime - bootstrapStart))
     }
 
     func shutdown() {

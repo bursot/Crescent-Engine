@@ -221,6 +221,7 @@ void SceneManager::enterPlayMode() {
     if (m_IsPlaying || !m_ActiveScene) {
         return;
     }
+    const bool directRuntimePlay = std::getenv("CRESCENT_DIRECT_RUNTIME_PLAY") != nullptr;
     m_EditorSelection.clear();
     const auto& selection = SelectionSystem::getSelection();
     m_EditorSelection.reserve(selection.size());
@@ -229,21 +230,28 @@ void SceneManager::enterPlayMode() {
             m_EditorSelection.push_back(entity->getUUID());
         }
     }
-    m_EditorScene = m_ActiveScene;
-    Scene* runtimeScene = createScene(m_EditorScene->getName() + " (Play)");
-    if (!runtimeScene) {
-        return;
-    }
-    bool preserveCookedRuntimePayloads = std::getenv("CRESCENT_PREFER_COOKED_SCENES") != nullptr ||
-                                         std::getenv("CRESCENT_REQUIRE_COOKED_SCENES") != nullptr;
-    if (preserveCookedRuntimePayloads) {
-        std::vector<uint8_t> snapshot = SceneSerializer::SerializeCookedRuntimeSceneBinary(m_EditorScene, false);
-        SceneSerializer::DeserializeSceneBinary(runtimeScene, snapshot);
+
+    if (directRuntimePlay) {
+        m_EditorScene = nullptr;
+        m_RuntimeScene = m_ActiveScene;
     } else {
-        std::string snapshot = SceneSerializer::SerializeScene(m_EditorScene, false);
-        SceneSerializer::DeserializeScene(runtimeScene, snapshot);
+        m_EditorScene = m_ActiveScene;
+        Scene* runtimeScene = createScene(m_EditorScene->getName() + " (Play)");
+        if (!runtimeScene) {
+            return;
+        }
+        bool preserveCookedRuntimePayloads = std::getenv("CRESCENT_PREFER_COOKED_SCENES") != nullptr ||
+                                             std::getenv("CRESCENT_REQUIRE_COOKED_SCENES") != nullptr;
+        if (preserveCookedRuntimePayloads) {
+            std::vector<uint8_t> snapshot = SceneSerializer::SerializeCookedRuntimeSceneBinary(m_EditorScene, false);
+            SceneSerializer::DeserializeSceneBinary(runtimeScene, snapshot);
+        } else {
+            std::string snapshot = SceneSerializer::SerializeScene(m_EditorScene, false);
+            SceneSerializer::DeserializeScene(runtimeScene, snapshot);
+        }
+        m_RuntimeScene = runtimeScene;
     }
-    m_RuntimeScene = runtimeScene;
+
     m_IsPlaying = true;
     m_IsPaused = false;
     Time::reset();
@@ -262,6 +270,12 @@ void SceneManager::exitPlayMode() {
     m_IsPaused = false;
     Time::setPaused(false);
     m_FixedAccumulator = 0.0f;
+    if (!m_EditorScene) {
+        m_RuntimeScene = nullptr;
+        SelectionSystem::clearSelection();
+        m_EditorSelection.clear();
+        return;
+    }
     if (m_EditorScene) {
         setActiveScene(m_EditorScene);
     }

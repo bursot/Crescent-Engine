@@ -2,6 +2,7 @@
 #include "../Core/UUID.hpp"
 #include "../../../ThirdParty/nlohmann/json.hpp"
 #include <cctype>
+#include <cstdlib>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,15 @@ std::string ToLower(std::string value) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return value;
+}
+
+bool EnvEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return false;
+    }
+    std::string lowered = ToLower(value);
+    return lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
 }
 
 uint64_t ToUnixTimestamp(const std::filesystem::file_time_type& time) {
@@ -99,7 +109,11 @@ AssetDatabase& AssetDatabase::getInstance() {
 
 void AssetDatabase::setRootPath(const std::string& path) {
     m_RootPath = normalizePath(path);
-    rescan();
+    if (!EnvEnabled("CRESCENT_SKIP_ASSET_RESCAN")) {
+        rescan();
+    } else {
+        clear();
+    }
 }
 
 void AssetDatabase::setLibraryPath(const std::string& path) {

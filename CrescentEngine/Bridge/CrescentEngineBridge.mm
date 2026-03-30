@@ -5404,6 +5404,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         };
 
         NSDictionary* postProcess = @{
+            @"shadowDebugMode": @(settings.postProcess.shadowDebugMode),
             @"enabled": @(settings.postProcess.enabled),
             @"bloom": @(settings.postProcess.bloom),
             @"bloomIntensity": @(settings.postProcess.bloomIntensity),
@@ -5583,6 +5584,7 @@ static AnimatorBlendTreeType AnimatorBlendTreeTypeFromString(NSString* type) {
         }
         if (settings[@"postProcess"] && [settings[@"postProcess"] isKindOfClass:[NSDictionary class]]) {
             NSDictionary* post = settings[@"postProcess"];
+            if (post[@"shadowDebugMode"]) updated.postProcess.shadowDebugMode = [post[@"shadowDebugMode"] intValue];
             if (post[@"enabled"]) updated.postProcess.enabled = [post[@"enabled"] boolValue];
             if (post[@"bloom"]) updated.postProcess.bloom = [post[@"bloom"] boolValue];
             if (post[@"bloomIntensity"]) updated.postProcess.bloomIntensity = [post[@"bloomIntensity"] floatValue];
@@ -7699,6 +7701,7 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
             @"looping": @(audio->isLooping()),
             @"playOnStart": @(audio->getPlayOnStart()),
             @"spatial": @(audio->isSpatial()),
+            @"bus": [NSString stringWithUTF8String: AudioSystem::audioBusToString(audio->getBus())],
             @"stream": @(audio->isStreaming()),
             @"minDistance": @(audio->getMinDistance()),
             @"maxDistance": @(audio->getMaxDistance()),
@@ -7735,6 +7738,9 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
         }
         if (NSNumber* spatial = info[@"spatial"]) {
             audio->setSpatial(spatial.boolValue);
+        }
+        if (NSString* bus = info[@"bus"]) {
+            audio->setBus(AudioSystem::audioBusFromString(bus.UTF8String));
         }
         if (NSNumber* stream = info[@"stream"]) {
             audio->setStreaming(stream.boolValue);

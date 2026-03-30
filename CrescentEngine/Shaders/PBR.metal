@@ -129,6 +129,28 @@ struct PostProcessParams {
     float4 params1; // gradingIntensity, toneMapping, inputIsLinear, padding
 };
 
+inline float3 shadowDebugCascadeColor(int cascadeIndex) {
+    switch (cascadeIndex) {
+        case 0: return float3(1.0, 0.2, 0.2);
+        case 1: return float3(0.2, 1.0, 0.2);
+        case 2: return float3(0.2, 0.55, 1.0);
+        case 3: return float3(1.0, 0.85, 0.2);
+        default: return float3(1.0, 0.0, 1.0);
+    }
+}
+
+inline float3 shadowDebugPointFaceColor(int faceIndex) {
+    switch (faceIndex) {
+        case 0: return float3(1.0, 0.2, 0.2);
+        case 1: return float3(0.2, 1.0, 0.2);
+        case 2: return float3(0.2, 0.55, 1.0);
+        case 3: return float3(1.0, 0.85, 0.2);
+        case 4: return float3(1.0, 0.2, 1.0);
+        case 5: return float3(0.2, 1.0, 1.0);
+        default: return float3(1.0, 1.0, 1.0);
+    }
+}
+
 struct TAAParams {
     float4x4 prevViewProjection;
     float4 params0; // texelSize.xy, feedback, historyValid
@@ -617,9 +639,16 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
     float3 n = normalize(normalWS);
     float nDotLPre = saturate(dot(n, normalize(lightDirWS)));
     float receiverScale = isCascade
-        ? mix(0.95, 0.28, nDotLPre)
+        ? mix(0.72, 0.22, nDotLPre)
         : mix(1.2, 0.4, nDotLPre);
-    float receiverOffset = max(s.depthRange.z, 1e-4) * receiverScale;
+    // Keep directional cascades reasonably consistent across splits, but do
+    // not force every split to use the finest cascade texel size. That was
+    // under-biasing far cascades and produced blocky acne on flat receivers.
+    float receiverTexelWorld = s.depthRange.z;
+    if (isCascade) {
+        receiverTexelWorld = min(s.depthRange.z, max(baseTexelWorld * 2.0, baseTexelWorld));
+    }
+    float receiverOffset = max(receiverTexelWorld, 1e-4) * receiverScale;
     float3 samplePos = pos + n * receiverOffset;
     float4 clip = s.viewProj * float4(samplePos, 1.0);
     float3 ndc = clip.xyz / clip.w;
@@ -659,7 +688,7 @@ inline float sampleShadowCascade(const device ShadowGPUData* shadowData,
     // Grow filter footprint mildly with texel size, but keep cascades sharp.
     float cascadeTexelWorld = max(s.depthRange.z, 1e-5);
     float texelRatio = clamp(cascadeTexelWorld / max(baseTexelWorld, 1e-5), 1.0, isCascade ? 1.25 : 3.0);
-    float kernelBase = isCascade ? 0.95 : ((s.params.w < 0.5) ? 1.2 : 1.8);
+    float kernelBase = isCascade ? 0.85 : ((s.params.w < 0.5) ? 1.2 : 1.8);
     float kernelRadius = kernelBase * sqrt(texelRatio);
 
     // ndc.z is already 0..1 for our D3D/Metal-style projections
@@ -747,7 +776,7 @@ float sampleShadow(const device ShadowGPUData* shadowData,
 
         // Keep a wider transition to reduce visible cascade edge shimmer during camera motion.
         float cascadeRange = max(curData.depthRange.y - curData.depthRange.x, 0.001);
-        float blendFactor = 0.35;
+        float blendFactor = 0.18;
         float blendRange = blendFactor * cascadeRange;
         float blendStart = curData.depthRange.y - blendRange;
 
@@ -764,6 +793,24 @@ float sampleShadow(const device ShadowGPUData* shadowData,
     bool allowPCSS_B = usePCSSForThisLight;
     float shadowB = sampleShadowCascade(shadowData, shadowIdx + cascadeB, worldPos, normalWS, lightDirWS, atlas, shadowSampler, allowPCSS_B, useContact, baseTexelWorld, true);
     return mix(shadowA, shadowB, blend);
+}
+
+inline int resolveDirectionalCascadeIndex(const device ShadowGPUData* shadowData,
+                                          int shadowIdx,
+                                          int cascadeCount,
+                                          float viewDepth) {
+    if (cascadeCount <= 1) {
+        return 0;
+    }
+    int current = cascadeCount - 1;
+    for (int c = 0; c < cascadeCount; ++c) {
+        ShadowGPUData s = shadowData[shadowIdx + c];
+        if (viewDepth <= s.depthRange.y) {
+            current = c;
+            break;
+        }
+    }
+    return current;
 }
 
 float samplePointShadow(const device ShadowGPUData* shadowData,
@@ -785,7 +832,7 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
     float3 toLight = lightPosWS - worldPos;
     float nDotL = saturate(dot(normalize(normalWS), normalize(toLight)));
     float texelWorld = (2.0 * farP) / max(s.atlasUV.x, 1.0);
-    float receiverOffset = texelWorld * mix(1.6, 0.55, nDotL);
+    float receiverOffset = texelWorld * mix(2.35, 0.85, nDotL);
     float3 samplePos = worldPos + normalize(normalWS) * receiverOffset;
     float3 toFrag = samplePos - lightPosWS;
     PointShadowProjection proj = projectPointShadowFace(toFrag);
@@ -793,7 +840,7 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
     float ref = saturate((length(toFrag) - nearP) / max(farP - nearP, 1e-5));
     
     float bias = s.params.x;
-    bias += s.params.y * (1.0 - nDotL);
+    bias += s.params.y * (0.65 + 1.1 * (1.0 - nDotL));
     ref = max(ref - bias, 0.0);
     
     uint cubeIndex = (uint)round(s.depthRange.z);
@@ -801,22 +848,26 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
     int t = (int)round(tier);
     depth2d_array<float> cubeTex = (t == 1) ? cube1 : (t == 2 ? cube2 : (t == 3 ? cube3 : cube0));
     float2 texel = 1.0 / float2(cubeTex.get_width(), cubeTex.get_height());
+    float2 worldCell = floor(samplePos.xz / max(texelWorld * 6.0, 0.05));
+    float seed = hash21(worldCell + float2((float)cubeIndex * 7.0 + (float)proj.face,
+                                           lightPosWS.x * 0.13 + lightPosWS.z * 0.07));
+    float randAngle = fract(sin(seed) * 43758.5453) * TWO_PI;
+    float2 rot = float2(cos(randAngle), sin(randAngle));
+    float kernelRadius = clamp(1.35 + s.params.z * 1.15, 1.25, 3.25);
 
-    // 9-tap UV-space PCF on the selected face.
+    // Use a world-anchored Poisson kernel instead of an axis-aligned 3x3 grid.
+    // The old kernel produced very visible rectangular shimmer on flat surfaces.
     float shadow = 0.0;
-    float2 kernelOffsets[9] = {
-        float2(0.0, 0.0),
-        float2(1.0, 0.0), float2(-1.0, 0.0),
-        float2(0.0, 1.0), float2(0.0, -1.0),
-        float2(1.0, 1.0), float2(-1.0, 1.0),
-        float2(1.0, -1.0), float2(-1.0, -1.0)
-    };
-    for (int i = 0; i < 9; ++i) {
-        float2 uv = clamp(proj.uv + kernelOffsets[i] * texel, texel * 0.5, 1.0 - texel * 0.5);
+    float weightSum = 0.0;
+    for (int i = 0; i < 16; ++i) {
+        float2 offset = rotate2(kPoissonDisk16[i], rot) * kernelRadius;
+        float2 uv = clamp(proj.uv + offset * texel, texel * 0.5, 1.0 - texel * 0.5);
         float sampleDepth = cubeTex.sample(shadowFaceDepthSampler, uv, slice);
-        shadow += (ref <= sampleDepth) ? 1.0 : 0.0;
+        float w = 1.0 - saturate(length(kPoissonDisk16[i]) * 0.35);
+        shadow += ((ref <= sampleDepth) ? 1.0 : 0.0) * w;
+        weightSum += w;
     }
-    return shadow / 9.0;
+    return (weightSum > 0.0) ? (shadow / weightSum) : 1.0;
 }
 
 // ============================================================================
@@ -2902,6 +2953,15 @@ fragment float4 fragment_main(
     // Calculate reflectance at normal incidence (dielectric vs metal)
     float3 F0 = float3(0.04);
     F0 = mix(F0, albedo, metallic);
+    int shadowDebugMode = int(round(environment.skyParams.y));
+    float rawShadowAccum = 0.0;
+    float rawShadowWeight = 0.0;
+    float directionalShadowAccum = 0.0;
+    float directionalShadowWeight = 0.0;
+    float pointShadowAccum = 0.0;
+    float pointShadowWeight = 0.0;
+    int debugCascadeIndex = -1;
+    int debugPointFace = -1;
     
     // Reflectance equation
     float3 Lo = float3(0.0);
@@ -2983,6 +3043,8 @@ fragment float4 fragment_main(
                 if (type == 1) {
                     float3 lightPosWS = (camera.viewMatrixInverse * float4(Ld.positionRange.xyz, 1.0)).xyz;
                     ShadowGPUData sLocal = shadowData[shadowIdx];
+                    PointShadowProjection debugProj = projectPointShadowFace(in.worldPosition - lightPosWS);
+                    debugPointFace = debugProj.face;
                     if (kDebugPointShadowView) {
                         float3 toLight = lightPosWS - in.worldPosition;
                         float nDotLDbg = saturate(dot(N, normalize(toLight)));
@@ -3008,7 +3070,17 @@ fragment float4 fragment_main(
                     shadow = samplePointShadow(shadowData, shadowIdx, in.worldPosition, N, lightPosWS, LdirWorld, sLocal.depthRange.w, pointShadowCube0, pointShadowCube1, pointShadowCube2, pointShadowCube3, shadowSampler);
                 } else {
                     float viewDepth = max(-viewPos.z, 0.0);
+                    debugCascadeIndex = resolveDirectionalCascadeIndex(shadowData, shadowIdx, cascadeCount, viewDepth);
                     shadow = sampleShadow(shadowData, shadowIdx, cascadeCount, viewDepth, in.worldPosition, N, LdirWorld, shadowAtlas, shadowSampler, usePCSS, useContact);
+                }
+                rawShadowAccum += shadow;
+                rawShadowWeight += 1.0;
+                if (type == 1) {
+                    pointShadowAccum += shadow;
+                    pointShadowWeight += 1.0;
+                } else if (type == 0) {
+                    directionalShadowAccum += shadow;
+                    directionalShadowWeight += 1.0;
                 }
             }
 
@@ -3279,6 +3351,27 @@ fragment float4 fragment_main(
     #endif
     // ========== END DEBUG ==========
     
+    if (shadowDebugMode > 0) {
+        if (shadowDebugMode == 1) {
+            float v = (rawShadowWeight > 0.0) ? (rawShadowAccum / rawShadowWeight) : 1.0;
+            return float4(v, v, v, 1.0);
+        }
+        if (shadowDebugMode == 2) {
+            float v = (directionalShadowWeight > 0.0) ? (directionalShadowAccum / directionalShadowWeight) : 1.0;
+            return float4(v, v, v, 1.0);
+        }
+        if (shadowDebugMode == 3) {
+            float v = (pointShadowWeight > 0.0) ? (pointShadowAccum / pointShadowWeight) : 1.0;
+            return float4(v, v, v, 1.0);
+        }
+        if (shadowDebugMode == 4) {
+            return float4((debugCascadeIndex >= 0) ? shadowDebugCascadeColor(debugCascadeIndex) : float3(0.0), 1.0);
+        }
+        if (shadowDebugMode == 5) {
+            return float4((debugPointFace >= 0) ? shadowDebugPointFaceColor(debugPointFace) : float3(0.0), 1.0);
+        }
+    }
+
     // Exposure control (EV)
     color *= pow(2.0, environment.exposureIntensity.x);
     

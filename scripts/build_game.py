@@ -489,6 +489,52 @@ def extract_asset_ref(entry) -> Optional[str]:
     return None
 
 
+def _collect_asset_refs_from_json(value, project_root: Path, out_paths: set[Path]) -> None:
+    if isinstance(value, dict):
+        path_value = value.get("path")
+        if isinstance(path_value, str) and path_value:
+            candidate = Path(path_value)
+            suffix = candidate.suffix.lower()
+            if suffix in LDR_EXTS or suffix in MODEL_EXTS:
+                out_paths.add((project_root / candidate).resolve())
+        for child in value.values():
+            _collect_asset_refs_from_json(child, project_root, out_paths)
+        return
+
+    if isinstance(value, list):
+        for child in value:
+            _collect_asset_refs_from_json(child, project_root, out_paths)
+        return
+
+    if isinstance(value, str):
+        candidate = Path(value)
+        suffix = candidate.suffix.lower()
+        if suffix in LDR_EXTS or suffix in MODEL_EXTS:
+            out_paths.add((project_root / candidate).resolve())
+
+
+def collect_scene_asset_refs(scene_files: list[Path], project_root: Path) -> tuple[set[Path], set[Path]]:
+    referenced_textures: set[Path] = set()
+    referenced_models: set[Path] = set()
+
+    for scene_path in scene_files:
+        try:
+            scene_data = json.loads(scene_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        discovered: set[Path] = set()
+        _collect_asset_refs_from_json(scene_data, project_root, discovered)
+        for path in discovered:
+            suffix = path.suffix.lower()
+            if suffix in LDR_EXTS:
+                referenced_textures.add(path)
+            elif suffix in MODEL_EXTS:
+                referenced_models.add(path)
+
+    return referenced_textures, referenced_models
+
+
 def collect_runtime_raw_texture_refs(scene_files: list[Path], project_root: Path) -> set[Path]:
     keep: set[Path] = set()
     for scene_path in scene_files:
@@ -695,6 +741,8 @@ def validate_texture_caches(project_file: Path, project_data: dict) -> None:
     project_root = project_file.parent
     missing: list[str] = []
     stale: list[str] = []
+    scene_files = list_scene_files(project_root, project_data)
+    referenced_textures, referenced_models = collect_scene_asset_refs(scene_files, project_root)
 
     assets_dirs = project_data.get("assetPaths") or [project_data.get("assets", "Assets")]
     asset_roots = [(project_root / relative_assets_dir).resolve() for relative_assets_dir in assets_dirs]
@@ -703,6 +751,12 @@ def validate_texture_caches(project_file: Path, project_data: dict) -> None:
         asset_root = next((root for root in asset_roots if str(asset_path.resolve()).startswith(str(root) + "/") or asset_path.resolve() == root), project_root.resolve())
         if is_embedded_texture_path(asset_path):
             source_model_path = Path(asset_path.as_posix().split(EMBEDDED_MARKER, 1)[0])
+            try:
+                resolved_source_model = source_model_path.resolve()
+            except OSError:
+                resolved_source_model = source_model_path
+            if referenced_models and resolved_source_model not in referenced_models:
+                continue
             if not source_model_path.exists():
                 missing.append(f"{asset_path.relative_to(project_root).as_posix()} (missing source model)")
                 continue
@@ -715,6 +769,13 @@ def validate_texture_caches(project_file: Path, project_data: dict) -> None:
                     stale.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
             except OSError:
                 stale.append(f"{asset_path.relative_to(project_root).as_posix()} -> {cache_path.relative_to(project_root).as_posix()}")
+            continue
+
+        try:
+            resolved_asset_path = asset_path.resolve()
+        except OSError:
+            resolved_asset_path = asset_path
+        if referenced_textures and resolved_asset_path not in referenced_textures:
             continue
 
         guid = str(meta.get("guid") or "").strip()

@@ -39,6 +39,7 @@ struct SceneFogSettings {
 };
 
 struct ScenePostProcessSettings {
+    int shadowDebugMode = 0; // 0 Off, 1 Raw, 2 Directional, 3 Point, 4 Cascade Index, 5 Point Face
     bool enabled = true;
     bool bloom = false;
     float bloomIntensity = 0.8f;
