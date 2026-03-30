@@ -3,6 +3,7 @@
 #include "../Math/Math.hpp"
 #include "LightingSystem.hpp"
 #include <memory>
+#include <array>
 
 namespace MTL {
     class Device;
@@ -16,6 +17,7 @@ namespace Crescent {
 // Builds cluster headers + light index lists for Forward+/clustered lighting.
 class ClusteredLightingPass {
 public:
+    static constexpr uint32_t kMaxFramesInFlight = 4;
     ClusteredLightingPass();
     ~ClusteredLightingPass();
     
@@ -23,6 +25,7 @@ public:
     void shutdown();
     
     void setGrid(uint32_t clusterX, uint32_t clusterY, uint32_t clusterZ, uint32_t maxLightsPerCluster = 64);
+    void setFrameSlot(uint32_t frameSlot);
     
     void dispatch(MTL::CommandBuffer* cmdBuffer,
                   const LightingSystem& lighting,
@@ -54,6 +57,9 @@ private:
     uint32_t m_clusterZ;
     uint32_t m_clusterCount;
     uint32_t m_maxLightsPerCluster;
+    uint32_t m_frameSlot;
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_clusterHeadersRing{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_clusterIndicesRing{};
 };
 
 } // namespace Crescent

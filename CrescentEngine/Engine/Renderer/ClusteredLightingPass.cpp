@@ -23,7 +23,8 @@ ClusteredLightingPass::ClusteredLightingPass()
     , m_clusterY(9)
     , m_clusterZ(24)
     , m_clusterCount(0)
-    , m_maxLightsPerCluster(64) {
+    , m_maxLightsPerCluster(64)
+    , m_frameSlot(0) {
 }
 
 ClusteredLightingPass::~ClusteredLightingPass() {
@@ -69,21 +70,34 @@ void ClusteredLightingPass::setGrid(uint32_t clusterX, uint32_t clusterY, uint32
     allocateBuffers();
 }
 
+void ClusteredLightingPass::setFrameSlot(uint32_t frameSlot) {
+    m_frameSlot = frameSlot % kMaxFramesInFlight;
+    m_clusterHeaders = m_clusterHeadersRing[m_frameSlot];
+    m_clusterIndices = m_clusterIndicesRing[m_frameSlot];
+}
+
 void ClusteredLightingPass::allocateBuffers() {
     if (!m_device) return;
-    if (m_clusterHeaders) { m_clusterHeaders->release(); m_clusterHeaders = nullptr; }
-    if (m_clusterIndices) { m_clusterIndices->release(); m_clusterIndices = nullptr; }
-    
     size_t headersSize = sizeof(ClusterHeader) * m_clusterCount;
     size_t indicesSize = sizeof(uint32_t) * m_clusterCount * m_maxLightsPerCluster;
-    
-    m_clusterHeaders = m_device->newBuffer(headersSize, MTL::ResourceStorageModeShared);
-    m_clusterIndices = m_device->newBuffer(indicesSize, MTL::ResourceStorageModeShared);
+
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        if (m_clusterHeadersRing[i]) { m_clusterHeadersRing[i]->release(); m_clusterHeadersRing[i] = nullptr; }
+        if (m_clusterIndicesRing[i]) { m_clusterIndicesRing[i]->release(); m_clusterIndicesRing[i] = nullptr; }
+        m_clusterHeadersRing[i] = m_device->newBuffer(headersSize, MTL::ResourceStorageModeShared);
+        m_clusterIndicesRing[i] = m_device->newBuffer(indicesSize, MTL::ResourceStorageModeShared);
+    }
+    m_clusterHeaders = m_clusterHeadersRing[m_frameSlot];
+    m_clusterIndices = m_clusterIndicesRing[m_frameSlot];
 }
 
 void ClusteredLightingPass::shutdown() {
-    if (m_clusterHeaders) { m_clusterHeaders->release(); m_clusterHeaders = nullptr; }
-    if (m_clusterIndices) { m_clusterIndices->release(); m_clusterIndices = nullptr; }
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        if (m_clusterHeadersRing[i]) { m_clusterHeadersRing[i]->release(); m_clusterHeadersRing[i] = nullptr; }
+        if (m_clusterIndicesRing[i]) { m_clusterIndicesRing[i]->release(); m_clusterIndicesRing[i] = nullptr; }
+    }
+    m_clusterHeaders = nullptr;
+    m_clusterIndices = nullptr;
     if (m_pipeline) { m_pipeline->release(); m_pipeline = nullptr; }
 }
 

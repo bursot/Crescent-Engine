@@ -3723,9 +3723,15 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     m_skinningBuffer = m_skinningBuffers[bufferSlot];
     m_prevSkinningBuffer = m_prevSkinningBuffers[bufferSlot];
     m_instanceBuffer = m_instanceBuffers[bufferSlot];
+    m_instanceCullBuffer = m_instanceCullBuffers[bufferSlot];
+    m_instanceCountBuffer = m_instanceCountBuffers[bufferSlot];
+    m_instanceIndirectBuffer = m_instanceIndirectBuffers[bufferSlot];
     m_skinningBufferCapacity = m_skinningBufferCapacities[bufferSlot];
     m_prevSkinningBufferCapacity = m_prevSkinningBufferCapacities[bufferSlot];
     m_instanceBufferCapacity = m_instanceBufferCapacities[bufferSlot];
+    m_instanceCullCapacity = m_instanceCullCapacities[bufferSlot];
+    m_instanceCountCapacity = m_instanceCountCapacities[bufferSlot];
+    m_instanceIndirectCapacity = m_instanceIndirectCapacities[bufferSlot];
     
     // Create command buffer
     MTL::CommandBuffer* commandBuffer = m_commandQueue->commandBuffer();
@@ -3853,6 +3859,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
     
     // Build clustered light lists
     if (m_clusterPass && m_lightGPUBuffer) {
+        m_clusterPass->setFrameSlot(bufferSlot);
         m_clusterPass->dispatch(
             commandBuffer,
             *m_lightingSystem,
@@ -4479,6 +4486,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
             m_instanceCullBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
             m_instanceCullCapacity = m_instanceCullBuffer ? m_instanceCullBuffer->length() : 0;
+            m_instanceCullBuffers[bufferSlot] = m_instanceCullBuffer;
+            m_instanceCullCapacities[bufferSlot] = m_instanceCullCapacity;
         }
 
         size_t countBytes = instancedBatches.size() * sizeof(uint32_t);
@@ -4488,6 +4497,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
             m_instanceCountBuffer = m_device->newBuffer(std::max<size_t>(countBytes, 256), MTL::ResourceStorageModeShared);
             m_instanceCountCapacity = m_instanceCountBuffer ? m_instanceCountBuffer->length() : 0;
+            m_instanceCountBuffers[bufferSlot] = m_instanceCountBuffer;
+            m_instanceCountCapacities[bufferSlot] = m_instanceCountCapacity;
         }
 
         size_t indirectBytes = instancedBatches.size() * sizeof(DrawIndexedIndirectArgs);
@@ -4497,6 +4508,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             }
             m_instanceIndirectBuffer = m_device->newBuffer(std::max<size_t>(indirectBytes, 256), MTL::ResourceStorageModeShared);
             m_instanceIndirectCapacity = m_instanceIndirectBuffer ? m_instanceIndirectBuffer->length() : 0;
+            m_instanceIndirectBuffers[bufferSlot] = m_instanceIndirectBuffer;
+            m_instanceIndirectCapacities[bufferSlot] = m_instanceIndirectCapacity;
         }
 
         dispatchInstanceCulling(m_instanceCullPipeline, false);
@@ -7809,9 +7822,15 @@ void Renderer::shutdown() {
         if (m_skinningBuffers[i]) { m_skinningBuffers[i]->release(); m_skinningBuffers[i] = nullptr; }
         if (m_prevSkinningBuffers[i]) { m_prevSkinningBuffers[i]->release(); m_prevSkinningBuffers[i] = nullptr; }
         if (m_instanceBuffers[i]) { m_instanceBuffers[i]->release(); m_instanceBuffers[i] = nullptr; }
+        if (m_instanceCullBuffers[i]) { m_instanceCullBuffers[i]->release(); m_instanceCullBuffers[i] = nullptr; }
+        if (m_instanceCountBuffers[i]) { m_instanceCountBuffers[i]->release(); m_instanceCountBuffers[i] = nullptr; }
+        if (m_instanceIndirectBuffers[i]) { m_instanceIndirectBuffers[i]->release(); m_instanceIndirectBuffers[i] = nullptr; }
         m_skinningBufferCapacities[i] = 0;
         m_prevSkinningBufferCapacities[i] = 0;
         m_instanceBufferCapacities[i] = 0;
+        m_instanceCullCapacities[i] = 0;
+        m_instanceCountCapacities[i] = 0;
+        m_instanceIndirectCapacities[i] = 0;
     }
     m_cameraUniformBuffer = nullptr;
     m_lightUniformBuffer = nullptr;
@@ -7822,6 +7841,9 @@ void Renderer::shutdown() {
     m_skinningBuffer = nullptr;
     m_prevSkinningBuffer = nullptr;
     m_instanceBuffer = nullptr;
+    m_instanceCullBuffer = nullptr;
+    m_instanceCountBuffer = nullptr;
+    m_instanceIndirectBuffer = nullptr;
     m_skinningBufferCapacity = 0;
     m_prevSkinningBufferCapacity = 0;
     m_instanceBufferCapacity = 0;

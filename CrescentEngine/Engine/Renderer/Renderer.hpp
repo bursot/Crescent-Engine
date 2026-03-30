@@ -546,9 +546,15 @@ private:
     std::array<MTL::Buffer*, kMaxFramesInFlight> m_skinningBuffers{};
     std::array<MTL::Buffer*, kMaxFramesInFlight> m_prevSkinningBuffers{};
     std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceCullBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceCountBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceIndirectBuffers{};
     std::array<size_t, kMaxFramesInFlight> m_skinningBufferCapacities{};
     std::array<size_t, kMaxFramesInFlight> m_prevSkinningBufferCapacities{};
     std::array<size_t, kMaxFramesInFlight> m_instanceBufferCapacities{};
+    std::array<size_t, kMaxFramesInFlight> m_instanceCullCapacities{};
+    std::array<size_t, kMaxFramesInFlight> m_instanceCountCapacities{};
+    std::array<size_t, kMaxFramesInFlight> m_instanceIndirectCapacities{};
     std::array<MTL::CommandBuffer*, kMaxFramesInFlight> m_inFlightCommandBuffers{};
 };
 

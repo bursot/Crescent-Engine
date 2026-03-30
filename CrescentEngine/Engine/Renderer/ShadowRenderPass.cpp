@@ -375,9 +375,17 @@ void ShadowRenderPass::shutdown() {
     if (m_areaPipelineInstancedCutout) { m_areaPipelineInstancedCutout->release(); m_areaPipelineInstancedCutout = nullptr; }
     if (m_instanceCullPipeline) { m_instanceCullPipeline->release(); m_instanceCullPipeline = nullptr; }
     if (m_instanceIndirectPipeline) { m_instanceIndirectPipeline->release(); m_instanceIndirectPipeline = nullptr; }
-    if (m_instanceCullBuffer) { m_instanceCullBuffer->release(); m_instanceCullBuffer = nullptr; m_instanceCullCapacity = 0; }
-    if (m_instanceCountBuffer) { m_instanceCountBuffer->release(); m_instanceCountBuffer = nullptr; m_instanceCountCapacity = 0; }
-    if (m_instanceIndirectBuffer) { m_instanceIndirectBuffer->release(); m_instanceIndirectBuffer = nullptr; m_instanceIndirectCapacity = 0; }
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        if (m_instanceCullBuffers[i]) { m_instanceCullBuffers[i]->release(); m_instanceCullBuffers[i] = nullptr; }
+        if (m_instanceCountBuffers[i]) { m_instanceCountBuffers[i]->release(); m_instanceCountBuffers[i] = nullptr; }
+        if (m_instanceIndirectBuffers[i]) { m_instanceIndirectBuffers[i]->release(); m_instanceIndirectBuffers[i] = nullptr; }
+        m_instanceCullCapacities[i] = 0;
+        m_instanceCountCapacities[i] = 0;
+        m_instanceIndirectCapacities[i] = 0;
+    }
+    m_instanceCullBuffer = nullptr; m_instanceCullCapacity = 0;
+    m_instanceCountBuffer = nullptr; m_instanceCountCapacity = 0;
+    m_instanceIndirectBuffer = nullptr; m_instanceIndirectCapacity = 0;
     for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
         if (m_skinningBuffers[i]) { m_skinningBuffers[i]->release(); m_skinningBuffers[i] = nullptr; }
         m_skinningBufferCapacities[i] = 0;
@@ -392,6 +400,12 @@ void ShadowRenderPass::setFrameSlot(uint32_t frameSlot) {
     m_frameSlot = frameSlot % kMaxFramesInFlight;
     m_skinningBuffer = m_skinningBuffers[m_frameSlot];
     m_skinningBufferCapacity = m_skinningBufferCapacities[m_frameSlot];
+    m_instanceCullBuffer = m_instanceCullBuffers[m_frameSlot];
+    m_instanceCountBuffer = m_instanceCountBuffers[m_frameSlot];
+    m_instanceIndirectBuffer = m_instanceIndirectBuffers[m_frameSlot];
+    m_instanceCullCapacity = m_instanceCullCapacities[m_frameSlot];
+    m_instanceCountCapacity = m_instanceCountCapacities[m_frameSlot];
+    m_instanceIndirectCapacity = m_instanceIndirectCapacities[m_frameSlot];
 }
 
 void ShadowRenderPass::buildDepthState() {
@@ -1074,6 +1088,8 @@ void ShadowRenderPass::renderInstancedRange(MTL::CommandBuffer* cmdBuffer,
         }
         m_instanceCullBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
         m_instanceCullCapacity = m_instanceCullBuffer ? m_instanceCullBuffer->length() : 0;
+        m_instanceCullBuffers[m_frameSlot] = m_instanceCullBuffer;
+        m_instanceCullCapacities[m_frameSlot] = m_instanceCullCapacity;
     }
 
     size_t counterBytes = std::max<size_t>(drawCount * sizeof(uint32_t), 256);
@@ -1083,6 +1099,8 @@ void ShadowRenderPass::renderInstancedRange(MTL::CommandBuffer* cmdBuffer,
         }
         m_instanceCountBuffer = m_device->newBuffer(counterBytes, MTL::ResourceStorageModeShared);
         m_instanceCountCapacity = m_instanceCountBuffer ? m_instanceCountBuffer->length() : 0;
+        m_instanceCountBuffers[m_frameSlot] = m_instanceCountBuffer;
+        m_instanceCountCapacities[m_frameSlot] = m_instanceCountCapacity;
     }
 
     size_t indirectBytes = std::max<size_t>(drawCount * sizeof(DrawIndexedIndirectArgs), 256);
@@ -1092,6 +1110,8 @@ void ShadowRenderPass::renderInstancedRange(MTL::CommandBuffer* cmdBuffer,
         }
         m_instanceIndirectBuffer = m_device->newBuffer(indirectBytes, MTL::ResourceStorageModeShared);
         m_instanceIndirectCapacity = m_instanceIndirectBuffer ? m_instanceIndirectBuffer->length() : 0;
+        m_instanceIndirectBuffers[m_frameSlot] = m_instanceIndirectBuffer;
+        m_instanceIndirectCapacities[m_frameSlot] = m_instanceIndirectCapacity;
     }
 
     if (!m_instanceCullBuffer || !m_instanceCountBuffer || !m_instanceIndirectBuffer) {
@@ -1336,6 +1356,8 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
         }
         m_instanceCullBuffer = m_device->newBuffer(newCapacity, MTL::ResourceStorageModeShared);
         m_instanceCullCapacity = m_instanceCullBuffer ? m_instanceCullBuffer->length() : 0;
+        m_instanceCullBuffers[m_frameSlot] = m_instanceCullBuffer;
+        m_instanceCullCapacities[m_frameSlot] = m_instanceCullCapacity;
     }
 
     size_t counterBytes = std::max<size_t>(drawCount * sizeof(uint32_t), 256);
@@ -1345,6 +1367,8 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
         }
         m_instanceCountBuffer = m_device->newBuffer(counterBytes, MTL::ResourceStorageModeShared);
         m_instanceCountCapacity = m_instanceCountBuffer ? m_instanceCountBuffer->length() : 0;
+        m_instanceCountBuffers[m_frameSlot] = m_instanceCountBuffer;
+        m_instanceCountCapacities[m_frameSlot] = m_instanceCountCapacity;
     }
 
     size_t indirectBytes = std::max<size_t>(drawCount * sizeof(DrawIndexedIndirectArgs), 256);
@@ -1354,6 +1378,8 @@ void ShadowRenderPass::renderInstancedCubeFace(MTL::CommandBuffer* cmdBuffer,
         }
         m_instanceIndirectBuffer = m_device->newBuffer(indirectBytes, MTL::ResourceStorageModeShared);
         m_instanceIndirectCapacity = m_instanceIndirectBuffer ? m_instanceIndirectBuffer->length() : 0;
+        m_instanceIndirectBuffers[m_frameSlot] = m_instanceIndirectBuffer;
+        m_instanceIndirectCapacities[m_frameSlot] = m_instanceIndirectCapacity;
     }
 
     if (!m_instanceCullBuffer || !m_instanceCountBuffer || !m_instanceIndirectBuffer) {

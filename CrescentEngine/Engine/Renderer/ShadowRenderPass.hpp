@@ -141,6 +141,12 @@ private:
     uint32_t m_frameSlot;
     std::array<MTL::Buffer*, kMaxFramesInFlight> m_skinningBuffers{};
     std::array<size_t, kMaxFramesInFlight> m_skinningBufferCapacities{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceCullBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceCountBuffers{};
+    std::array<MTL::Buffer*, kMaxFramesInFlight> m_instanceIndirectBuffers{};
+    std::array<size_t, kMaxFramesInFlight> m_instanceCullCapacities{};
+    std::array<size_t, kMaxFramesInFlight> m_instanceCountCapacities{};
+    std::array<size_t, kMaxFramesInFlight> m_instanceIndirectCapacities{};
 
     std::unordered_set<std::string> m_hlodHidden;
     std::unordered_set<std::string> m_hlodActiveProxies;
