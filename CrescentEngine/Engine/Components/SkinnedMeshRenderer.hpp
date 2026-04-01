@@ -54,6 +54,7 @@ public:
     bool setActiveClipIndex(int index);
     bool crossFadeToClip(int index, float durationSeconds, bool restart = true);
     void applyBoneMatrices(const std::vector<Math::Matrix4x4>& matrices);
+    void getWorldBounds(Math::Vector3& outMin, Math::Vector3& outMax) const;
     Math::Vector3 getBoundsMin() const;
     Math::Vector3 getBoundsMax() const;
     Math::Vector3 getBoundsCenter() const;
@@ -88,8 +89,17 @@ public:
     void OnUpdate(float deltaTime) override;
 
 private:
+    struct BoneInfluenceBounds {
+        Math::Vector3 localMin = Math::Vector3::Zero;
+        Math::Vector3 localMax = Math::Vector3::Zero;
+        bool valid = false;
+    };
+
     void applyRootMotion(AnimationLocalPose& pose, float sampleTime);
     void rebuildAnimationClipList(bool resetPlayback);
+    void invalidateBoneBoundsCache();
+    void rebuildBoneBoundsCache();
+    bool updateDynamicBoundsFromVertices();
     void updateDynamicBounds();
 
     std::shared_ptr<Mesh> m_Mesh;
@@ -132,6 +142,8 @@ private:
     Math::Vector3 m_LocalBoundsMin = Math::Vector3::Zero;
     Math::Vector3 m_LocalBoundsMax = Math::Vector3::Zero;
     bool m_HasDynamicBounds = false;
+    std::vector<BoneInfluenceBounds> m_BoneBoundsCache;
+    bool m_BoneBoundsCacheDirty = true;
 };
 
 } // namespace Crescent

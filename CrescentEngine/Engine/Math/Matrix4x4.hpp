@@ -6,6 +6,9 @@
 #include <cmath>
 #include <ostream>
 #include <cstring>
+#if defined(__APPLE__)
+#include <simd/simd.h>
+#endif
 
 namespace Crescent {
 namespace Math {
@@ -46,6 +49,33 @@ struct Matrix4x4 {
     
     float& operator()(int row, int col) { return m[col * 4 + row]; }
     const float& operator()(int row, int col) const { return m[col * 4 + row]; }
+
+#if defined(__APPLE__)
+private:
+    static simd_float4x4 ToSIMD(const Matrix4x4& matrix) {
+        simd_float4x4 result;
+        result.columns[0] = simd_make_float4(matrix.m[0], matrix.m[1], matrix.m[2], matrix.m[3]);
+        result.columns[1] = simd_make_float4(matrix.m[4], matrix.m[5], matrix.m[6], matrix.m[7]);
+        result.columns[2] = simd_make_float4(matrix.m[8], matrix.m[9], matrix.m[10], matrix.m[11]);
+        result.columns[3] = simd_make_float4(matrix.m[12], matrix.m[13], matrix.m[14], matrix.m[15]);
+        return result;
+    }
+
+    static Matrix4x4 FromSIMD(const simd_float4x4& matrix) {
+        Matrix4x4 result(0.0f);
+        result.m[0] = matrix.columns[0].x; result.m[1] = matrix.columns[0].y;
+        result.m[2] = matrix.columns[0].z; result.m[3] = matrix.columns[0].w;
+        result.m[4] = matrix.columns[1].x; result.m[5] = matrix.columns[1].y;
+        result.m[6] = matrix.columns[1].z; result.m[7] = matrix.columns[1].w;
+        result.m[8] = matrix.columns[2].x; result.m[9] = matrix.columns[2].y;
+        result.m[10] = matrix.columns[2].z; result.m[11] = matrix.columns[2].w;
+        result.m[12] = matrix.columns[3].x; result.m[13] = matrix.columns[3].y;
+        result.m[14] = matrix.columns[3].z; result.m[15] = matrix.columns[3].w;
+        return result;
+    }
+#endif
+
+public:
     
     // Matrix operations
     Matrix4x4 operator+(const Matrix4x4& other) const {
@@ -70,6 +100,9 @@ struct Matrix4x4 {
     }
     
     Matrix4x4 operator*(const Matrix4x4& other) const {
+#if defined(__APPLE__)
+        return FromSIMD(simd_mul(ToSIMD(*this), ToSIMD(other)));
+#else
         Matrix4x4 result(0.0f);
         for (int i = 0; i < 4; ++i) {
             for (int j = 0; j < 4; ++j) {
@@ -79,32 +112,187 @@ struct Matrix4x4 {
             }
         }
         return result;
+#endif
     }
     
     Vector4 operator*(const Vector4& v) const {
+#if defined(__APPLE__)
+        simd_float4 result = simd_mul(ToSIMD(*this), simd_make_float4(v.x, v.y, v.z, v.w));
+        return Vector4(result.x, result.y, result.z, result.w);
+#else
         return Vector4(
             m[0] * v.x + m[4] * v.y + m[8]  * v.z + m[12] * v.w,
             m[1] * v.x + m[5] * v.y + m[9]  * v.z + m[13] * v.w,
             m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14] * v.w,
             m[3] * v.x + m[7] * v.y + m[11] * v.z + m[15] * v.w
         );
+#endif
     }
     
     Vector3 transformPoint(const Vector3& point) const {
+#if defined(__APPLE__)
+        simd_float4 v = simd_mul(ToSIMD(*this), simd_make_float4(point.x, point.y, point.z, 1.0f));
+        if (std::abs(v.w) > 1e-8f) {
+            float invW = 1.0f / v.w;
+            return Vector3(v.x * invW, v.y * invW, v.z * invW);
+        }
+        return Vector3(v.x, v.y, v.z);
+#else
         Vector4 v = (*this) * Vector4(point.x, point.y, point.z, 1.0f);
         if (v.w != 0.0f) {
             return Vector3(v.x / v.w, v.y / v.w, v.z / v.w);
         }
         return Vector3(v.x, v.y, v.z);
+#endif
     }
     
     Vector3 transformDirection(const Vector3& dir) const {
+#if defined(__APPLE__)
+        simd_float4 v = simd_mul(ToSIMD(*this), simd_make_float4(dir.x, dir.y, dir.z, 0.0f));
+        return Vector3(v.x, v.y, v.z);
+#else
         Vector4 v = (*this) * Vector4(dir.x, dir.y, dir.z, 0.0f);
         return Vector3(v.x, v.y, v.z);
+#endif
+    }
+
+    bool isAffine(float epsilon = 1e-6f) const {
+        return std::abs(m[3]) <= epsilon &&
+               std::abs(m[7]) <= epsilon &&
+               std::abs(m[11]) <= epsilon &&
+               std::abs(m[15] - 1.0f) <= epsilon;
+    }
+
+    Vector3 transformPointAffine(const Vector3& point) const {
+        return Vector3(
+            m[0] * point.x + m[4] * point.y + m[8] * point.z + m[12],
+            m[1] * point.x + m[5] * point.y + m[9] * point.z + m[13],
+            m[2] * point.x + m[6] * point.y + m[10] * point.z + m[14]
+        );
+    }
+
+    Matrix4x4 inversedAffine() const {
+        if (!isAffine()) {
+            return inversed();
+        }
+
+#if defined(__APPLE__)
+        simd_float3x3 linear;
+        linear.columns[0] = simd_make_float3(m[0], m[1], m[2]);
+        linear.columns[1] = simd_make_float3(m[4], m[5], m[6]);
+        linear.columns[2] = simd_make_float3(m[8], m[9], m[10]);
+
+        const float det = simd_determinant(linear);
+        if (std::abs(det) < 1e-8f) {
+            return Identity;
+        }
+
+        const simd_float3x3 invLinear = simd_inverse(linear);
+        const simd_float3 translation = simd_make_float3(m[12], m[13], m[14]);
+        const simd_float3 invTranslation = -simd_mul(invLinear, translation);
+
+        Matrix4x4 result(1.0f);
+        result.m[0] = invLinear.columns[0].x; result.m[1] = invLinear.columns[0].y; result.m[2] = invLinear.columns[0].z; result.m[3] = 0.0f;
+        result.m[4] = invLinear.columns[1].x; result.m[5] = invLinear.columns[1].y; result.m[6] = invLinear.columns[1].z; result.m[7] = 0.0f;
+        result.m[8] = invLinear.columns[2].x; result.m[9] = invLinear.columns[2].y; result.m[10] = invLinear.columns[2].z; result.m[11] = 0.0f;
+        result.m[12] = invTranslation.x; result.m[13] = invTranslation.y; result.m[14] = invTranslation.z; result.m[15] = 1.0f;
+        return result;
+#else
+        const float a = m[0], b = m[4], c = m[8];
+        const float d = m[1], e = m[5], f = m[9];
+        const float g = m[2], h = m[6], i = m[10];
+
+        const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        if (std::abs(det) < 1e-8f) {
+            return Identity;
+        }
+
+        const float invDet = 1.0f / det;
+        const float r00 = (e * i - f * h) * invDet;
+        const float r01 = (c * h - b * i) * invDet;
+        const float r02 = (b * f - c * e) * invDet;
+        const float r10 = (f * g - d * i) * invDet;
+        const float r11 = (a * i - c * g) * invDet;
+        const float r12 = (c * d - a * f) * invDet;
+        const float r20 = (d * h - e * g) * invDet;
+        const float r21 = (b * g - a * h) * invDet;
+        const float r22 = (a * e - b * d) * invDet;
+
+        const float tx = m[12];
+        const float ty = m[13];
+        const float tz = m[14];
+
+        Matrix4x4 result(1.0f);
+        result.m[0] = r00; result.m[1] = r10; result.m[2] = r20; result.m[3] = 0.0f;
+        result.m[4] = r01; result.m[5] = r11; result.m[6] = r21; result.m[7] = 0.0f;
+        result.m[8] = r02; result.m[9] = r12; result.m[10] = r22; result.m[11] = 0.0f;
+        result.m[12] = -(r00 * tx + r01 * ty + r02 * tz);
+        result.m[13] = -(r10 * tx + r11 * ty + r12 * tz);
+        result.m[14] = -(r20 * tx + r21 * ty + r22 * tz);
+        result.m[15] = 1.0f;
+        return result;
+#endif
+    }
+
+    Matrix4x4 normalMatrix() const {
+        if (!isAffine()) {
+            return inversed().transposed();
+        }
+
+        Matrix4x4 result = inversedAffine().transposed();
+        result.m[12] = 0.0f;
+        result.m[13] = 0.0f;
+        result.m[14] = 0.0f;
+        result.m[3] = 0.0f;
+        result.m[7] = 0.0f;
+        result.m[11] = 0.0f;
+        result.m[15] = 1.0f;
+        return result;
+    }
+
+    void transformAABB(const Vector3& localMin,
+                       const Vector3& localMax,
+                       Vector3& outMin,
+                       Vector3& outMax) const {
+        if (!isAffine()) {
+            const Vector3 corners[8] = {
+                Vector3(localMin.x, localMin.y, localMin.z),
+                Vector3(localMax.x, localMin.y, localMin.z),
+                Vector3(localMin.x, localMax.y, localMin.z),
+                Vector3(localMax.x, localMax.y, localMin.z),
+                Vector3(localMin.x, localMin.y, localMax.z),
+                Vector3(localMax.x, localMin.y, localMax.z),
+                Vector3(localMin.x, localMax.y, localMax.z),
+                Vector3(localMax.x, localMax.y, localMax.z)
+            };
+
+            outMin = transformPoint(corners[0]);
+            outMax = outMin;
+            for (size_t i = 1; i < 8; ++i) {
+                Vector3 worldCorner = transformPoint(corners[i]);
+                outMin = Vector3::Min(outMin, worldCorner);
+                outMax = Vector3::Max(outMax, worldCorner);
+            }
+            return;
+        }
+
+        const Vector3 center = (localMin + localMax) * 0.5f;
+        const Vector3 extents = (localMax - localMin) * 0.5f;
+        const Vector3 worldCenter = transformPointAffine(center);
+        const Vector3 worldExtents(
+            std::abs(m[0]) * extents.x + std::abs(m[4]) * extents.y + std::abs(m[8]) * extents.z,
+            std::abs(m[1]) * extents.x + std::abs(m[5]) * extents.y + std::abs(m[9]) * extents.z,
+            std::abs(m[2]) * extents.x + std::abs(m[6]) * extents.y + std::abs(m[10]) * extents.z
+        );
+        outMin = worldCenter - worldExtents;
+        outMax = worldCenter + worldExtents;
     }
     
     // Transpose
     Matrix4x4 transposed() const {
+#if defined(__APPLE__)
+        return FromSIMD(simd_transpose(ToSIMD(*this)));
+#else
         Matrix4x4 result;
         for (int i = 0; i < 4; ++i) {
             for (int j = 0; j < 4; ++j) {
@@ -112,6 +300,7 @@ struct Matrix4x4 {
             }
         }
         return result;
+#endif
     }
     
     void transpose() {
@@ -135,6 +324,9 @@ struct Matrix4x4 {
     
     // Inverse
     Matrix4x4 inversed() const {
+#if defined(__APPLE__)
+        return FromSIMD(simd_inverse(ToSIMD(*this)));
+#else
         float det = determinant();
         if (std::abs(det) < 1e-6f) {
             return Identity;
@@ -208,6 +400,7 @@ struct Matrix4x4 {
                      m[8] * (m[1] * m[6] - m[2] * m[5])) * invDet;
         
         return inv;
+#endif
     }
     
     // Static transformation matrices

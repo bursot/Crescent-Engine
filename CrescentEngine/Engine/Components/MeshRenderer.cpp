@@ -20,24 +20,7 @@ void ComputeWorldAABB(const Mesh* mesh,
 
     const Math::Vector3 localMin = mesh->getBoundsMin();
     const Math::Vector3 localMax = mesh->getBoundsMax();
-    const Math::Vector3 corners[8] = {
-        Math::Vector3(localMin.x, localMin.y, localMin.z),
-        Math::Vector3(localMax.x, localMin.y, localMin.z),
-        Math::Vector3(localMin.x, localMax.y, localMin.z),
-        Math::Vector3(localMax.x, localMax.y, localMin.z),
-        Math::Vector3(localMin.x, localMin.y, localMax.z),
-        Math::Vector3(localMax.x, localMin.y, localMax.z),
-        Math::Vector3(localMin.x, localMax.y, localMax.z),
-        Math::Vector3(localMax.x, localMax.y, localMax.z)
-    };
-
-    outMin = Math::Vector3(std::numeric_limits<float>::max());
-    outMax = Math::Vector3(std::numeric_limits<float>::lowest());
-    for (const Math::Vector3& corner : corners) {
-        Math::Vector3 worldCorner = worldMatrix.transformPoint(corner);
-        outMin = Math::Vector3::Min(outMin, worldCorner);
-        outMax = Math::Vector3::Max(outMax, worldCorner);
-    }
+    worldMatrix.transformAABB(localMin, localMax, outMin, outMax);
 }
 
 } // namespace
@@ -123,47 +106,48 @@ bool MeshRenderer::hasStaticLightingData() const {
            !m_StaticLighting.shadowmaskPath.empty();
 }
 
-Math::Vector3 MeshRenderer::getBoundsMin() const {
-    if (!m_Mesh) return Math::Vector3::Zero;
-    
+void MeshRenderer::getWorldBounds(Math::Vector3& outMin, Math::Vector3& outMax) const {
+    if (!m_Mesh || !m_Entity) {
+        outMin = Math::Vector3::Zero;
+        outMax = Math::Vector3::Zero;
+        return;
+    }
+
     Transform* transform = m_Entity->getTransform();
-    Math::Matrix4x4 worldMatrix = transform->getWorldMatrix();
+    if (!transform) {
+        outMin = m_Mesh->getBoundsMin();
+        outMax = m_Mesh->getBoundsMax();
+        return;
+    }
+
+    ComputeWorldAABB(m_Mesh.get(), transform->getWorldMatrix(), outMin, outMax);
+}
+
+Math::Vector3 MeshRenderer::getBoundsMin() const {
     Math::Vector3 worldMin;
     Math::Vector3 worldMax;
-    ComputeWorldAABB(m_Mesh.get(), worldMatrix, worldMin, worldMax);
+    getWorldBounds(worldMin, worldMax);
     return worldMin;
 }
 
 Math::Vector3 MeshRenderer::getBoundsMax() const {
-    if (!m_Mesh) return Math::Vector3::Zero;
-    
-    Transform* transform = m_Entity->getTransform();
-    Math::Matrix4x4 worldMatrix = transform->getWorldMatrix();
     Math::Vector3 worldMin;
     Math::Vector3 worldMax;
-    ComputeWorldAABB(m_Mesh.get(), worldMatrix, worldMin, worldMax);
+    getWorldBounds(worldMin, worldMax);
     return worldMax;
 }
 
 Math::Vector3 MeshRenderer::getBoundsCenter() const {
-    if (!m_Mesh) return Math::Vector3::Zero;
-    
-    Transform* transform = m_Entity->getTransform();
-    Math::Matrix4x4 worldMatrix = transform->getWorldMatrix();
     Math::Vector3 worldMin;
     Math::Vector3 worldMax;
-    ComputeWorldAABB(m_Mesh.get(), worldMatrix, worldMin, worldMax);
+    getWorldBounds(worldMin, worldMax);
     return (worldMin + worldMax) * 0.5f;
 }
 
 Math::Vector3 MeshRenderer::getBoundsSize() const {
-    if (!m_Mesh) return Math::Vector3::Zero;
-
-    Transform* transform = m_Entity->getTransform();
-    Math::Matrix4x4 worldMatrix = transform->getWorldMatrix();
     Math::Vector3 worldMin;
     Math::Vector3 worldMax;
-    ComputeWorldAABB(m_Mesh.get(), worldMatrix, worldMin, worldMax);
+    getWorldBounds(worldMin, worldMax);
     return worldMax - worldMin;
 }
 

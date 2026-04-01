@@ -30,24 +30,9 @@ static void EncapsulateTransformedLocalAABB(const Crescent::Math::Matrix4x4& wor
                                             Crescent::AABB& outBounds,
                                             bool& hasBounds) {
     using namespace Crescent;
-    const Math::Vector3 corners[8] = {
-        {localMin.x, localMin.y, localMin.z},
-        {localMax.x, localMin.y, localMin.z},
-        {localMin.x, localMax.y, localMin.z},
-        {localMin.x, localMin.y, localMax.z},
-        {localMax.x, localMax.y, localMin.z},
-        {localMin.x, localMax.y, localMax.z},
-        {localMax.x, localMin.y, localMax.z},
-        {localMax.x, localMax.y, localMax.z},
-    };
-
-    Math::Vector3 worldMin(std::numeric_limits<float>::max());
-    Math::Vector3 worldMax(std::numeric_limits<float>::lowest());
-    for (const auto& corner : corners) {
-        Math::Vector3 worldPt = worldMatrix.transformPoint(corner);
-        worldMin = Math::Vector3::Min(worldMin, worldPt);
-        worldMax = Math::Vector3::Max(worldMax, worldPt);
-    }
+    Math::Vector3 worldMin;
+    Math::Vector3 worldMax;
+    worldMatrix.transformAABB(localMin, localMax, worldMin, worldMax);
 
     AABB transformed(worldMin, worldMax);
     if (!hasBounds) {

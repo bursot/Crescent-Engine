@@ -61,6 +61,7 @@ public:
     bool hasStaticLightingData() const;
     
     // Bounds for culling
+    void getWorldBounds(Math::Vector3& outMin, Math::Vector3& outMax) const;
     Math::Vector3 getBoundsMin() const;
     Math::Vector3 getBoundsMax() const;
     Math::Vector3 getBoundsCenter() const;

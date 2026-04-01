@@ -205,20 +205,16 @@ void BuildSkinMatrices(const Skeleton& skeleton,
     }
     const Math::Matrix4x4& globalInverse = skeleton.getGlobalInverse();
 
-    std::vector<Math::Matrix4x4> localPose(boneCount);
     std::vector<Math::Matrix4x4> globalPose(boneCount);
 
     for (size_t i = 0; i < boneCount; ++i) {
-        localPose[i] = Math::Matrix4x4::TRS(pose.positions[i], pose.rotations[i], pose.scales[i]);
-    }
-
-    for (size_t i = 0; i < boneCount; ++i) {
         const Bone& bone = bones[i];
+        Math::Matrix4x4 localPose = Math::Matrix4x4::TRS(pose.positions[i], pose.rotations[i], pose.scales[i]);
         if (bone.parentIndex < 0) {
-            globalPose[i] = localPose[i];
+            globalPose[i] = localPose;
         } else {
             size_t parentIndex = static_cast<size_t>(bone.parentIndex);
-            globalPose[i] = globalPose[parentIndex] * localPose[i];
+            globalPose[i] = globalPose[parentIndex] * localPose;
         }
     }
 
@@ -238,20 +234,16 @@ void BuildGlobalPose(const Skeleton& skeleton,
         return;
     }
 
-    std::vector<Math::Matrix4x4> localPose(boneCount);
     outMatrices.resize(boneCount);
 
     for (size_t i = 0; i < boneCount; ++i) {
-        localPose[i] = Math::Matrix4x4::TRS(pose.positions[i], pose.rotations[i], pose.scales[i]);
-    }
-
-    for (size_t i = 0; i < boneCount; ++i) {
         const Bone& bone = bones[i];
+        Math::Matrix4x4 localPose = Math::Matrix4x4::TRS(pose.positions[i], pose.rotations[i], pose.scales[i]);
         if (bone.parentIndex < 0) {
-            outMatrices[i] = localPose[i];
+            outMatrices[i] = localPose;
         } else {
             size_t parentIndex = static_cast<size_t>(bone.parentIndex);
-            outMatrices[i] = outMatrices[parentIndex] * localPose[i];
+            outMatrices[i] = outMatrices[parentIndex] * localPose;
         }
     }
 }

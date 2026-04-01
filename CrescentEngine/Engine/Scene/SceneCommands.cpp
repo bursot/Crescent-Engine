@@ -1115,7 +1115,7 @@ static bool FindClosestSurfaceSample(Entity* entity,
     const auto& vertices = mesh->getVertices();
     const auto& indices = mesh->getIndices();
     Math::Matrix4x4 worldMatrix = entity->getTransform()->getWorldMatrix();
-    Math::Matrix4x4 normalMatrix = worldMatrix.inversed().transposed();
+    Math::Matrix4x4 normalMatrix = worldMatrix.normalMatrix();
 
     for (size_t tri = 0; tri + 2 < indices.size(); tri += 3) {
         uint32_t i0 = indices[tri + 0];
@@ -1305,7 +1305,7 @@ static std::vector<EmissiveTriangleSurface> BuildEmissiveTriangleSurfaces(Scene*
         const auto& vertices = mesh->getVertices();
         const auto& indices = mesh->getIndices();
         Math::Matrix4x4 worldMatrix = entity->getTransform()->getWorldMatrix();
-        Math::Matrix4x4 normalMatrix = worldMatrix.inversed().transposed();
+        Math::Matrix4x4 normalMatrix = worldMatrix.normalMatrix();
 
         for (size_t tri = 0; tri + 2 < indices.size(); tri += 3) {
             uint32_t i0 = indices[tri + 0];
@@ -3652,7 +3652,7 @@ static void AppendTransformedMesh(const Mesh& source,
         return;
     }
 
-    Math::Matrix4x4 normalMatrix = transform.inversed().transposed();
+    Math::Matrix4x4 normalMatrix = transform.normalMatrix();
     uint32_t indexOffset = static_cast<uint32_t>(target.vertices.size());
     target.vertices.reserve(target.vertices.size() + verts.size());
     target.indices.reserve(target.indices.size() + indices.size());
@@ -4578,7 +4578,7 @@ Entity* SceneCommands::buildHLOD(Scene* scene, const std::vector<std::string>& u
         }
 
         Math::Matrix4x4 world = entity->getTransform()->getWorldMatrix();
-        Math::Matrix4x4 normalMatrix = world.inversed().transposed();
+        Math::Matrix4x4 normalMatrix = world.normalMatrix();
 
         uint32_t baseVertex = static_cast<uint32_t>(mergedVertices.size());
         mergedVertices.reserve(mergedVertices.size() + vertices.size());
@@ -4989,7 +4989,7 @@ SceneCommands::StaticLightmapBakeStats SceneCommands::bakeStaticLightmaps(Scene*
         candidate.renderer = renderer;
         candidate.mesh = mesh;
         candidate.worldMatrix = entity->getTransform()->getWorldMatrix();
-        candidate.normalMatrix = candidate.worldMatrix.inversed().transposed();
+        candidate.normalMatrix = candidate.worldMatrix.normalMatrix();
         candidate.staticLighting = staticLighting;
         atlasCandidates[staticLighting.lightmapIndex].push_back(candidate);
         stats.bakedRendererCount += 1;

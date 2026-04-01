@@ -101,8 +101,13 @@ void ResolveRendererBounds(Entity* entity,
                            MeshRenderer* meshRenderer,
                            Math::Vector3& outCenter,
                            Math::Vector3& outSize) {
-    outCenter = meshRenderer ? meshRenderer->getBoundsCenter() : Math::Vector3::Zero;
-    outSize = meshRenderer ? meshRenderer->getBoundsSize() : Math::Vector3::Zero;
+    Math::Vector3 boundsMin = Math::Vector3::Zero;
+    Math::Vector3 boundsMax = Math::Vector3::Zero;
+    if (meshRenderer) {
+        meshRenderer->getWorldBounds(boundsMin, boundsMax);
+    }
+    outCenter = (boundsMin + boundsMax) * 0.5f;
+    outSize = boundsMax - boundsMin;
     if (!entity) {
         return;
     }
@@ -117,8 +122,9 @@ void ResolveRendererBounds(Entity* entity,
         return;
     }
 
-    outCenter = skinned->getBoundsCenter();
-    outSize = skinned->getBoundsSize();
+    skinned->getWorldBounds(boundsMin, boundsMax);
+    outCenter = (boundsMin + boundsMax) * 0.5f;
+    outSize = boundsMax - boundsMin;
 }
 
 float ResolveStaticLightmapEncodingFlag(const std::string& path) {
@@ -4097,7 +4103,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
                 InstanceDataGPU data{};
                 data.modelMatrix = world;
-                data.normalMatrix = world.inversed().transposed();
+                data.normalMatrix = world.normalMatrix();
 
                 if (instanced->getCastShadows()) {
                     auto addShadowInstance = [&](Mesh* drawMesh, Mesh* sourceMesh) {
@@ -4135,7 +4141,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 };
 
                 if (billboardRangeValid) {
-                    Math::Vector3 worldCenter = world.transformPoint(meshCenter);
+                    Math::Vector3 worldCenter = world.transformPointAffine(meshCenter);
                     float dist = (worldCenter - cameraPos).length();
                     if (dist <= billboardStart) {
                         addVisibleInstance(mesh.get(), mesh.get());
@@ -4210,7 +4216,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             bool billboardRangeValid = billboardEnabled && billboardEnd > billboardStart + 0.01f;
 
             Math::Matrix4x4 world = entity->getTransform()->getWorldMatrix();
-            Math::Vector3 worldCenter = world.transformPoint(meshCenter);
+            Math::Vector3 worldCenter = world.transformPointAffine(meshCenter);
             Math::Vector3 scale = entity->getTransform()->getScale();
             float maxScale = std::max(std::abs(scale.x), std::max(std::abs(scale.y), std::abs(scale.z)));
             float radius = 0.5f * std::sqrt(meshSize.x * meshSize.x
@@ -4226,7 +4232,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
             InstanceDataGPU data{};
             data.modelMatrix = world;
-            data.normalMatrix = world.inversed().transposed();
+            data.normalMatrix = world.normalMatrix();
 
             auto addVisibleInstance = [&](Mesh* drawMesh, Mesh* sourceMesh) {
                 InstancedBatchKey key{};
@@ -4637,7 +4643,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             
             ModelUniforms modelUniforms;
             modelUniforms.modelMatrix = entity->getTransform()->getWorldMatrix();
-            modelUniforms.normalMatrix = modelUniforms.modelMatrix.inversed().transposed();
+            modelUniforms.normalMatrix = modelUniforms.modelMatrix.normalMatrix();
             
             preEncoder->setVertexBuffer(vertexBuffer, 0, 0);
             if (isSkinned) {
@@ -5428,7 +5434,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
             ModelUniforms modelUniforms;
             modelUniforms.modelMatrix = entity->getTransform()->getWorldMatrix();
-            modelUniforms.normalMatrix = modelUniforms.modelMatrix.inversed().transposed();
+            modelUniforms.normalMatrix = modelUniforms.modelMatrix.normalMatrix();
 
             VelocityUniformsGPU velocityUniforms{};
             velocityUniforms.prevModelMatrix = entity->getTransform()->getPreviousWorldMatrix();
@@ -5702,7 +5708,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         // Setup model uniforms
         ModelUniforms modelUniforms;
         modelUniforms.modelMatrix = entity->getTransform()->getWorldMatrix();
-        modelUniforms.normalMatrix = modelUniforms.modelMatrix.inversed().transposed();
+        modelUniforms.normalMatrix = modelUniforms.modelMatrix.normalMatrix();
         
         // Setup material uniforms
         if (material) {

@@ -202,24 +202,7 @@ static void ComputeWorldAABBFromLocalBounds(const Math::Vector3& localMin,
                                             const Math::Matrix4x4& worldMatrix,
                                             Math::Vector3& outMin,
                                             Math::Vector3& outMax) {
-    const Math::Vector3 corners[8] = {
-        Math::Vector3(localMin.x, localMin.y, localMin.z),
-        Math::Vector3(localMax.x, localMin.y, localMin.z),
-        Math::Vector3(localMin.x, localMax.y, localMin.z),
-        Math::Vector3(localMax.x, localMax.y, localMin.z),
-        Math::Vector3(localMin.x, localMin.y, localMax.z),
-        Math::Vector3(localMax.x, localMin.y, localMax.z),
-        Math::Vector3(localMin.x, localMax.y, localMax.z),
-        Math::Vector3(localMax.x, localMax.y, localMax.z)
-    };
-
-    outMin = Math::Vector3(std::numeric_limits<float>::max());
-    outMax = Math::Vector3(std::numeric_limits<float>::lowest());
-    for (const Math::Vector3& corner : corners) {
-        Math::Vector3 worldCorner = worldMatrix.transformPoint(corner);
-        outMin = Math::Vector3::Min(outMin, worldCorner);
-        outMax = Math::Vector3::Max(outMax, worldCorner);
-    }
+    worldMatrix.transformAABB(localMin, localMax, outMin, outMax);
 }
 
 } // namespace
@@ -239,6 +222,7 @@ SkinnedMeshRenderer::SkinnedMeshRenderer()
 
 void SkinnedMeshRenderer::setMesh(std::shared_ptr<Mesh> mesh) {
     m_Mesh = mesh;
+    invalidateBoneBoundsCache();
     if (m_Mesh) {
         m_LocalBoundsMin = m_Mesh->getBoundsMin();
         m_LocalBoundsMax = m_Mesh->getBoundsMax();
@@ -252,6 +236,7 @@ void SkinnedMeshRenderer::setMesh(std::shared_ptr<Mesh> mesh) {
 
 void SkinnedMeshRenderer::setSkeleton(std::shared_ptr<Skeleton> skeleton) {
     m_Skeleton = skeleton;
+    invalidateBoneBoundsCache();
     if (m_Skeleton) {
         m_BoneMatrices.assign(m_Skeleton->getBoneCount(), Math::Matrix4x4::Identity);
         m_PrevBoneMatrices = m_BoneMatrices;
@@ -463,63 +448,61 @@ void SkinnedMeshRenderer::applyBoneMatrices(const std::vector<Math::Matrix4x4>& 
     updateDynamicBounds();
 }
 
-Math::Vector3 SkinnedMeshRenderer::getBoundsMin() const {
+void SkinnedMeshRenderer::getWorldBounds(Math::Vector3& outMin, Math::Vector3& outMax) const {
     if (!m_Mesh) {
-        return Math::Vector3::Zero;
+        outMin = Math::Vector3::Zero;
+        outMax = Math::Vector3::Zero;
+        return;
     }
     Transform* transform = m_Entity ? m_Entity->getTransform() : nullptr;
     if (!transform) {
-        return m_HasDynamicBounds ? m_LocalBoundsMin : m_Mesh->getBoundsMin();
+        outMin = m_HasDynamicBounds ? m_LocalBoundsMin : m_Mesh->getBoundsMin();
+        outMax = m_HasDynamicBounds ? m_LocalBoundsMax : m_Mesh->getBoundsMax();
+        return;
     }
-    Math::Vector3 worldMin;
-    Math::Vector3 worldMax;
     const Math::Vector3 localMin = m_HasDynamicBounds ? m_LocalBoundsMin : m_Mesh->getBoundsMin();
     const Math::Vector3 localMax = m_HasDynamicBounds ? m_LocalBoundsMax : m_Mesh->getBoundsMax();
-    ComputeWorldAABBFromLocalBounds(localMin, localMax, transform->getWorldMatrix(), worldMin, worldMax);
+    ComputeWorldAABBFromLocalBounds(localMin, localMax, transform->getWorldMatrix(), outMin, outMax);
+}
+
+Math::Vector3 SkinnedMeshRenderer::getBoundsMin() const {
+    Math::Vector3 worldMin;
+    Math::Vector3 worldMax;
+    getWorldBounds(worldMin, worldMax);
     return worldMin;
 }
 
 Math::Vector3 SkinnedMeshRenderer::getBoundsMax() const {
-    if (!m_Mesh) {
-        return Math::Vector3::Zero;
-    }
-    Transform* transform = m_Entity ? m_Entity->getTransform() : nullptr;
-    if (!transform) {
-        return m_HasDynamicBounds ? m_LocalBoundsMax : m_Mesh->getBoundsMax();
-    }
     Math::Vector3 worldMin;
     Math::Vector3 worldMax;
-    const Math::Vector3 localMin = m_HasDynamicBounds ? m_LocalBoundsMin : m_Mesh->getBoundsMin();
-    const Math::Vector3 localMax = m_HasDynamicBounds ? m_LocalBoundsMax : m_Mesh->getBoundsMax();
-    ComputeWorldAABBFromLocalBounds(localMin, localMax, transform->getWorldMatrix(), worldMin, worldMax);
+    getWorldBounds(worldMin, worldMax);
     return worldMax;
 }
 
 Math::Vector3 SkinnedMeshRenderer::getBoundsCenter() const {
-    Math::Vector3 worldMin = getBoundsMin();
-    Math::Vector3 worldMax = getBoundsMax();
+    Math::Vector3 worldMin;
+    Math::Vector3 worldMax;
+    getWorldBounds(worldMin, worldMax);
     return (worldMin + worldMax) * 0.5f;
 }
 
 Math::Vector3 SkinnedMeshRenderer::getBoundsSize() const {
-    Math::Vector3 worldMin = getBoundsMin();
-    Math::Vector3 worldMax = getBoundsMax();
+    Math::Vector3 worldMin;
+    Math::Vector3 worldMax;
+    getWorldBounds(worldMin, worldMax);
     return worldMax - worldMin;
 }
 
-void SkinnedMeshRenderer::updateDynamicBounds() {
-    if (!m_Mesh) {
-        m_LocalBoundsMin = Math::Vector3::Zero;
-        m_LocalBoundsMax = Math::Vector3::Zero;
-        m_HasDynamicBounds = false;
-        return;
-    }
+void SkinnedMeshRenderer::invalidateBoneBoundsCache() {
+    m_BoneBoundsCache.clear();
+    m_BoneBoundsCacheDirty = true;
+}
 
-    m_LocalBoundsMin = m_Mesh->getBoundsMin();
-    m_LocalBoundsMax = m_Mesh->getBoundsMax();
-    m_HasDynamicBounds = true;
+void SkinnedMeshRenderer::rebuildBoneBoundsCache() {
+    m_BoneBoundsCache.clear();
+    m_BoneBoundsCacheDirty = false;
 
-    if (!m_Mesh->hasSkinWeights() || m_BoneMatrices.empty()) {
+    if (!m_Mesh || !m_Skeleton || !m_Mesh->hasSkinWeights()) {
         return;
     }
 
@@ -527,6 +510,46 @@ void SkinnedMeshRenderer::updateDynamicBounds() {
     const auto& skinWeights = m_Mesh->getSkinWeights();
     if (vertices.empty() || vertices.size() != skinWeights.size()) {
         return;
+    }
+
+    const size_t boneCount = m_Skeleton->getBoneCount();
+    if (boneCount == 0) {
+        return;
+    }
+
+    m_BoneBoundsCache.resize(boneCount);
+    for (size_t vertexIndex = 0; vertexIndex < vertices.size(); ++vertexIndex) {
+        const Math::Vector3& localPos = vertices[vertexIndex].position;
+        const SkinWeight& weights = skinWeights[vertexIndex];
+        for (int influenceIndex = 0; influenceIndex < 4; ++influenceIndex) {
+            const float weight = weights.weights[static_cast<size_t>(influenceIndex)];
+            const uint32_t boneIndex = weights.indices[static_cast<size_t>(influenceIndex)];
+            if (weight <= 0.0f || boneIndex >= boneCount) {
+                continue;
+            }
+
+            BoneInfluenceBounds& boneBounds = m_BoneBoundsCache[boneIndex];
+            if (!boneBounds.valid) {
+                boneBounds.localMin = localPos;
+                boneBounds.localMax = localPos;
+                boneBounds.valid = true;
+            } else {
+                boneBounds.localMin = Math::Vector3::Min(boneBounds.localMin, localPos);
+                boneBounds.localMax = Math::Vector3::Max(boneBounds.localMax, localPos);
+            }
+        }
+    }
+}
+
+bool SkinnedMeshRenderer::updateDynamicBoundsFromVertices() {
+    if (!m_Mesh || !m_Mesh->hasSkinWeights() || m_BoneMatrices.empty()) {
+        return false;
+    }
+
+    const auto& vertices = m_Mesh->getVertices();
+    const auto& skinWeights = m_Mesh->getSkinWeights();
+    if (vertices.empty() || vertices.size() != skinWeights.size()) {
+        return false;
     }
 
     Math::Vector3 localMin(std::numeric_limits<float>::max());
@@ -560,11 +583,66 @@ void SkinnedMeshRenderer::updateDynamicBounds() {
         hasValidVertex = true;
     }
 
-    if (hasValidVertex) {
+    if (!hasValidVertex) {
+        return false;
+    }
+
+    const Math::Vector3 padding(0.05f, 0.05f, 0.05f);
+    m_LocalBoundsMin = localMin - padding;
+    m_LocalBoundsMax = localMax + padding;
+    return true;
+}
+
+void SkinnedMeshRenderer::updateDynamicBounds() {
+    if (!m_Mesh) {
+        m_LocalBoundsMin = Math::Vector3::Zero;
+        m_LocalBoundsMax = Math::Vector3::Zero;
+        m_HasDynamicBounds = false;
+        return;
+    }
+
+    m_LocalBoundsMin = m_Mesh->getBoundsMin();
+    m_LocalBoundsMax = m_Mesh->getBoundsMax();
+    m_HasDynamicBounds = true;
+
+    if (!m_Mesh->hasSkinWeights() || m_BoneMatrices.empty()) {
+        return;
+    }
+
+    if (m_BoneBoundsCacheDirty) {
+        rebuildBoneBoundsCache();
+    }
+
+    const size_t boneCount = std::min(m_BoneBoundsCache.size(), m_BoneMatrices.size());
+    Math::Vector3 localMin(std::numeric_limits<float>::max());
+    Math::Vector3 localMax(std::numeric_limits<float>::lowest());
+    bool hasValidBoneBounds = false;
+
+    for (size_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
+        const BoneInfluenceBounds& boneBounds = m_BoneBoundsCache[boneIndex];
+        if (!boneBounds.valid) {
+            continue;
+        }
+
+        Math::Vector3 transformedMin;
+        Math::Vector3 transformedMax;
+        m_BoneMatrices[boneIndex].transformAABB(boneBounds.localMin,
+                                                boneBounds.localMax,
+                                                transformedMin,
+                                                transformedMax);
+        localMin = Math::Vector3::Min(localMin, transformedMin);
+        localMax = Math::Vector3::Max(localMax, transformedMax);
+        hasValidBoneBounds = true;
+    }
+
+    if (hasValidBoneBounds) {
         const Math::Vector3 padding(0.05f, 0.05f, 0.05f);
         m_LocalBoundsMin = localMin - padding;
         m_LocalBoundsMax = localMax + padding;
+        return;
     }
+
+    updateDynamicBoundsFromVertices();
 }
 
 void SkinnedMeshRenderer::applyRootMotion(AnimationLocalPose& pose, float sampleTime) {
