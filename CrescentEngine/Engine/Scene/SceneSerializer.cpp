@@ -14,6 +14,7 @@
 #include "../Components/CharacterController.hpp"
 #include "../Components/FirstPersonController.hpp"
 #include "../Components/ThirdPersonController.hpp"
+#include "../Components/EnemyController.hpp"
 #include "../Components/BoneAttachment.hpp"
 #include "../Components/Health.hpp"
 #include "../Components/AudioSource.hpp"
@@ -3593,6 +3594,12 @@ void ApplyEntityComponents(Entity* entity,
         controller->setSprintSpeed(c.value("sprintSpeed", controller->getSprintSpeed()));
         controller->setEnableSprint(c.value("enableSprint", controller->getEnableSprint()));
         controller->setDriveCharacterController(c.value("driveCharacterController", controller->getDriveCharacterController()));
+        controller->setMeleeHitDamage(c.value("meleeHitDamage", controller->getMeleeHitDamage()));
+        controller->setMeleeHitRadius(c.value("meleeHitRadius", controller->getMeleeHitRadius()));
+        controller->setMeleeHitForwardOffset(c.value("meleeHitForwardOffset", controller->getMeleeHitForwardOffset()));
+        controller->setMeleeHitUpOffset(c.value("meleeHitUpOffset", controller->getMeleeHitUpOffset()));
+        controller->setMeleeHitMask(c.value("meleeHitMask", controller->getMeleeHitMask()));
+        controller->setMeleeHitTriggers(c.value("meleeHitTriggers", controller->getMeleeHitTriggers()));
         if (c.contains("weaponGripPositionOffset")) {
             controller->setWeaponGripPositionOffset(JsonToVec3(c["weaponGripPositionOffset"], controller->getWeaponGripPositionOffset()));
         }
@@ -3602,6 +3609,28 @@ void ApplyEntityComponents(Entity* entity,
         if (c.contains("weaponSupportHandOffset")) {
             controller->setWeaponSupportHandOffset(JsonToVec3(c["weaponSupportHandOffset"], controller->getWeaponSupportHandOffset()));
         }
+    }
+
+    if (components.contains("EnemyController")) {
+        const json& c = components["EnemyController"];
+        EnemyController* controller = entity->getComponent<EnemyController>();
+        if (!controller) {
+            controller = entity->addComponent<EnemyController>();
+        }
+        controller->setDetectionRange(c.value("detectionRange", controller->getDetectionRange()));
+        controller->setLoseRange(c.value("loseRange", controller->getLoseRange()));
+        controller->setAttackRange(c.value("attackRange", controller->getAttackRange()));
+        controller->setChaseSpeed(c.value("chaseSpeed", controller->getChaseSpeed()));
+        controller->setRotationSmoothSpeed(c.value("rotationSmoothSpeed", controller->getRotationSmoothSpeed()));
+        controller->setAttackCooldown(c.value("attackCooldown", controller->getAttackCooldown()));
+        controller->setAttackDamage(c.value("attackDamage", controller->getAttackDamage()));
+        controller->setAttackHitRadius(c.value("attackHitRadius", controller->getAttackHitRadius()));
+        controller->setAttackForwardOffset(c.value("attackForwardOffset", controller->getAttackForwardOffset()));
+        controller->setAttackUpOffset(c.value("attackUpOffset", controller->getAttackUpOffset()));
+        controller->setAttackMask(c.value("attackMask", controller->getAttackMask()));
+        controller->setAttackHitTriggers(c.value("attackHitTriggers", controller->getAttackHitTriggers()));
+        controller->setDeathDespawnDelay(c.value("deathDespawnDelay", controller->getDeathDespawnDelay()));
+        controller->setDebugLogging(c.value("debugLogging", controller->getDebugLogging()));
     }
 
     if (components.contains("BoneAttachment")) {
@@ -4299,9 +4328,34 @@ json BuildSceneJson(Scene* scene, const std::string& scenePath, const BuildScene
                 {"sprintSpeed", controller->getSprintSpeed()},
                 {"enableSprint", controller->getEnableSprint()},
                 {"driveCharacterController", controller->getDriveCharacterController()},
+                {"meleeHitDamage", controller->getMeleeHitDamage()},
+                {"meleeHitRadius", controller->getMeleeHitRadius()},
+                {"meleeHitForwardOffset", controller->getMeleeHitForwardOffset()},
+                {"meleeHitUpOffset", controller->getMeleeHitUpOffset()},
+                {"meleeHitMask", controller->getMeleeHitMask()},
+                {"meleeHitTriggers", controller->getMeleeHitTriggers()},
                 {"weaponGripPositionOffset", Vec3ToJson(controller->getWeaponGripPositionOffset())},
                 {"weaponGripRotationOffset", Vec3ToJson(controller->getWeaponGripRotationOffsetDegrees())},
                 {"weaponSupportHandOffset", Vec3ToJson(controller->getWeaponSupportHandOffset())}
+            };
+        }
+
+        if (auto* controller = entity->getComponent<EnemyController>()) {
+            components["EnemyController"] = {
+                {"detectionRange", controller->getDetectionRange()},
+                {"loseRange", controller->getLoseRange()},
+                {"attackRange", controller->getAttackRange()},
+                {"chaseSpeed", controller->getChaseSpeed()},
+                {"rotationSmoothSpeed", controller->getRotationSmoothSpeed()},
+                {"attackCooldown", controller->getAttackCooldown()},
+                {"attackDamage", controller->getAttackDamage()},
+                {"attackHitRadius", controller->getAttackHitRadius()},
+                {"attackForwardOffset", controller->getAttackForwardOffset()},
+                {"attackUpOffset", controller->getAttackUpOffset()},
+                {"attackMask", controller->getAttackMask()},
+                {"attackHitTriggers", controller->getAttackHitTriggers()},
+                {"deathDespawnDelay", controller->getDeathDespawnDelay()},
+                {"debugLogging", controller->getDebugLogging()}
             };
         }
 

@@ -269,6 +269,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setThirdPersonControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setThirdPersonControllerInfo(uuid:info:));
 - (BOOL)addThirdPersonController:(NSString *)uuid NS_SWIFT_NAME(addThirdPersonController(uuid:));
 - (void)removeThirdPersonController:(NSString *)uuid NS_SWIFT_NAME(removeThirdPersonController(uuid:));
+- (NSDictionary *)getEnemyControllerInfo:(NSString *)uuid NS_SWIFT_NAME(getEnemyControllerInfo(uuid:));
+- (BOOL)setEnemyControllerInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setEnemyControllerInfo(uuid:info:));
+- (BOOL)addEnemyController:(NSString *)uuid NS_SWIFT_NAME(addEnemyController(uuid:));
+- (void)removeEnemyController:(NSString *)uuid NS_SWIFT_NAME(removeEnemyController(uuid:));
 - (NSDictionary *)getBoneAttachmentInfo:(NSString *)uuid NS_SWIFT_NAME(getBoneAttachmentInfo(uuid:));
 - (BOOL)setBoneAttachmentInfo:(NSString *)uuid info:(NSDictionary *)info NS_SWIFT_NAME(setBoneAttachmentInfo(uuid:info:));
 - (BOOL)addBoneAttachment:(NSString *)uuid NS_SWIFT_NAME(addBoneAttachment(uuid:));

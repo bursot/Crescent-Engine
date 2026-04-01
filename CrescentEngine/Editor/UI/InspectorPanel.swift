@@ -1037,9 +1037,31 @@ struct PhysicsInspector: View {
     @State private var tpSprintSpeed: Float = 6.1
     @State private var tpEnableSprint: Bool = true
     @State private var tpDriveCharacter: Bool = true
+    @State private var tpMeleeHitDamage: Float = 34.0
+    @State private var tpMeleeHitRadius: Float = 0.42
+    @State private var tpMeleeHitForwardOffset: Float = 0.34
+    @State private var tpMeleeHitUpOffset: Float = 0.02
+    @State private var tpMeleeHitMask: Int = Int(UInt32.max)
+    @State private var tpMeleeHitTriggers: Bool = false
     @State private var tpWeaponGripPositionOffset: [Float] = [0.06, -0.14, -0.10]
     @State private var tpWeaponGripRotationOffset: [Float] = [-95.0, 5.0, -100.0]
     @State private var tpWeaponSupportHandOffset: [Float] = [0.20, -0.02, 0.02]
+
+    @State private var hasEnemyController: Bool = false
+    @State private var enemyDetectionRange: Float = 9.0
+    @State private var enemyLoseRange: Float = 13.0
+    @State private var enemyAttackRange: Float = 1.8
+    @State private var enemyChaseSpeed: Float = 2.6
+    @State private var enemyRotationSmoothSpeed: Float = 10.0
+    @State private var enemyAttackCooldown: Float = 1.1
+    @State private var enemyAttackDamage: Float = 16.0
+    @State private var enemyAttackHitRadius: Float = 0.42
+    @State private var enemyAttackForwardOffset: Float = 0.42
+    @State private var enemyAttackUpOffset: Float = 0.02
+    @State private var enemyAttackMask: Int = Int(UInt32.max)
+    @State private var enemyAttackHitTriggers: Bool = false
+    @State private var enemyDeathDespawnDelay: Float = 2.75
+    @State private var enemyDebugLogging: Bool = false
 
     @State private var hasBoneAttachment: Bool = false
     @State private var boneAttachmentBoneName: String = "mixamorig:RightHand"
@@ -1084,6 +1106,9 @@ struct PhysicsInspector: View {
             Divider()
                 .overlay(EditorTheme.panelStroke)
             thirdPersonControllerSection
+            Divider()
+                .overlay(EditorTheme.panelStroke)
+            enemyControllerSection
             Divider()
                 .overlay(EditorTheme.panelStroke)
             boneAttachmentSection
@@ -1778,6 +1803,26 @@ struct PhysicsInspector: View {
                     }))
                 .font(EditorTheme.font(size: 11, weight: .medium))
 
+                SliderRow(title: "Melee Damage", value: $tpMeleeHitDamage, range: 1...200, step: 1) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Melee Radius", value: $tpMeleeHitRadius, range: 0.05...1.5, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Melee Fwd Offset", value: $tpMeleeHitForwardOffset, range: -0.5...2.0, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                SliderRow(title: "Melee Up Offset", value: $tpMeleeHitUpOffset, range: -1.0...1.0, step: 0.01) { _ in
+                    pushThirdPersonController()
+                }
+                Toggle("Melee Hit Triggers", isOn: Binding(
+                    get: { tpMeleeHitTriggers },
+                    set: { newVal in
+                        tpMeleeHitTriggers = newVal
+                        pushThirdPersonController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
                 Vector3InputRow(title: "Weapon Grip Pos", values: $tpWeaponGripPositionOffset) {
                     pushThirdPersonController()
                 }
@@ -1865,6 +1910,100 @@ struct PhysicsInspector: View {
                     set: { newVal in
                         boneAttachmentInheritScale = newVal
                         pushBoneAttachment()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+            }
+        }
+    }
+
+    private var enemyControllerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Enemy Controller")
+                    .font(EditorTheme.font(size: 11, weight: .semibold))
+                    .foregroundColor(EditorTheme.textPrimary)
+                Spacer()
+                if hasEnemyController {
+                    Button(action: removeEnemyController) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if !hasEnemyController {
+                Button("Add Enemy Controller") {
+                    let _ = CrescentEngineBridge.shared().addEnemyController(uuid: entityUUID)
+                    refresh()
+                }
+                .buttonStyle(.bordered)
+                .font(EditorTheme.font(size: 11, weight: .semibold))
+            } else {
+                SliderRow(title: "Detection Range", value: $enemyDetectionRange, range: 0.5...40, step: 0.1) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Lose Range", value: $enemyLoseRange, range: 0.5...60, step: 0.1) { _ in
+                    enemyLoseRange = max(enemyDetectionRange, enemyLoseRange)
+                    pushEnemyController()
+                }
+                SliderRow(title: "Attack Range", value: $enemyAttackRange, range: 0.1...6, step: 0.05) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Chase Speed", value: $enemyChaseSpeed, range: 0...12, step: 0.1) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Rot Smooth", value: $enemyRotationSmoothSpeed, range: 0...30, step: 0.1) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Attack Cooldown", value: $enemyAttackCooldown, range: 0...4, step: 0.01) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Attack Damage", value: $enemyAttackDamage, range: 0...200, step: 1) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Hit Radius", value: $enemyAttackHitRadius, range: 0.05...2.0, step: 0.01) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Hit Fwd Offset", value: $enemyAttackForwardOffset, range: -0.5...2.5, step: 0.01) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Hit Up Offset", value: $enemyAttackUpOffset, range: -1.0...1.0, step: 0.01) { _ in
+                    pushEnemyController()
+                }
+                SliderRow(title: "Death Delay", value: $enemyDeathDespawnDelay, range: 0...8, step: 0.05) { _ in
+                    pushEnemyController()
+                }
+
+                HStack {
+                    Text("Attack Mask")
+                        .font(EditorTheme.font(size: 11, weight: .medium))
+                    Spacer()
+                    TextField("4294967295",
+                              value: Binding(
+                                get: { enemyAttackMask },
+                                set: { newVal in
+                                    let clamped = max(0, min(newVal, Int(UInt32.max)))
+                                    enemyAttackMask = clamped
+                                    pushEnemyController()
+                                }),
+                              formatter: NumberFormatter.intFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                }
+
+                Toggle("Attack Hit Triggers", isOn: Binding(
+                    get: { enemyAttackHitTriggers },
+                    set: { newVal in
+                        enemyAttackHitTriggers = newVal
+                        pushEnemyController()
+                    }))
+                .font(EditorTheme.font(size: 11, weight: .medium))
+
+                Toggle("Debug Logging", isOn: Binding(
+                    get: { enemyDebugLogging },
+                    set: { newVal in
+                        enemyDebugLogging = newVal
+                        pushEnemyController()
                     }))
                 .font(EditorTheme.font(size: 11, weight: .medium))
             }
@@ -2001,6 +2140,12 @@ struct PhysicsInspector: View {
             tpSprintSpeed = (info["sprintSpeed"] as? NSNumber)?.floatValue ?? tpSprintSpeed
             tpEnableSprint = (info["enableSprint"] as? NSNumber)?.boolValue ?? tpEnableSprint
             tpDriveCharacter = (info["driveCharacterController"] as? NSNumber)?.boolValue ?? tpDriveCharacter
+            tpMeleeHitDamage = (info["meleeHitDamage"] as? NSNumber)?.floatValue ?? tpMeleeHitDamage
+            tpMeleeHitRadius = (info["meleeHitRadius"] as? NSNumber)?.floatValue ?? tpMeleeHitRadius
+            tpMeleeHitForwardOffset = (info["meleeHitForwardOffset"] as? NSNumber)?.floatValue ?? tpMeleeHitForwardOffset
+            tpMeleeHitUpOffset = (info["meleeHitUpOffset"] as? NSNumber)?.floatValue ?? tpMeleeHitUpOffset
+            tpMeleeHitMask = (info["meleeHitMask"] as? NSNumber)?.intValue ?? tpMeleeHitMask
+            tpMeleeHitTriggers = (info["meleeHitTriggers"] as? NSNumber)?.boolValue ?? tpMeleeHitTriggers
             if let values = info["weaponGripPositionOffset"] as? [NSNumber], values.count >= 3 {
                 tpWeaponGripPositionOffset = values.prefix(3).map { $0.floatValue }
             }
@@ -2012,6 +2157,27 @@ struct PhysicsInspector: View {
             }
         } else {
             hasThirdPersonController = false
+        }
+
+        if let info = bridge.getEnemyControllerInfo(uuid: entityUUID) as? [String: Any],
+           !info.isEmpty {
+            hasEnemyController = true
+            enemyDetectionRange = (info["detectionRange"] as? NSNumber)?.floatValue ?? enemyDetectionRange
+            enemyLoseRange = (info["loseRange"] as? NSNumber)?.floatValue ?? enemyLoseRange
+            enemyAttackRange = (info["attackRange"] as? NSNumber)?.floatValue ?? enemyAttackRange
+            enemyChaseSpeed = (info["chaseSpeed"] as? NSNumber)?.floatValue ?? enemyChaseSpeed
+            enemyRotationSmoothSpeed = (info["rotationSmoothSpeed"] as? NSNumber)?.floatValue ?? enemyRotationSmoothSpeed
+            enemyAttackCooldown = (info["attackCooldown"] as? NSNumber)?.floatValue ?? enemyAttackCooldown
+            enemyAttackDamage = (info["attackDamage"] as? NSNumber)?.floatValue ?? enemyAttackDamage
+            enemyAttackHitRadius = (info["attackHitRadius"] as? NSNumber)?.floatValue ?? enemyAttackHitRadius
+            enemyAttackForwardOffset = (info["attackForwardOffset"] as? NSNumber)?.floatValue ?? enemyAttackForwardOffset
+            enemyAttackUpOffset = (info["attackUpOffset"] as? NSNumber)?.floatValue ?? enemyAttackUpOffset
+            enemyAttackMask = (info["attackMask"] as? NSNumber)?.intValue ?? enemyAttackMask
+            enemyAttackHitTriggers = (info["attackHitTriggers"] as? NSNumber)?.boolValue ?? enemyAttackHitTriggers
+            enemyDeathDespawnDelay = (info["deathDespawnDelay"] as? NSNumber)?.floatValue ?? enemyDeathDespawnDelay
+            enemyDebugLogging = (info["debugLogging"] as? NSNumber)?.boolValue ?? enemyDebugLogging
+        } else {
+            hasEnemyController = false
         }
 
         if let info = bridge.getBoneAttachmentInfo(uuid: entityUUID) as? [String: Any],
@@ -2181,6 +2347,12 @@ struct PhysicsInspector: View {
             "sprintSpeed": tpSprintSpeed,
             "enableSprint": tpEnableSprint,
             "driveCharacterController": tpDriveCharacter,
+            "meleeHitDamage": tpMeleeHitDamage,
+            "meleeHitRadius": tpMeleeHitRadius,
+            "meleeHitForwardOffset": tpMeleeHitForwardOffset,
+            "meleeHitUpOffset": tpMeleeHitUpOffset,
+            "meleeHitMask": tpMeleeHitMask,
+            "meleeHitTriggers": tpMeleeHitTriggers,
             "weaponGripPositionOffset": tpWeaponGripPositionOffset,
             "weaponGripRotationOffset": tpWeaponGripRotationOffset,
             "weaponSupportHandOffset": tpWeaponSupportHandOffset
@@ -2191,6 +2363,31 @@ struct PhysicsInspector: View {
     private func removeThirdPersonController() {
         CrescentEngineBridge.shared().removeThirdPersonController(uuid: entityUUID)
         hasThirdPersonController = false
+    }
+
+    private func pushEnemyController() {
+        let info: [String: Any] = [
+            "detectionRange": enemyDetectionRange,
+            "loseRange": enemyLoseRange,
+            "attackRange": enemyAttackRange,
+            "chaseSpeed": enemyChaseSpeed,
+            "rotationSmoothSpeed": enemyRotationSmoothSpeed,
+            "attackCooldown": enemyAttackCooldown,
+            "attackDamage": enemyAttackDamage,
+            "attackHitRadius": enemyAttackHitRadius,
+            "attackForwardOffset": enemyAttackForwardOffset,
+            "attackUpOffset": enemyAttackUpOffset,
+            "attackMask": enemyAttackMask,
+            "attackHitTriggers": enemyAttackHitTriggers,
+            "deathDespawnDelay": enemyDeathDespawnDelay,
+            "debugLogging": enemyDebugLogging
+        ]
+        _ = CrescentEngineBridge.shared().setEnemyControllerInfo(uuid: entityUUID, info: info)
+    }
+
+    private func removeEnemyController() {
+        CrescentEngineBridge.shared().removeEnemyController(uuid: entityUUID)
+        hasEnemyController = false
     }
 
     private func pushBoneAttachment() {

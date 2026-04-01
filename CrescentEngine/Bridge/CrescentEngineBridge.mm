@@ -21,6 +21,7 @@
 #include "../Engine/Components/CharacterController.hpp"
 #include "../Engine/Components/FirstPersonController.hpp"
 #include "../Engine/Components/ThirdPersonController.hpp"
+#include "../Engine/Components/EnemyController.hpp"
 #include "../Engine/Components/BoneAttachment.hpp"
 #include "../Engine/Components/Health.hpp"
 #include "../Engine/Components/AudioSource.hpp"
@@ -7444,6 +7445,12 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
             @"sprintSpeed": @(controller->getSprintSpeed()),
             @"enableSprint": @(controller->getEnableSprint()),
             @"driveCharacterController": @(controller->getDriveCharacterController()),
+            @"meleeHitDamage": @(controller->getMeleeHitDamage()),
+            @"meleeHitRadius": @(controller->getMeleeHitRadius()),
+            @"meleeHitForwardOffset": @(controller->getMeleeHitForwardOffset()),
+            @"meleeHitUpOffset": @(controller->getMeleeHitUpOffset()),
+            @"meleeHitMask": @(controller->getMeleeHitMask()),
+            @"meleeHitTriggers": @(controller->getMeleeHitTriggers()),
             @"weaponGripPositionOffset": @[
                 @(controller->getWeaponGripPositionOffset().x),
                 @(controller->getWeaponGripPositionOffset().y),
@@ -7543,6 +7550,24 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
         if (NSNumber* value = info[@"driveCharacterController"]) {
             controller->setDriveCharacterController(value.boolValue);
         }
+        if (NSNumber* value = info[@"meleeHitDamage"]) {
+            controller->setMeleeHitDamage(value.floatValue);
+        }
+        if (NSNumber* value = info[@"meleeHitRadius"]) {
+            controller->setMeleeHitRadius(value.floatValue);
+        }
+        if (NSNumber* value = info[@"meleeHitForwardOffset"]) {
+            controller->setMeleeHitForwardOffset(value.floatValue);
+        }
+        if (NSNumber* value = info[@"meleeHitUpOffset"]) {
+            controller->setMeleeHitUpOffset(value.floatValue);
+        }
+        if (NSNumber* value = info[@"meleeHitMask"]) {
+            controller->setMeleeHitMask(value.intValue);
+        }
+        if (NSNumber* value = info[@"meleeHitTriggers"]) {
+            controller->setMeleeHitTriggers(value.boolValue);
+        }
         if (NSArray* values = info[@"weaponGripPositionOffset"]; values.count >= 3) {
             controller->setWeaponGripPositionOffset(Math::Vector3(
                 [values[0] floatValue],
@@ -7591,6 +7616,125 @@ static PhysicsCollider::CombineMode CombineModeFromString(NSString* value) {
         Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
         if (!entity) return;
         entity->removeComponent<ThirdPersonController>();
+    }];
+}
+
+- (NSDictionary *)getEnemyControllerInfo:(NSString *)uuid {
+    return (NSDictionary *)[self performSyncObject:^id{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return @{};
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return @{};
+        EnemyController* controller = entity->getComponent<EnemyController>();
+        if (!controller) return @{};
+        return @{
+            @"detectionRange": @(controller->getDetectionRange()),
+            @"loseRange": @(controller->getLoseRange()),
+            @"attackRange": @(controller->getAttackRange()),
+            @"chaseSpeed": @(controller->getChaseSpeed()),
+            @"rotationSmoothSpeed": @(controller->getRotationSmoothSpeed()),
+            @"attackCooldown": @(controller->getAttackCooldown()),
+            @"attackDamage": @(controller->getAttackDamage()),
+            @"attackHitRadius": @(controller->getAttackHitRadius()),
+            @"attackForwardOffset": @(controller->getAttackForwardOffset()),
+            @"attackUpOffset": @(controller->getAttackUpOffset()),
+            @"attackMask": @(controller->getAttackMask()),
+            @"attackHitTriggers": @(controller->getAttackHitTriggers()),
+            @"deathDespawnDelay": @(controller->getDeathDespawnDelay()),
+            @"debugLogging": @(controller->getDebugLogging())
+        };
+    }];
+}
+
+- (BOOL)setEnemyControllerInfo:(NSString *)uuid info:(NSDictionary *)info {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene || !info) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        EnemyController* controller = entity->getComponent<EnemyController>();
+        if (!controller) {
+            controller = entity->addComponent<EnemyController>();
+        }
+        if (!entity->getComponent<CharacterController>()) {
+            entity->addComponent<CharacterController>();
+        }
+        if (!entity->getComponent<Health>()) {
+            entity->addComponent<Health>();
+        }
+
+        if (NSNumber* value = info[@"detectionRange"]) {
+            controller->setDetectionRange(value.floatValue);
+        }
+        if (NSNumber* value = info[@"loseRange"]) {
+            controller->setLoseRange(value.floatValue);
+        }
+        if (NSNumber* value = info[@"attackRange"]) {
+            controller->setAttackRange(value.floatValue);
+        }
+        if (NSNumber* value = info[@"chaseSpeed"]) {
+            controller->setChaseSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"rotationSmoothSpeed"]) {
+            controller->setRotationSmoothSpeed(value.floatValue);
+        }
+        if (NSNumber* value = info[@"attackCooldown"]) {
+            controller->setAttackCooldown(value.floatValue);
+        }
+        if (NSNumber* value = info[@"attackDamage"]) {
+            controller->setAttackDamage(value.floatValue);
+        }
+        if (NSNumber* value = info[@"attackHitRadius"]) {
+            controller->setAttackHitRadius(value.floatValue);
+        }
+        if (NSNumber* value = info[@"attackForwardOffset"]) {
+            controller->setAttackForwardOffset(value.floatValue);
+        }
+        if (NSNumber* value = info[@"attackUpOffset"]) {
+            controller->setAttackUpOffset(value.floatValue);
+        }
+        if (NSNumber* value = info[@"attackMask"]) {
+            controller->setAttackMask(value.intValue);
+        }
+        if (NSNumber* value = info[@"attackHitTriggers"]) {
+            controller->setAttackHitTriggers(value.boolValue);
+        }
+        if (NSNumber* value = info[@"deathDespawnDelay"]) {
+            controller->setDeathDespawnDelay(value.floatValue);
+        }
+        if (NSNumber* value = info[@"debugLogging"]) {
+            controller->setDebugLogging(value.boolValue);
+        }
+        return YES;
+    }];
+}
+
+- (BOOL)addEnemyController:(NSString *)uuid {
+    return [self performSyncBool:^BOOL {
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return NO;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return NO;
+        if (!entity->getComponent<CharacterController>()) {
+            entity->addComponent<CharacterController>();
+        }
+        if (!entity->getComponent<Health>()) {
+            entity->addComponent<Health>();
+        }
+        if (!entity->getComponent<EnemyController>()) {
+            entity->addComponent<EnemyController>();
+        }
+        return YES;
+    }];
+}
+
+- (void)removeEnemyController:(NSString *)uuid {
+    [self performAsync:^{
+        Scene* scene = SceneManager::getInstance().getActiveScene();
+        if (!scene) return;
+        Entity* entity = SceneCommands::getEntityByUUID(scene, uuid.UTF8String);
+        if (!entity) return;
+        entity->removeComponent<EnemyController>();
     }];
 }
 

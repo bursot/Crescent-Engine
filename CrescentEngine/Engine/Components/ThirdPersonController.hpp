@@ -15,6 +15,7 @@
 #include "../Components/Camera.hpp"
 #include "../Components/SkinnedMeshRenderer.hpp"
 #include "../Components/Animator.hpp"
+#include "../Components/Health.hpp"
 #include "../Components/IKConstraint.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -23,6 +24,7 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace Crescent {
@@ -141,6 +143,24 @@ public:
     bool getDriveCharacterController() const { return m_DriveCharacterController; }
     void setDriveCharacterController(bool value) { m_DriveCharacterController = value; }
 
+    float getMeleeHitDamage() const { return m_MeleeHitDamage; }
+    void setMeleeHitDamage(float value) { m_MeleeHitDamage = std::max(0.0f, value); }
+
+    float getMeleeHitRadius() const { return m_MeleeHitRadius; }
+    void setMeleeHitRadius(float value) { m_MeleeHitRadius = std::max(0.05f, value); }
+
+    float getMeleeHitForwardOffset() const { return m_MeleeHitForwardOffset; }
+    void setMeleeHitForwardOffset(float value) { m_MeleeHitForwardOffset = value; }
+
+    float getMeleeHitUpOffset() const { return m_MeleeHitUpOffset; }
+    void setMeleeHitUpOffset(float value) { m_MeleeHitUpOffset = value; }
+
+    int getMeleeHitMask() const { return static_cast<int>(m_MeleeHitMask); }
+    void setMeleeHitMask(int value) { m_MeleeHitMask = static_cast<uint32_t>(std::max(0, value)); }
+
+    bool getMeleeHitTriggers() const { return m_MeleeHitTriggers; }
+    void setMeleeHitTriggers(bool value) { m_MeleeHitTriggers = value; }
+
     bool getDebugLogging() const { return m_DebugLogging; }
     void setDebugLogging(bool value) { m_DebugLogging = value; }
 
@@ -195,6 +215,7 @@ public:
         driveCharacter(deltaTime, input);
         syncWeaponSupportHandIK();
         updateAnimation(deltaTime);
+        updateMeleeHitTrace(deltaTime);
         syncNamedWeaponProp();
         updateCamera(deltaTime);
         emitDebugLog(deltaTime, input);
@@ -408,6 +429,15 @@ private:
     static bool ContainsAnyToken(const std::string& haystack, const std::vector<std::string>& tokens) {
         for (const auto& token : tokens) {
             if (!token.empty() && haystack.find(token) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool MatchesAnyTag(const std::string& tag, const std::initializer_list<const char*>& options) {
+        for (const char* option : options) {
+            if (option && tag == option) {
                 return true;
             }
         }
@@ -961,6 +991,11 @@ private:
     void dispatchClipEvent(const AnimationEvent& event, int clipIndex) {
         std::string type = getEventTypeLower(event);
         std::string tag = getEventTagLower(event);
+        if (MatchesAnyTag(tag, {"attack_window_open", "melee_window_open", "hitbox_on", "damage_window_open"})) {
+            beginMeleeHitWindow();
+        } else if (MatchesAnyTag(tag, {"attack_window_close", "melee_window_close", "hitbox_off", "damage_window_close"})) {
+            endMeleeHitWindow();
+        }
         if (type == "audio" || !event.payload.empty()) {
             bool directional = ContainsAnyToken(tag, {"swing", "whoosh", "attack"});
             playConfiguredEventAudio(event, {}, directional);
@@ -2586,6 +2621,13 @@ private:
         m_ActionClipIndex = clipIndex;
         m_ActionDuration = resolveClipDuration(clipIndex);
         m_ActionElapsed = 0.0f;
+        m_MeleeWindowUsesEvents = action == AnimAction::Fire &&
+                                  isMeleeAttackClipIndex(clipIndex) &&
+                                  clipHasEventToken(clipIndex, {
+                                      "attack_window_open", "melee_window_open", "hitbox_on", "damage_window_open",
+                                      "attack_window_close", "melee_window_close", "hitbox_off", "damage_window_close"
+                                  });
+        endMeleeHitWindow();
         float playbackSpeed = resolveActionPlaybackSpeed(action, clipIndex);
         float blendDuration = 0.0f;
         if (action == AnimAction::Equip || action == AnimAction::Disarm) {
@@ -2613,6 +2655,135 @@ private:
             return 1.85f;
         }
         return 1.0f;
+    }
+
+    Entity* resolveDamageTarget(Entity* entity) const {
+        Entity* cursor = entity;
+        while (cursor) {
+            if (cursor->getComponent<Health>()) {
+                return cursor;
+            }
+            Transform* transform = cursor->getTransform();
+            Transform* parent = transform ? transform->getParent() : nullptr;
+            cursor = parent ? parent->getEntity() : nullptr;
+        }
+        return nullptr;
+    }
+
+    bool computeMeleeHitCenter(Math::Vector3& outCenter) const {
+        Math::Matrix4x4 handWorld = Math::Matrix4x4::Identity;
+        Math::Vector3 handPos = Math::Vector3::Zero;
+        if (computeWeaponBoneWorld(handWorld)) {
+            handPos = handWorld.transformPoint(Math::Vector3::Zero);
+        } else if (m_BodyTransform) {
+            handPos = m_BodyTransform->getPosition() + Math::Vector3(0.0f, 1.0f, 0.0f);
+        } else {
+            return false;
+        }
+
+        Math::Vector3 bodyForward = getBodyPlanarForward();
+        outCenter = handPos + (bodyForward * m_MeleeHitForwardOffset) + (Math::Vector3::Up * m_MeleeHitUpOffset);
+        return true;
+    }
+
+    void beginMeleeHitWindow() {
+        m_MeleeHitWindowActive = true;
+        m_MeleeHitSweepInitialized = false;
+        m_MeleeHitVictims.clear();
+    }
+
+    void endMeleeHitWindow() {
+        m_MeleeHitWindowActive = false;
+        m_MeleeHitSweepInitialized = false;
+        m_MeleeHitVictims.clear();
+    }
+
+    bool shouldUseFallbackMeleeWindow() const {
+        return m_AnimState == AnimAction::Fire &&
+               isMeleeAttackClipIndex(m_ActionClipIndex) &&
+               !m_MeleeWindowUsesEvents;
+    }
+
+    void applyMeleeHitAtPoint(const Math::Vector3& center) {
+        Scene* scene = m_Entity ? m_Entity->getScene() : nullptr;
+        PhysicsWorld* physics = scene ? scene->getPhysicsWorld() : nullptr;
+        if (!physics) {
+            return;
+        }
+
+        std::vector<PhysicsOverlapHit> hits;
+        if (physics->overlapSphere(center,
+                                   m_MeleeHitRadius,
+                                   hits,
+                                   m_MeleeHitMask,
+                                   m_MeleeHitTriggers,
+                                   resolveBodyEntity()) <= 0) {
+            return;
+        }
+
+        Entity* selfEntity = resolveBodyEntity();
+        for (const auto& hit : hits) {
+            Entity* target = resolveDamageTarget(hit.entity);
+            if (!target || target == selfEntity) {
+                continue;
+            }
+            UUID targetUUID = target->getUUID();
+            if (m_MeleeHitVictims.find(targetUUID) != m_MeleeHitVictims.end()) {
+                continue;
+            }
+            Health* health = target->getComponent<Health>();
+            if (!health || health->isDead()) {
+                continue;
+            }
+            m_MeleeHitVictims.insert(targetUUID);
+            health->applyDamage(m_MeleeHitDamage);
+        }
+    }
+
+    void updateMeleeHitTrace(float deltaTime) {
+        (void)deltaTime;
+        bool meleeAttackPlaying = m_AnimState == AnimAction::Fire &&
+                                  isMeleeAttackClipIndex(m_ActionClipIndex) &&
+                                  !isActionClipFinished();
+        if (!meleeAttackPlaying) {
+            endMeleeHitWindow();
+            return;
+        }
+
+        if (shouldUseFallbackMeleeWindow()) {
+            float normalized = m_ActionDuration > 0.0f ? Math::Clamp(m_ActionElapsed / m_ActionDuration, 0.0f, 1.0f) : 0.0f;
+            bool shouldOpen = normalized >= 0.18f && normalized <= 0.52f;
+            if (shouldOpen && !m_MeleeHitWindowActive) {
+                beginMeleeHitWindow();
+            } else if (!shouldOpen && m_MeleeHitWindowActive) {
+                endMeleeHitWindow();
+            }
+        }
+
+        if (!m_MeleeHitWindowActive) {
+            return;
+        }
+
+        Math::Vector3 center = Math::Vector3::Zero;
+        if (!computeMeleeHitCenter(center)) {
+            return;
+        }
+
+        if (!m_MeleeHitSweepInitialized) {
+            m_MeleeHitPreviousCenter = center;
+            m_MeleeHitSweepInitialized = true;
+            applyMeleeHitAtPoint(center);
+            return;
+        }
+
+        Math::Vector3 delta = center - m_MeleeHitPreviousCenter;
+        float distance = delta.length();
+        int steps = std::max(1, static_cast<int>(std::ceil(distance / std::max(0.05f, m_MeleeHitRadius * 0.5f))));
+        for (int i = 1; i <= steps; ++i) {
+            float t = static_cast<float>(i) / static_cast<float>(steps);
+            applyMeleeHitAtPoint(Math::Vector3::Lerp(m_MeleeHitPreviousCenter, center, t));
+        }
+        m_MeleeHitPreviousCenter = center;
     }
 
     bool isActionClipFinished() const {
@@ -3286,6 +3457,12 @@ private:
     float m_SprintSpeed;
     bool m_EnableSprint;
     bool m_DriveCharacterController;
+    float m_MeleeHitDamage = 34.0f;
+    float m_MeleeHitRadius = 0.42f;
+    float m_MeleeHitForwardOffset = 0.34f;
+    float m_MeleeHitUpOffset = 0.02f;
+    uint32_t m_MeleeHitMask = PhysicsWorld::kAllLayersMask;
+    bool m_MeleeHitTriggers = false;
     bool m_UseCharacterFireAnimation;
     bool m_DebugLogging;
 
@@ -3350,6 +3527,11 @@ private:
     std::vector<int> m_MeleeAttackClips;
     int m_MeleeAttackCursor = 0;
     bool m_QueuedMeleeAttack = false;
+    bool m_MeleeWindowUsesEvents = false;
+    bool m_MeleeHitWindowActive = false;
+    bool m_MeleeHitSweepInitialized = false;
+    Math::Vector3 m_MeleeHitPreviousCenter = Math::Vector3::Zero;
+    std::unordered_set<UUID> m_MeleeHitVictims;
     int m_EventClipIndex = -1;
     float m_EventClipPrevTime = 0.0f;
     float m_EventClipTime = 0.0f;
