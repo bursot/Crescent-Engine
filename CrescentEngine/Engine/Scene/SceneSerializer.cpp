@@ -613,7 +613,7 @@ std::string BuildCookedEnvironmentRelativePath(const std::string& path) {
     if (path.empty() || path == "Builtin Sky") {
         return "";
     }
-    return "Library/ImportCache/hdri_" + HashRuntimeCookKey(NormalizeCookedEnvironmentKey(path)) + "_v1.cenv";
+    return "Library/ImportCache/hdri_" + HashRuntimeCookKey(NormalizeCookedEnvironmentKey(path)) + "_v2.cenv";
 }
 
 struct CookedMeshWriter {

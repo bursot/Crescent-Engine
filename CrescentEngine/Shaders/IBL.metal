@@ -62,6 +62,14 @@ float3 getCubeDirection(uint face, float2 uv) {
     return normalize(dir);
 }
 
+inline float3 sanitizeHDRColor(float3 color) {
+    bool3 finiteMask = isfinite(color);
+    color.x = finiteMask.x ? color.x : 0.0;
+    color.y = finiteMask.y ? color.y : 0.0;
+    color.z = finiteMask.z ? color.z : 0.0;
+    return clamp(color, float3(0.0), float3(65504.0));
+}
+
 
 
 // =============================================================================
@@ -152,7 +160,10 @@ kernel void equirectToCubeKernel(
     float3 dir = getCubeDirection(face, uv);
     
     float2 equirectUV = directionToEquirectUV(dir);
+    equirectUV.x = fract(equirectUV.x);
+    equirectUV.y = clamp(equirectUV.y, 0.0, 1.0);
     float4 color = equirect.sample(linearSampler, equirectUV);
+    color.rgb = sanitizeHDRColor(color.rgb);
     
     cubemap.write(color, gid.xy, face);
 }
@@ -217,16 +228,17 @@ kernel void prefilteredEnvKernel(
             // Mipmap level based on roughness and solid angle ratio
             // This prevents aliasing from bright sun spots
             float mipLevel = (roughness == 0.0) ? 0.0 : 0.5 * log2(saSample / saTexel);
-            mipLevel = max(mipLevel, 0.0);
+            mipLevel = clamp(mipLevel, 0.0, float(envMap.get_num_mip_levels() - 1));
             
             // Sample environment map with calculated mip level
             float3 sampleColor = envMap.sample(linearSampler, L, level(mipLevel)).rgb;
+            sampleColor = sanitizeHDRColor(sampleColor);
             prefilteredColor += sampleColor * NdotL;
             totalWeight += NdotL;
         }
     }
     
-    prefilteredColor = prefilteredColor / max(totalWeight, 0.001);
+    prefilteredColor = sanitizeHDRColor(prefilteredColor / max(totalWeight, 0.001));
     prefilteredMap.write(float4(prefilteredColor, 1.0), gid.xy, face);
 }
 
@@ -265,11 +277,12 @@ kernel void irradianceKernel(
             // Tangent space to world
             float3 sampleVec = tangentSample.x * right + tangentSample.y * up + tangentSample.z * N;
             
-            irradiance += envMap.sample(linearSampler, sampleVec).rgb * cos(theta) * sin(theta);
+            float3 sampleColor = envMap.sample(linearSampler, sampleVec).rgb;
+            irradiance += sanitizeHDRColor(sampleColor) * cos(theta) * sin(theta);
             nrSamples += 1.0;
         }
     }
     
-    irradiance = PI * irradiance / max(nrSamples, 1.0);
+    irradiance = sanitizeHDRColor(PI * irradiance / max(nrSamples, 1.0));
     irradianceMap.write(float4(irradiance, 1.0), gid.xy, face);
 }

@@ -232,7 +232,12 @@ std::vector<uint16_t> ConvertRGBA32FToRGBA16F(const float* rgba, size_t pixelCou
         return out;
     }
     for (size_t i = 0; i < pixelCount * 4u; ++i) {
-        out[i] = FloatToHalfBits(rgba[i]);
+        float value = rgba[i];
+        if (!std::isfinite(value)) {
+            value = 0.0f;
+        }
+        value = std::clamp(value, -65504.0f, 65504.0f);
+        out[i] = FloatToHalfBits(value);
     }
     return out;
 }
@@ -293,7 +298,7 @@ std::string HashPathStable(const std::string& input) {
 }
 
 constexpr const char* kEmbeddedTextureMarker = "#embedded:";
-constexpr const char* kKtx2CacheVersion = "v2a";
+constexpr const char* kKtx2CacheVersion = "v2b";
 
 bool IsEmbeddedTextureCacheKey(const std::string& cacheKey) {
     return cacheKey.find(kEmbeddedTextureMarker) != std::string::npos;
@@ -333,6 +338,19 @@ std::string NormalizeEmbeddedCacheKey(const std::string& cacheKey) {
         }
     }
     return normalizedSource + cacheKey.substr(markerPos);
+}
+
+std::string BuildTextureVariantSuffix(bool srgb, bool flipVertical, bool normalMap) {
+    return std::string("_")
+        + (srgb ? "srgb" : "linear")
+        + (flipVertical ? "_flip" : "_noflip")
+        + (normalMap ? "_nrm" : "_std");
+}
+
+std::string BuildTextureLoadCacheKey(const std::string& path, bool srgb, bool flipVertical, bool normalMap) {
+    return path + "#" + (srgb ? "srgb" : "linear")
+        + "#" + (flipVertical ? "flip" : "noflip")
+        + "#" + (normalMap ? "nrm" : "std");
 }
 
 uint32_t ComputeMipLevels(uint32_t width, uint32_t height) {
@@ -388,7 +406,7 @@ void LogTextureMemory(const std::string& label, uint32_t width, uint32_t height,
               << std::endl;
 }
 
-std::string GetKtx2CachePath(const std::string& sourcePath) {
+std::string GetKtx2CachePath(const std::string& sourcePath, bool srgb, bool flipVertical, bool normalMap) {
     AssetDatabase& db = AssetDatabase::getInstance();
     std::string libraryPath = db.getLibraryPath();
     if (libraryPath.empty()) {
@@ -414,10 +432,11 @@ std::string GetKtx2CachePath(const std::string& sourcePath) {
         }
     }
     std::filesystem::path cacheDir = std::filesystem::path(libraryPath) / "ImportCache";
-    return (cacheDir / (guid + "_" + std::string(kKtx2CacheVersion) + ".ktx2")).string();
+    return (cacheDir / (guid + BuildTextureVariantSuffix(srgb, flipVertical, normalMap)
+        + "_" + std::string(kKtx2CacheVersion) + ".ktx2")).string();
 }
 
-std::string GetEmbeddedKtx2CachePath(const std::string& cacheKey) {
+std::string GetEmbeddedKtx2CachePath(const std::string& cacheKey, bool srgb, bool normalMap) {
     AssetDatabase& db = AssetDatabase::getInstance();
     std::string libraryPath = db.getLibraryPath();
     if (libraryPath.empty()) {
@@ -428,7 +447,8 @@ std::string GetEmbeddedKtx2CachePath(const std::string& cacheKey) {
     }
     std::filesystem::path cacheDir = std::filesystem::path(libraryPath) / "ImportCache";
     std::string normalizedKey = NormalizeEmbeddedCacheKey(cacheKey);
-    return (cacheDir / ("embedded_" + HashPathStable(normalizedKey) + "_" + std::string(kKtx2CacheVersion) + ".ktx2")).string();
+    return (cacheDir / ("embedded_" + HashPathStable(normalizedKey + BuildTextureVariantSuffix(srgb, false, normalMap))
+        + "_" + std::string(kKtx2CacheVersion) + ".ktx2")).string();
 }
 
 std::string GetEmbeddedTempSourcePath(const std::string& cacheKey) {
@@ -734,9 +754,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadTextureUncompressed(const std::str
         return nullptr;
     }
 
-    std::string cacheKey = path
-        + (srgb ? "#raw_srgb" : "#raw_linear")
-        + (flipVertical ? "#flip" : "#noflip");
+    std::string cacheKey = BuildTextureLoadCacheKey(path, srgb, flipVertical, false) + "#raw";
     if (auto it = m_Cache.find(cacheKey); it != m_Cache.end()) {
         if (auto cached = it->second.lock()) {
             return cached;
@@ -809,8 +827,10 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
         return nullptr;
     }
     
+    const std::string cacheKey = BuildTextureLoadCacheKey(path, srgb, flipVertical, normalMap);
+
     // Cache lookup
-    if (auto it = m_Cache.find(path); it != m_Cache.end()) {
+    if (auto it = m_Cache.find(cacheKey); it != m_Cache.end()) {
         if (auto cached = it->second.lock()) {
             return cached;
         }
@@ -822,13 +842,13 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
         }
         auto tex = loadKTX2Texture(path, srgb, normalMap, path);
         if (tex) {
-            m_Cache[path] = tex;
+            m_Cache[cacheKey] = tex;
         }
         return tex;
     }
 
     if (!isKtx2Disabled() && isLdrTextureFile(path)) {
-        std::string cachePath = GetKtx2CachePath(path);
+        std::string cachePath = GetKtx2CachePath(path, srgb, flipVertical, normalMap);
         if (isKtx2DebugEnabled()) {
             std::cerr << "[TextureLoader] KTX2 debug: Cache path for " << path << " = " << cachePath << std::endl;
         }
@@ -839,7 +859,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
                 }
                 auto tex = loadKTX2Texture(cachePath, srgb, normalMap, path);
                 if (tex) {
-                    m_Cache[path] = tex;
+                    m_Cache[cacheKey] = tex;
                     return tex;
                 }
             }
@@ -858,7 +878,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
             if (generated) {
                 auto tex = loadKTX2Texture(cachePath, srgb, normalMap, path);
                 if (tex) {
-                    m_Cache[path] = tex;
+                    m_Cache[cacheKey] = tex;
                     return tex;
                 }
             }
@@ -867,7 +887,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadTexture(const std::string& path, b
 
     auto tex = loadTextureUncompressed(path, srgb, flipVertical);
     if (tex) {
-        m_Cache[path] = tex;
+        m_Cache[cacheKey] = tex;
     }
     return tex;
 }
@@ -877,7 +897,9 @@ std::shared_ptr<Texture2D> TextureLoader::loadEmbeddedCookedTexture(const std::s
         return nullptr;
     }
 
-    if (auto it = m_Cache.find(cacheKey); it != m_Cache.end()) {
+    const std::string variantCacheKey = BuildTextureLoadCacheKey(cacheKey, srgb, false, normalMap);
+
+    if (auto it = m_Cache.find(variantCacheKey); it != m_Cache.end()) {
         if (auto cached = it->second.lock()) {
             return cached;
         }
@@ -887,7 +909,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadEmbeddedCookedTexture(const std::s
         return nullptr;
     }
 
-    std::string cachePath = GetEmbeddedKtx2CachePath(cacheKey);
+    std::string cachePath = GetEmbeddedKtx2CachePath(cacheKey, srgb, normalMap);
     if (cachePath.empty()) {
         return nullptr;
     }
@@ -913,7 +935,7 @@ std::shared_ptr<Texture2D> TextureLoader::loadEmbeddedCookedTexture(const std::s
 
     auto tex = loadKTX2Texture(cachePath, srgb, normalMap, cacheKey);
     if (tex) {
-        m_Cache[cacheKey] = tex;
+        m_Cache[variantCacheKey] = tex;
     }
     return tex;
 }
@@ -951,7 +973,8 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
     }
     
     if (!cacheKey.empty()) {
-        if (auto it = m_Cache.find(cacheKey); it != m_Cache.end()) {
+        const std::string variantCacheKey = BuildTextureLoadCacheKey(cacheKey, srgb, flipVertical, normalMap);
+        if (auto it = m_Cache.find(variantCacheKey); it != m_Cache.end()) {
             if (auto cached = it->second.lock()) {
                 return cached;
             }
@@ -974,7 +997,7 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
     }
 
     if (!isKtx2Disabled() && !cacheKey.empty() && IsEmbeddedTextureCacheKey(cacheKey)) {
-        std::string cachePath = GetEmbeddedKtx2CachePath(cacheKey);
+        std::string cachePath = GetEmbeddedKtx2CachePath(cacheKey, srgb, normalMap);
         if (!cachePath.empty()) {
             std::string sourcePath = ExtractEmbeddedSourcePath(cacheKey);
             const std::string& cacheDependency = sourcePath.empty() ? cacheKey : sourcePath;
@@ -997,7 +1020,7 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
                     std::cerr << "[TextureLoader] KTX2 debug: Using cached embedded KTX2 " << cachePath << std::endl;
                 }
                 if (auto tex = loadKTX2Texture(cachePath, srgb, normalMap, cacheKey)) {
-                    m_Cache[cacheKey] = tex;
+                    m_Cache[BuildTextureLoadCacheKey(cacheKey, srgb, flipVertical, normalMap)] = tex;
                     return tex;
                 }
             }
@@ -1020,7 +1043,7 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
                 }
                 if (generated) {
                     if (auto tex = loadKTX2Texture(cachePath, srgb, normalMap, cacheKey)) {
-                        m_Cache[cacheKey] = tex;
+                        m_Cache[BuildTextureLoadCacheKey(cacheKey, srgb, flipVertical, normalMap)] = tex;
                         return tex;
                     }
                 }
@@ -1063,7 +1086,7 @@ std::shared_ptr<Texture2D> TextureLoader::createTextureFromRGBA8(const std::stri
     tex->setColorSpace(srgb ? Texture2D::ColorSpace::SRGB : Texture2D::ColorSpace::Linear);
     if (!cacheKey.empty()) {
         tex->setPath(cacheKey);
-        m_Cache[cacheKey] = tex;
+        m_Cache[BuildTextureLoadCacheKey(cacheKey, srgb, flipVertical, normalMap)] = tex;
     }
     return tex;
 }

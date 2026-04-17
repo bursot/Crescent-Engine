@@ -2860,6 +2860,18 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
     if (!material) {
         return result;
     }
+
+    std::string sourceExt = std::filesystem::path(context.sourcePath).extension().string();
+    std::transform(sourceExt.begin(), sourceExt.end(), sourceExt.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    const bool isGltfSource = (sourceExt == ".gltf" || sourceExt == ".glb");
+    if (isGltfSource) {
+        // glTF 2.0 defaults: metallicFactor = 1.0, roughnessFactor = 1.0.
+        // Assimp may omit these keys entirely when they are not authored explicitly.
+        result->setMetallic(1.0f);
+        result->setRoughness(1.0f);
+    }
     
     static const std::vector<std::string> kAlbedoTokens = {
         "albedo", "basecolor", "base_color", "basecolour", "base_colour", "diffuse", "color", "colour"
@@ -2877,7 +2889,8 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
         "ao", "occlusion", "ambientocclusion", "ambient_occlusion"
     };
     static const std::vector<std::string> kORMTokens = {
-        "orm", "metallicroughness", "metallic_roughness", "occlusionroughnessmetallic", "occlusion_roughness_metallic", "mra", "rma"
+        "orm", "metallicroughness", "metallic_roughness", "metalroughness", "metal_roughness",
+        "occlusionroughnessmetallic", "occlusion_roughness_metallic", "mra", "rma"
     };
     static const std::vector<std::string> kEmissionTokens = {
         "emissive", "emission", "emit", "glow"
@@ -2915,13 +2928,15 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
     }
     
     bool roughnessSet = false;
-    float metallic = 0.0f;
+    float metallic = isGltfSource ? 1.0f : 0.0f;
     if (material->Get(AI_MATKEY_METALLIC_FACTOR, metallic) == AI_SUCCESS) {
         result->setMetallic(metallic);
     }
-    float roughness = 0.0f;
+    float roughness = isGltfSource ? 1.0f : 0.0f;
     if (material->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS) {
         result->setRoughness(roughness);
+        roughnessSet = true;
+    } else if (isGltfSource) {
         roughnessSet = true;
     }
     if (!roughnessSet) {
@@ -3028,6 +3043,12 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
     }
     if (ormTex) {
         result->setORMTexture(ormTex);
+        if (result->getMetallicTexture() == ormTex) {
+            result->setMetallicTexture(nullptr);
+        }
+        if (result->getRoughnessTexture() == ormTex) {
+            result->setRoughnessTexture(nullptr);
+        }
     }
     
     auto emissionTex = LoadMaterialTexture(context, material, aiTextureType_EMISSIVE, true, false);
@@ -3036,6 +3057,10 @@ static std::shared_ptr<Material> BuildMaterial(ImportContext& context, const aiM
     }
     if (emissionTex) {
         result->setEmissionTexture(emissionTex);
+        Math::Vector3 emission = result->getEmission();
+        if (emission.x <= 0.0001f && emission.y <= 0.0001f && emission.z <= 0.0001f) {
+            result->setEmission(Math::Vector3(1.0f, 1.0f, 1.0f));
+        }
         if (result->getEmissionStrength() <= 0.0f) {
             result->setEmissionStrength(1.0f);
         }

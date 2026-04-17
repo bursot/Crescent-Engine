@@ -43,7 +43,7 @@ bool IBLGenerator::initialize(MTL::Device* device, MTL::CommandQueue* queue) {
     samplerDesc->setMinFilter(MTL::SamplerMinMagFilterLinear);
     samplerDesc->setMagFilter(MTL::SamplerMinMagFilterLinear);
     samplerDesc->setMipFilter(MTL::SamplerMipFilterLinear);
-    samplerDesc->setSAddressMode(MTL::SamplerAddressModeRepeat);
+    samplerDesc->setSAddressMode(MTL::SamplerAddressModeClampToEdge);
     samplerDesc->setTAddressMode(MTL::SamplerAddressModeClampToEdge);
     samplerDesc->setRAddressMode(MTL::SamplerAddressModeClampToEdge);
     m_linearSampler = m_device->newSamplerState(samplerDesc);

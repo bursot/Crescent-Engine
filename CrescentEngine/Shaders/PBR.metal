@@ -221,6 +221,88 @@ inline float computeFade(float dist, float start, float end) {
     return saturate((dist - start) / span);
 }
 
+inline float sampleParallaxHeight(texture2d<float> heightMap,
+                                  sampler textureSampler,
+                                  float2 uv,
+                                  constant MaterialUniforms& material) {
+    float height = heightMap.sample(textureSampler, uv).r;
+    if (material.textureFlags2.w > 0.5) {
+        height = 1.0 - height;
+    }
+    return height;
+}
+
+inline float2 applyParallaxOcclusionMapping(texture2d<float> heightMap,
+                                            sampler textureSampler,
+                                            float2 baseUV,
+                                            float3 viewDirTS,
+                                            constant MaterialUniforms& material) {
+    const float heightScale = abs(material.heightParams.x);
+    if (heightScale <= 1e-5) {
+        return baseUV;
+    }
+
+    const float viewZ = max(viewDirTS.z, 1e-4);
+    const float ndotv = saturate(viewZ);
+    const float minLayers = clamp(material.heightParams.y, 8.0, 64.0);
+    const float maxLayers = clamp(material.heightParams.z, minLayers, 128.0);
+    const float layerCount = clamp(mix(maxLayers, minLayers, ndotv), 8.0, 128.0);
+    const float layerDepth = 1.0 / layerCount;
+
+    float2 parallaxDirection = (viewDirTS.xy / viewZ) * heightScale;
+    float parallaxLength = length(parallaxDirection);
+    if (parallaxLength > 0.25) {
+        parallaxDirection *= 0.25 / parallaxLength;
+    }
+
+    float2 deltaUV = parallaxDirection / layerCount;
+    float2 currentUV = baseUV;
+    float currentDepth = 0.0;
+    float currentHeight = sampleParallaxHeight(heightMap, textureSampler, currentUV, material);
+
+    float2 previousUV = currentUV;
+    float previousDepth = currentDepth;
+    float previousHeight = currentHeight;
+
+    for (int layer = 0; layer < 128; ++layer) {
+        if (layer >= int(layerCount) || currentDepth >= currentHeight) {
+            break;
+        }
+        previousUV = currentUV;
+        previousDepth = currentDepth;
+        previousHeight = currentHeight;
+        currentUV -= deltaUV;
+        currentDepth += layerDepth;
+        currentHeight = sampleParallaxHeight(heightMap, textureSampler, currentUV, material);
+    }
+
+    float before = previousHeight - previousDepth;
+    float after = currentHeight - currentDepth;
+    float weightDenom = before - after;
+    float weight = (abs(weightDenom) > 1e-5) ? clamp(before / weightDenom, 0.0, 1.0) : 0.0;
+    float2 refinedUV = mix(previousUV, currentUV, weight);
+
+    float2 lowUV = previousUV;
+    float2 highUV = currentUV;
+    float lowDepth = previousDepth;
+    float highDepth = currentDepth;
+
+    for (int i = 0; i < 5; ++i) {
+        float2 midUV = (lowUV + highUV) * 0.5;
+        float midDepth = (lowDepth + highDepth) * 0.5;
+        float midHeight = sampleParallaxHeight(heightMap, textureSampler, midUV, material);
+        if (midDepth < midHeight) {
+            lowUV = midUV;
+            lowDepth = midDepth;
+        } else {
+            highUV = midUV;
+            highDepth = midDepth;
+        }
+    }
+
+    return (refinedUV + (lowUV + highUV) * 0.5) * 0.5;
+}
+
 inline float integrateHeightFog(float baseDensity,
                                 float fogHeight,
                                 float heightFalloff,
@@ -398,6 +480,8 @@ float3 sampleEnvironment(texture2d<float> envMap,
     float3x3 rot = environmentRotation(env);
     float3 rotated = rot * normalize(direction);
     float2 uv = directionToEquirectUV(rotated);
+    uv.x = fract(uv.x);
+    uv.y = clamp(uv.y, 0.0, 1.0);
     float lodLevel = max(lod + env.exposureIntensity.w, 0.0);
     float3 color = envMap.sample(envSampler, uv, level(lodLevel)).rgb;
     return applyEnvironmentGrading(color, env);
@@ -430,7 +514,7 @@ constant float3 kSSAOKernel[16] = {
     float3(0.5381, 0.1856, 0.4319),
     float3(0.1379, 0.2486, 0.4430),
     float3(0.3371, 0.5679, 0.0057),
-    float3(-0.6999, -0.0451, -0.0019),
+    float3(-0.6999, -0.0451, 0.0019),
     float3(0.0689, -0.1598, 0.8547),
     float3(0.0560, 0.0069, 0.1843),
     float3(-0.0146, 0.1402, 0.0762),
@@ -831,22 +915,22 @@ float samplePointShadow(const device ShadowGPUData* shadowData,
     float farP = s.depthRange.y;
     float3 toLight = lightPosWS - worldPos;
     float nDotL = saturate(dot(normalize(normalWS), normalize(toLight)));
-    float texelWorld = (2.0 * farP) / max(s.atlasUV.x, 1.0);
+    uint cubeIndex = (uint)round(s.depthRange.z);
+    int t = (int)round(tier);
+    depth2d_array<float> cubeTex = (t == 1) ? cube1 : (t == 2 ? cube2 : (t == 3 ? cube3 : cube0));
+    float texelWorld = (2.0 * farP) / max(float(cubeTex.get_width()), 1.0);
     float receiverOffset = texelWorld * mix(2.35, 0.85, nDotL);
     float3 samplePos = worldPos + normalize(normalWS) * receiverOffset;
     float3 toFrag = samplePos - lightPosWS;
     PointShadowProjection proj = projectPointShadowFace(toFrag);
+    uint slice = cubeIndex * 6u + proj.face;
 
     float ref = saturate((length(toFrag) - nearP) / max(farP - nearP, 1e-5));
-    
+
     float bias = s.params.x;
     bias += s.params.y * (0.65 + 1.1 * (1.0 - nDotL));
     ref = max(ref - bias, 0.0);
-    
-    uint cubeIndex = (uint)round(s.depthRange.z);
-    uint slice = cubeIndex * 6u + proj.face;
-    int t = (int)round(tier);
-    depth2d_array<float> cubeTex = (t == 1) ? cube1 : (t == 2 ? cube2 : (t == 3 ? cube3 : cube0));
+
     float2 texel = 1.0 / float2(cubeTex.get_width(), cubeTex.get_height());
     float2 worldCell = floor(samplePos.xz / max(texelWorld * 6.0, 0.05));
     float seed = hash21(worldCell + float2((float)cubeIndex * 7.0 + (float)proj.face,
@@ -998,10 +1082,7 @@ vertex PrepassOut vertex_prepass_skinned(
     out.position = camera.viewProjectionMatrix * worldPos;
 
     float3x3 skin3 = float3x3(skin[0].xyz, skin[1].xyz, skin[2].xyz);
-    float3x3 model3 = float3x3(model.modelMatrix[0].xyz,
-                               model.modelMatrix[1].xyz,
-                               model.modelMatrix[2].xyz);
-    float3 worldNormal = normalize(model3 * (skin3 * in.normal));
+    float3 worldNormal = normalize((model.normalMatrix * float4(skin3 * in.normal, 0.0)).xyz);
     out.normalVS = normalize((camera.viewMatrix * float4(worldNormal, 0.0)).xyz);
     out.texCoord = in.texCoord;
     out.lightmapTexCoord = in.texCoord1;
@@ -1014,13 +1095,55 @@ vertex PrepassOut vertex_prepass_skinned(
 vertex VelocityOut vertex_velocity(
     VertexIn in [[stage_in]],
     constant ModelUniforms& model [[buffer(1)]],
+    constant CameraUniforms& camera [[buffer(2)]],
+    constant MaterialUniforms& material [[buffer(3)]],
+    constant MeshUniforms& mesh [[buffer(4)]],
     constant VelocityUniforms& velocity [[buffer(5)]]
 ) {
     VelocityOut out;
-    float4 worldPos = model.modelMatrix * float4(in.position, 1.0);
-    float4 prevWorldPos = velocity.prevModelMatrix * float4(in.position, 1.0);
-    float4 currClip = velocity.currViewProjection * worldPos;
-    float4 prevClip = velocity.prevViewProjection * prevWorldPos;
+    float weight = saturate(in.color.a);
+    float3 worldPos = float3(0.0);
+    float3 prevWorldPos = float3(0.0);
+    if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5) {
+        float3 boundsCenter = mesh.boundsCenter.xyz;
+        float3 boundsSize = mesh.boundsSize.xyz;
+        float3 centerWS = (model.modelMatrix * float4(boundsCenter, 1.0)).xyz;
+        float3 prevCenterWS = (velocity.prevModelMatrix * float4(boundsCenter, 1.0)).xyz;
+        float3 windCenter = applyWindOffset(centerWS, weight, material, camera);
+        float3 prevWindCenter = applyWindOffset(prevCenterWS, weight, material, camera);
+        float3 toCam = normalize(camera.cameraPositionTime.xyz - windCenter);
+        float3 prevToCam = normalize(camera.cameraPositionTime.xyz - prevWindCenter);
+        float3 upRef = (abs(toCam.y) < 0.98) ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 1.0);
+        float3 prevUpRef = (abs(prevToCam.y) < 0.98) ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 1.0);
+        float3 right = normalize(cross(upRef, toCam));
+        float3 billUp = normalize(cross(toCam, right));
+        float3 prevRight = normalize(cross(prevUpRef, prevToCam));
+        float3 prevBillUp = normalize(cross(prevToCam, prevRight));
+        float3 axisX = model.modelMatrix[0].xyz;
+        float3 axisY = model.modelMatrix[1].xyz;
+        float3 axisZ = model.modelMatrix[2].xyz;
+        float3 prevAxisX = velocity.prevModelMatrix[0].xyz;
+        float3 prevAxisY = velocity.prevModelMatrix[1].xyz;
+        float3 prevAxisZ = velocity.prevModelMatrix[2].xyz;
+        float uniformScale = max(length(axisX), max(length(axisY), length(axisZ)));
+        float prevUniformScale = max(length(prevAxisX), max(length(prevAxisY), length(prevAxisZ)));
+        float width = max(boundsSize.x, boundsSize.z) * uniformScale;
+        float height = max(boundsSize.y, 0.0001) * uniformScale;
+        float prevWidth = max(boundsSize.x, boundsSize.z) * prevUniformScale;
+        float prevHeight = max(boundsSize.y, 0.0001) * prevUniformScale;
+        float2 quad = float2(in.position.x, in.position.z);
+        worldPos = windCenter + right * (quad.x * width) + billUp * (quad.y * height);
+        prevWorldPos = prevWindCenter + prevRight * (quad.x * prevWidth) + prevBillUp * (quad.y * prevHeight);
+    } else {
+        float4 wp = model.modelMatrix * float4(in.position, 1.0);
+        float4 prevWp = velocity.prevModelMatrix * float4(in.position, 1.0);
+        wp.xyz = applyWindOffset(wp.xyz, weight, material, camera);
+        prevWp.xyz = applyWindOffset(prevWp.xyz, weight, material, camera);
+        worldPos = wp.xyz;
+        prevWorldPos = prevWp.xyz;
+    }
+    float4 currClip = velocity.currViewProjection * float4(worldPos, 1.0);
+    float4 prevClip = velocity.prevViewProjection * float4(prevWorldPos, 1.0);
     out.position = currClip;
     out.currClip = currClip;
     out.prevClip = prevClip;
@@ -1030,9 +1153,11 @@ vertex VelocityOut vertex_velocity(
 vertex VelocityOut vertex_velocity_skinned(
     VertexInSkinned in [[stage_in]],
     constant ModelUniforms& model [[buffer(1)]],
+    constant CameraUniforms& camera [[buffer(2)]],
     const device float4x4* bones [[buffer(3)]],
     constant VelocityUniforms& velocity [[buffer(5)]],
-    const device float4x4* prevBones [[buffer(6)]]
+    const device float4x4* prevBones [[buffer(6)]],
+    constant MaterialUniforms& material [[buffer(7)]]
 ) {
     VelocityOut out;
     float4x4 skin = float4x4(1.0);
@@ -1054,6 +1179,9 @@ vertex VelocityOut vertex_velocity_skinned(
     float4 prevSkinnedPos = skinPrev * float4(in.position, 1.0);
     float4 worldPos = model.modelMatrix * skinnedPos;
     float4 prevWorldPos = velocity.prevModelMatrix * prevSkinnedPos;
+    float weight = saturate(in.color.a);
+    worldPos.xyz = applyWindOffset(worldPos.xyz, weight, material, camera);
+    prevWorldPos.xyz = applyWindOffset(prevWorldPos.xyz, weight, material, camera);
 
     float4 currClip = velocity.currViewProjection * worldPos;
     float4 prevClip = velocity.prevViewProjection * prevWorldPos;
@@ -1107,8 +1235,8 @@ vertex VertexOut vertex_main(
         wp.xyz = applyWindOffset(wp.xyz, weight, material, camera);
         worldPos = wp.xyz;
         worldNormal = normalize((model.normalMatrix * float4(in.normal, 0.0)).xyz);
-        tangent = normalize((model.modelMatrix * float4(in.tangent, 0.0)).xyz);
-        bitangent = normalize((model.modelMatrix * float4(in.bitangent, 0.0)).xyz);
+        tangent = normalize((model.normalMatrix * float4(in.tangent, 0.0)).xyz);
+        bitangent = normalize((model.normalMatrix * float4(in.bitangent, 0.0)).xyz);
     }
 
     out.worldPosition = worldPos;
@@ -1118,7 +1246,10 @@ vertex VertexOut vertex_main(
     out.bitangent = bitangent;
     float2 texCoord = in.texCoord;
     if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5 && material.impostorParams0.x > 0.5) {
-        float3x3 model3 = float3x3(model.modelMatrix[0].xyz, model.modelMatrix[1].xyz, model.modelMatrix[2].xyz);
+        float3 axisX = normalize(model.modelMatrix[0].xyz);
+        float3 axisY = normalize(model.modelMatrix[1].xyz);
+        float3 axisZ = normalize(model.modelMatrix[2].xyz);
+        float3x3 model3 = float3x3(axisX, axisY, axisZ);
         float3x3 worldToLocal = transpose(model3);
         texCoord = impostorAtlasUV(texCoord, toCamDir, worldToLocal, material);
     }
@@ -1181,8 +1312,8 @@ vertex VertexOut vertex_main_instanced(
         wp.xyz = applyWindOffset(wp.xyz, weight, material, camera);
         worldPos = wp.xyz;
         worldNormal = normalize((inst.normalMatrix * float4(in.normal, 0.0)).xyz);
-        tangent = normalize((inst.modelMatrix * float4(in.tangent, 0.0)).xyz);
-        bitangent = normalize((inst.modelMatrix * float4(in.bitangent, 0.0)).xyz);
+        tangent = normalize((inst.normalMatrix * float4(in.tangent, 0.0)).xyz);
+        bitangent = normalize((inst.normalMatrix * float4(in.bitangent, 0.0)).xyz);
     }
 
     out.worldPosition = worldPos;
@@ -1192,7 +1323,10 @@ vertex VertexOut vertex_main_instanced(
     out.bitangent = bitangent;
     float2 texCoord = in.texCoord;
     if (mesh.flags.x > 0.5 && material.foliageParams2.z > 0.5 && material.impostorParams0.x > 0.5) {
-        float3x3 model3 = float3x3(inst.modelMatrix[0].xyz, inst.modelMatrix[1].xyz, inst.modelMatrix[2].xyz);
+        float3 axisX = normalize(inst.modelMatrix[0].xyz);
+        float3 axisY = normalize(inst.modelMatrix[1].xyz);
+        float3 axisZ = normalize(inst.modelMatrix[2].xyz);
+        float3x3 model3 = float3x3(axisX, axisY, axisZ);
         float3x3 worldToLocal = transpose(model3);
         texCoord = impostorAtlasUV(texCoord, toCamDir, worldToLocal, material);
     }
@@ -1232,13 +1366,10 @@ vertex VertexOut vertex_skinned(
     out.position = camera.viewProjectionMatrix * worldPos;
 
     float3x3 skin3 = float3x3(skin[0].xyz, skin[1].xyz, skin[2].xyz);
-    float3x3 model3 = float3x3(model.modelMatrix[0].xyz,
-                               model.modelMatrix[1].xyz,
-                               model.modelMatrix[2].xyz);
 
-    out.normal = normalize(model3 * (skin3 * in.normal));
-    out.tangent = normalize(model3 * (skin3 * in.tangent));
-    out.bitangent = normalize(model3 * (skin3 * in.bitangent));
+    out.normal = normalize((model.normalMatrix * float4(skin3 * in.normal, 0.0)).xyz);
+    out.tangent = normalize((model.normalMatrix * float4(skin3 * in.tangent, 0.0)).xyz);
+    out.bitangent = normalize((model.normalMatrix * float4(skin3 * in.bitangent, 0.0)).xyz);
 
     out.texCoord = in.texCoord;
     out.lightmapTexCoord = in.texCoord1;
@@ -1740,7 +1871,7 @@ fragment float4 bloom_combine_fragment(
         float2 uv = in.uv * grainScale + float2(t * 0.17, t * 0.29);
         float noise = fract(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453);
         float grain = (noise - 0.5) * 2.0;
-        color += grain * grainIntensity;
+        color = max(color + grain * grainIntensity, 0.0);
     }
     if (grainIntensity < 0.0001) {
         float ditherAmount = (toneMapping > 0.5 || gradingIntensity > 0.001) ? 1.0 : 0.0;
@@ -1790,11 +1921,12 @@ fragment float4 ssr_fragment(
     float3 hitView = float3(0.0);
     float hit = 0.0;
 
+    float pixelJitter = hash21(floor(in.uv * float2(sceneTex.get_width(), sceneTex.get_height())));
     for (int i = 0; i < 128; ++i) {
         if (float(i) >= maxSteps) {
             break;
         }
-        float3 rayPos = viewPos + reflDir * (stepSize * (float(i) + 1.0));
+        float3 rayPos = viewPos + reflDir * (stepSize * (float(i) + 0.5 + pixelJitter));
         float4 clip = camera.projectionMatrix * float4(rayPos, 1.0);
         if (clip.w <= 0.0001) {
             break;
@@ -1842,10 +1974,11 @@ fragment float4 ssr_fragment(
                 float3 hitNormalVS = normalize(hitNormalSample.xyz * 2.0 - 1.0);
                 float facing = dot(hitNormalVS, normalize(-reflDir));
                 float hitDistance = length(refineView - viewPos);
-                if (facing > 0.08 && hitDistance <= maxDistance) {
+                float facingFade = smoothstep(0.08, 0.3, facing);
+                if (facingFade > 0.0 && hitDistance <= maxDistance) {
                     hitUV = refineUV;
                     hitView = refineView;
-                    hit = 1.0;
+                    hit = facingFade;
                     break;
                 }
             }
@@ -1929,9 +2062,13 @@ fragment DecalOut decal_fragment(
 
     if (decal.mapFlags.y > 0.5) {
         float3 tangentNormal = normalMap.sample(decalSampler, uv).xyz * 2.0 - 1.0;
-        float3 T = normalize(decal.modelMatrix[0].xyz);
-        float3 B = normalize(decal.modelMatrix[1].xyz);
-        float3 N = normalize(decal.modelMatrix[2].xyz);
+        float3x3 invModel3 = float3x3(decal.invModel[0].xyz,
+                                      decal.invModel[1].xyz,
+                                      decal.invModel[2].xyz);
+        float3x3 decalNormalMatrix = transpose(invModel3);
+        float3 T = normalize(decalNormalMatrix * float3(1.0, 0.0, 0.0));
+        float3 B = normalize(decalNormalMatrix * float3(0.0, 1.0, 0.0));
+        float3 N = normalize(decalNormalMatrix * float3(0.0, 0.0, 1.0));
         float3 worldNormal = normalize(T * tangentNormal.x + B * tangentNormal.y + N * tangentNormal.z);
         out.normal = float4(worldNormal * 0.5 + 0.5, opacity);
     }
@@ -2141,32 +2278,44 @@ fragment float4 dof_fragment(
     const int maxSamples = 16;
     int sampleCount = clamp(int(ceil(radius * 0.75)), 4, maxSamples);
 
-    float3 accum = current;
-    float weightSum = 1.0;
+    float3 accum = float3(0.0);
+    float weightSum = 0.0;
     const float golden = 2.399963;
-    for (int i = 0; i < maxSamples; ++i) {
-        if (i >= sampleCount) {
+    for (int i = 0; i <= maxSamples; ++i) {
+        if (i > sampleCount) {
             break;
         }
-        float t = (float(i) + 0.5) / float(sampleCount);
-        float r = radius * sqrt(t);
-        float theta = float(i) * golden;
-        float2 offset = float2(cos(theta), sin(theta)) * r;
-        float2 uv = in.uv + offset * texel;
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        float2 uv = in.uv;
+        float t = 0.0;
+        if (i > 0) {
+            float sampleIndex = float(i - 1);
+            t = (sampleIndex + 0.5) / float(sampleCount);
+            float r = radius * sqrt(t);
+            float theta = sampleIndex * golden;
+            float2 offset = float2(cos(theta), sin(theta)) * r;
+            uv += offset * texel;
+            if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+                continue;
+            }
+        }
+        float sampleDepth = (i == 0) ? depth : depthTex.sample(sourceSampler, uv);
+        if (i > 0 && sampleDepth >= 1.0) {
             continue;
         }
-        float sampleDepth = depthTex.sample(sourceSampler, uv);
-        if (sampleDepth >= 1.0) {
-            continue;
+        float sampleViewDepth = (i == 0) ? viewDepth : linearizeDepth(sampleDepth, camera);
+        float sampleRadius = radius;
+        float cocWeight = 1.0;
+        float depthWeight = 1.0;
+        float w = 1.0;
+        if (i > 0) {
+            float sampleCoc = abs(sampleViewDepth - focusDistance) / focusDistance;
+            sampleRadius = clamp(sampleCoc * apertureScale * maxBlur, 0.0, maxBlur);
+            cocWeight = 1.0 - smoothstep(maxBlur * 0.1, maxBlur, abs(sampleRadius - radius));
+            depthWeight = 1.0 - smoothstep(max(0.5, radius * 0.5), max(1.5, radius * 2.0), abs(sampleViewDepth - viewDepth));
+            w = (1.0 - t * 0.5) * max(cocWeight, 0.1) * max(depthWeight, 0.05);
         }
-        float sampleViewDepth = linearizeDepth(sampleDepth, camera);
-        float sampleCoc = abs(sampleViewDepth - focusDistance) / focusDistance;
-        float sampleRadius = clamp(sampleCoc * apertureScale * maxBlur, 0.0, maxBlur);
-        float cocWeight = 1.0 - smoothstep(maxBlur * 0.1, maxBlur, abs(sampleRadius - radius));
-        float depthWeight = 1.0 - smoothstep(max(0.5, radius * 0.5), max(1.5, radius * 2.0), abs(sampleViewDepth - viewDepth));
-        float w = (1.0 - t * 0.5) * max(cocWeight, 0.1) * max(depthWeight, 0.05);
-        accum += sceneTex.sample(sourceSampler, uv).rgb * w;
+        float3 sampleColor = (i == 0) ? current : sceneTex.sample(sourceSampler, uv).rgb;
+        accum += sampleColor * w;
         weightSum += w;
     }
     float3 color = accum / weightSum;
@@ -2181,6 +2330,7 @@ kernel void fog_volume_build(
     constant FogParams& params [[buffer(1)]],
     const device ShadowGPUData* shadowData [[buffer(2)]],
     sampler shadowSampler [[sampler(0)]],
+    sampler linearSampler [[sampler(1)]],
     uint3 tid [[thread_position_in_grid]]
 ) {
     uint width = volumeTex.get_width();
@@ -2195,7 +2345,7 @@ kernel void fog_volume_build(
 
     float nearPlane = max(params.volumeParams.x, 0.001);
     float farPlane = max(params.volumeParams.y, nearPlane + 0.001);
-    float viewDepth = nearPlane * pow(farPlane / nearPlane, slice);
+    float viewZ = nearPlane * pow(farPlane / nearPlane, slice);
 
     // Match the same UV->NDC convention used by depth reconstruction so the
     // froxel volume lines up with world space instead of a screen-space overlay.
@@ -2203,13 +2353,14 @@ kernel void fog_volume_build(
     float4 clip = float4(ndc, 1.0, 1.0);
     float4 view = camera.projectionMatrixNoJitterInverse * clip;
     float3 viewDir = normalize(view.xyz / max(view.w, 0.0001));
-    float3 viewPos = viewDir * viewDepth;
+    float rayDepth = viewZ / max(-viewDir.z, 0.0001);
+    float3 viewPos = viewDir * rayDepth;
     float3 worldPos = (camera.viewMatrixInverse * float4(viewPos, 1.0)).xyz;
 
     float startDist = max(params.distanceParams.x, 0.0);
     float endDist = max(params.distanceParams.y, startDist + 0.001);
-    float distanceFadeIn = smoothstep(startDist, startDist + max(1.0, startDist * 0.1 + 2.0), viewDepth);
-    float distanceFadeOut = 1.0 - smoothstep(endDist, endDist + max(2.0, endDist * 0.12), viewDepth);
+    float distanceFadeIn = smoothstep(startDist, startDist + max(1.0, startDist * 0.1 + 2.0), rayDepth);
+    float distanceFadeOut = 1.0 - smoothstep(endDist, endDist + max(2.0, endDist * 0.12), rayDepth);
     float distanceMask = clamp(distanceFadeIn * distanceFadeOut, 0.0, 1.0);
 
     float baseDensity = clamp(params.fogColorDensity.w, 0.0, 1.0) * 0.08;
@@ -2299,10 +2450,10 @@ kernel void fog_volume_build(
         if (prevClip.w > 0.0001 && prevViewPos.z < -nearPlane && logDepth > 0.0001) {
             float2 prevNdc = prevClip.xy / prevClip.w;
             float2 prevUv = float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5);
-            float prevDistance = length(prevViewPos);
-            float prevSlice = log(max(prevDistance, nearPlane) / nearPlane) / logDepth;
+            float prevViewZ = max(-prevViewPos.z, nearPlane);
+            float prevSlice = log(prevViewZ / nearPlane) / logDepth;
             if (all(prevUv >= float2(0.0)) && all(prevUv <= float2(1.0)) && prevSlice >= 0.0 && prevSlice <= 1.0) {
-                previous = historyTex.sample(shadowSampler, float3(prevUv, prevSlice));
+                previous = historyTex.sample(linearSampler, float3(prevUv, prevSlice));
                 hasHistorySample = true;
             }
         }
@@ -2346,13 +2497,6 @@ fragment float4 fog_fragment(
         return float4(current, 1.0);
     }
 
-    float2 ndc = uvToNdc(in.uv);
-    float4 clipFar = float4(ndc, 1.0, 1.0);
-    float4 viewFar = camera.projectionMatrixNoJitterInverse * clipFar;
-    float3 viewDir = normalize(viewFar.xyz / max(viewFar.w, 0.0001));
-    float3 worldDir = normalize((camera.viewMatrixInverse * float4(viewDir, 0.0)).xyz);
-    float3 cameraPos = camera.cameraPositionTime.xyz;
-
     float distance = min(endDist, farPlane);
     if (depth < 1.0) {
         float3 viewPos = reconstructViewPosition(in.uv, depth, camera);
@@ -2365,23 +2509,11 @@ fragment float4 fog_fragment(
         return float4(current, 1.0);
     }
 
-    float density = clamp(params.fogColorDensity.w, 0.0, 1.0) * 0.12;
-    float opticalDepth = density * (segmentEnd - segmentStart);
-    if (params.misc.x > 0.5) {
-        opticalDepth = integrateHeightFog(
-            density,
-            params.distanceParams.z,
-            max(params.distanceParams.w, 0.0001),
-            cameraPos.y,
-            worldDir.y,
-            segmentStart,
-            segmentEnd
-        );
-    }
-    opticalDepth = max(opticalDepth, 0.0);
-    float analyticTransmittance = exp(-opticalDepth);
-    float analyticFogAmount = 1.0 - analyticTransmittance;
-    float3 analyticFog = params.fogColorDensity.rgb * analyticFogAmount;
+    float2 ndc = uvToNdc(in.uv);
+    float4 clip = float4(ndc, 1.0, 1.0);
+    float4 view = camera.projectionMatrixNoJitterInverse * clip;
+    float3 viewDir = normalize(view.xyz / max(view.w, 0.0001));
+    float viewZScale = max(-viewDir.z, 0.0001);
 
     float travel = segmentEnd - segmentStart;
     int steps = int(clamp(sliceCount * 0.6, 16.0, 64.0));
@@ -2395,7 +2527,8 @@ fragment float4 fog_fragment(
         }
         float dist = segmentStart + (float(i) + 0.5) * stepLength;
         dist = max(dist, nearPlane);
-        float slice = log(dist / nearPlane) / logDepth;
+        float viewZ = max(dist * viewZScale, nearPlane);
+        float slice = log(viewZ / nearPlane) / logDepth;
         float w = clamp(slice, 0.0, 1.0);
         float3 uvw = float3(in.uv, w);
         float4 fogSample = volumeTex.sample(sourceSampler, uvw);
@@ -2408,7 +2541,7 @@ fragment float4 fog_fragment(
         transmittance *= att;
     }
 
-    float3 color = current * analyticTransmittance + analyticFog + accum;
+    float3 color = current * transmittance + accum;
     return float4(color, 1.0);
 }
 
@@ -2788,33 +2921,15 @@ fragment float4 fragment_main(
     float3x3 TBN = float3x3(T, B, N);
     float receiveShadows = material.heightParams.w;
     
-    // View dir in tangent space for parallax
-    float3 viewDirTS = normalize(TBN * Vworld);
+    // View dir in tangent space for parallax / normal mapping
+    float3 viewDirTS = normalize(float3(dot(Vworld, T), dot(Vworld, B), dot(Vworld, N)));
     
     float2 controlUV = clamp(in.texCoord, float2(0.0), float2(1.0));
     float2 uv = in.texCoord * material.uvTilingOffset.xy + material.uvTilingOffset.zw;
     
-    // Parallax offset mapping (simple)
+    // Parallax occlusion mapping with ray march + binary refinement
     if (material.textureFlags2.z > 0.5) {
-        float numLayers = mix(material.heightParams.y, material.heightParams.z, 1.0 - abs(viewDirTS.z));
-        float layerDepth = 1.0 / max(numLayers, 1.0);
-        float currentLayerDepth = 0.0;
-        float2 P = viewDirTS.xy * material.heightParams.x;
-        float2 deltaUV = P / numLayers;
-        float2 currentUV = uv;
-        float currentHeight = 0.0;
-        while (currentLayerDepth < 1.0) {
-            currentHeight = heightMap.sample(textureSampler, currentUV).r;
-            if (material.textureFlags2.w > 0.5) {
-                currentHeight = 1.0 - currentHeight;
-            }
-            if (currentHeight < currentLayerDepth) {
-                break;
-            }
-            currentUV -= deltaUV;
-            currentLayerDepth += layerDepth;
-        }
-        uv = currentUV;
+        uv = applyParallaxOcclusionMapping(heightMap, textureSampler, uv, viewDirTS, material);
     }
     
     // Albedo
@@ -2987,23 +3102,23 @@ fragment float4 fragment_main(
             LightGPUData Ld = lights[li];
             int type = (int)round(Ld.directionType.w);
             
-            float3 LdirWS = float3(0.0);
+            float3 LdirVS = float3(0.0);
             float distance = 1.0;
             float attenuation = 1.0;
             
             if (type == 0) { // Directional
-                LdirWS = normalize(-Ld.directionType.xyz); // view-space dir
+                LdirVS = normalize(-Ld.directionType.xyz);
             } else {
                 float3 toLightVS = Ld.positionRange.xyz - viewPos;
                 distance = length(toLightVS);
                 if (distance < 1e-4) continue;
-                LdirWS = normalize(toLightVS);
+                LdirVS = normalize(toLightVS);
                 float range = (Ld.positionRange.w > 0.0) ? (1.0 / Ld.positionRange.w) : 0.0;
                 float smooth = pow(saturate(1.0 - pow(distance / max(range, 0.0001), 4.0)), 2.0);
                 attenuation = smooth / max(distance * distance, 0.001);
                 
                 if (type == 2) { // Spot
-                    float cosTheta = dot(normalize(Ld.directionType.xyz), -LdirWS);
+                    float cosTheta = dot(normalize(Ld.directionType.xyz), -LdirVS);
                     if (cosTheta < Ld.misc.y) continue;
                     float spotAtten = smoothstep(Ld.misc.y, Ld.misc.x, cosTheta);
                     attenuation *= spotAtten;
@@ -3012,14 +3127,14 @@ fragment float4 fragment_main(
                 }
             }
             
-            float NdotL = max(dot(Nview, LdirWS), 0.0);
+            float NdotL = max(dot(Nview, LdirVS), 0.0);
             if (NdotL <= 0.0 || attenuation <= 0.0) {
                 continue;
             }
             
-            float3 H = normalize(Vview + LdirWS);
+            float3 H = normalize(Vview + LdirVS);
             float NDF = DistributionGGX(Nview, H, roughness);
-            float G = GeometrySmith(Nview, Vview, LdirWS, roughness);
+            float G = GeometrySmith(Nview, Vview, LdirVS, roughness);
             float3 F = fresnelSchlick(max(dot(H, Vview), 0.0), F0);
             
             float3 numerator = NDF * G * F;
@@ -3037,7 +3152,7 @@ fragment float4 fragment_main(
             int shadowmaskChannel = int((lightFlags >> 6u) & 0x7u) - 1;
             int shadowIdx = (int)round(Ld.shadowCookie.x);
             int cascadeCount = (type == 0 && Ld.shadowCookie.z >= 1.0) ? (int)round(Ld.shadowCookie.z) : 1;
-            float3 LdirWorld = normalize((camera.viewMatrixInverse * float4(LdirWS, 0.0)).xyz);
+            float3 LdirWorld = normalize((camera.viewMatrixInverse * float4(LdirVS, 0.0)).xyz);
             float shadow = 1.0;
             if (shadowIdx >= 0 && receiveShadows > 0.5) {
                 if (type == 1) {
@@ -3164,13 +3279,13 @@ fragment float4 fragment_main(
         float2 envBRDF = brdfLUT.sample(environmentSampler, float2(NdotV, roughness)).rg;
         
         // Fresnel with roughness consideration
-        float3 F = fresnelSchlickRoughness(NdotV, F0, roughness);
-        float3 kS = F;
+        float3 F_ibl = fresnelSchlickRoughness(NdotV, F0, roughness);
+        float3 kS = F_ibl;
         float3 kD = (1.0 - kS) * (1.0 - metallic);
         
         // Combine diffuse and specular IBL
         environmentDiffuseLighting = kD * irradiance * albedo;
-        environmentSpecularLighting = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+        environmentSpecularLighting = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
     } else {
         // ========================================
         // FALLBACK IBL with LOD-based sampling
@@ -3211,7 +3326,6 @@ fragment float4 fragment_main(
     }
     float probeAO = mix(1.0, ao, 0.72);
     float3 probeIndirect = probeLighting * (kD_ambient * albedo / PI) * probeAO;
-    float3 F_probe = fresnelSchlickRoughness(NdotV, F0, roughness);
     float2 probeBRDF = hasProperIBL
         ? brdfLUT.sample(environmentSampler, float2(NdotV, roughness)).rg
         : float2(1.0 - roughness, 0.0);
@@ -3226,7 +3340,7 @@ fragment float4 fragment_main(
     if (probeVolume.blendParams.z > 0.5 && probeVolume.featureParams.y > 0.5 && localReflectionSample.a > 1e-4) {
         probeSpecularOcclusion = mix(1.0, saturate(localReflectionSample.a), 0.65);
     }
-    float3 localReflectionLighting = localReflectionSample.rgb * (F_probe * probeBRDF.x + probeBRDF.y) * specularAO;
+    float3 localReflectionLighting = localReflectionSample.rgb * (F0 * probeBRDF.x + probeBRDF.y) * specularAO;
     localReflectionLighting *= probeSpecularOcclusion;
     environmentSpecularLighting *= specularAO * probeSpecularOcclusion;
     environmentSpecularLighting = mix(environmentSpecularLighting, localReflectionLighting, saturate(localReflectionWeight));
@@ -3287,10 +3401,11 @@ fragment float4 fragment_main(
     }
 
     // Add emission (unpack from Vector4)
-    float3 emission = material.emission.xyz * material.emission.w; // emissionStrength in w
+    float3 emission = material.emission.xyz;
     if (material.textureFlags2.y > 0.5) {
-        emission += emissionMap.sample(textureSampler, uv).rgb * material.emission.w;
+        emission *= emissionMap.sample(textureSampler, uv).rgb;
     }
+    emission *= material.emission.w; // emissionStrength in w
     
     // Final color - dynamic direct + baked direct + IBL + ambient fill + emission
     float3 color = Lo + bakedDirect + environmentLighting + ambientLighting + probeIndirect + emission;
@@ -3457,14 +3572,18 @@ fragment float4 skybox_fragment(
     float3 color = float3(0.0);
     float useHDRI = environment.skyParams.x;
     if (useHDRI > 0.5) {
-        float lod = max(environment.exposureIntensity.w, 1.5);
-        if (environment.toneControl.y > 0.5) {
+        bool hasRawEnvironment = environment.skyParams.z > 0.5;
+        if (hasRawEnvironment) {
+            color = sampleEnvironment(environmentMap, environmentSampler, worldDir, 0.0, environment);
+        } else if (environment.toneControl.y > 0.5) {
             float3x3 envRot = environmentRotation(environment);
             float3 rotatedDir = envRot * worldDir;
+            float maxLod = max(float(environmentCubemap.get_num_mip_levels() - 1), 0.0);
+            float lod = clamp(environment.exposureIntensity.w, 0.0, maxLod);
             color = environmentCubemap.sample(environmentSampler, rotatedDir, level(lod)).rgb;
             color = applyEnvironmentGrading(color, environment);
         } else {
-            color = sampleEnvironment(environmentMap, environmentSampler, worldDir, lod, environment);
+            color = sampleEnvironment(environmentMap, environmentSampler, worldDir, 0.0, environment);
         }
     } else {
         float3 sunDir = normalize(-sun.direction.xyz);
@@ -3552,7 +3671,7 @@ fragment float4 blit_fragment(
         float2 uv = in.uv * grainScale + float2(t * 0.17, t * 0.29);
         float noise = fract(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453);
         float grain = (noise - 0.5) * 2.0;
-        color += grain * grainIntensity;
+        color = max(color + grain * grainIntensity, 0.0);
     }
     if (grainIntensity < 0.0001) {
         float ditherAmount = (toneMapping > 0.5 || gradingIntensity > 0.001) ? 1.0 : 0.0;

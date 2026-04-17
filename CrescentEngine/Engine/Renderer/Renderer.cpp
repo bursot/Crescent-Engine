@@ -67,7 +67,7 @@ struct CubeLUTData {
     std::vector<Math::Vector3> values;
 };
 
-constexpr uint32_t kCookedEnvironmentVersion = 1;
+constexpr uint32_t kCookedEnvironmentVersion = 2;
 constexpr size_t kRGBA16FPixelBytes = sizeof(uint16_t) * 4;
 
 struct CookedEnvironmentHeader {
@@ -4686,6 +4686,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
                 bool hasRoughnessTex = material->getRoughnessTexture() != nullptr;
                 bool hasORMTex = material->getORMTexture() != nullptr;
+                bool hasMetallicTex = material->getMetallicTexture() != nullptr;
+                if (hasORMTex) {
+                    const auto& ormTex = material->getORMTexture();
+                    if (material->getMetallicTexture() == ormTex) {
+                        hasMetallicTex = false;
+                    }
+                    if (material->getRoughnessTexture() == ormTex) {
+                        hasRoughnessTex = false;
+                    }
+                }
                 bool hasTerrainControlTex = material->getTerrainControlTexture() != nullptr;
                 bool hasTerrainLayer0Tex = material->getTerrainLayer0Texture() != nullptr;
                 bool hasTerrainLayer1Tex = material->getTerrainLayer1Texture() != nullptr;
@@ -4693,7 +4703,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 matUniforms.textureFlags = Math::Vector4(
                     material->getAlbedoTexture() ? 1.0f : 0.0f,
                     material->getNormalTexture() ? 1.0f : 0.0f,
-                    material->getMetallicTexture() ? 1.0f : 0.0f,
+                    hasMetallicTex ? 1.0f : 0.0f,
                     hasRoughnessTex ? 1.0f : 0.0f
                 );
                 matUniforms.textureFlags2 = Math::Vector4(
@@ -4712,8 +4722,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 );
                 matUniforms.heightParams = Math::Vector4(
                     material->getHeightScale(),
-                    16.0f,
-                    48.0f,
+                    24.0f,
+                    96.0f,
                     meshRenderer->getReceiveShadows() ? 1.0f : 0.0f
                 );
                 Math::Vector3 windDir = material->getWindDirection();
@@ -4875,6 +4885,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
                         bool hasRoughnessTex = batch.material->getRoughnessTexture() != nullptr;
                         bool hasORMTex = batch.material->getORMTexture() != nullptr;
+                        bool hasMetallicTex = batch.material->getMetallicTexture() != nullptr;
+                        if (hasORMTex) {
+                            const auto& ormTex = batch.material->getORMTexture();
+                            if (batch.material->getMetallicTexture() == ormTex) {
+                                hasMetallicTex = false;
+                            }
+                            if (batch.material->getRoughnessTexture() == ormTex) {
+                                hasRoughnessTex = false;
+                            }
+                        }
                         bool hasTerrainControlTex = batch.material->getTerrainControlTexture() != nullptr;
                         bool hasTerrainLayer0Tex = batch.material->getTerrainLayer0Texture() != nullptr;
                         bool hasTerrainLayer1Tex = batch.material->getTerrainLayer1Texture() != nullptr;
@@ -4882,7 +4902,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                         matUniforms.textureFlags = Math::Vector4(
                             batch.material->getAlbedoTexture() ? 1.0f : 0.0f,
                             batch.material->getNormalTexture() ? 1.0f : 0.0f,
-                            batch.material->getMetallicTexture() ? 1.0f : 0.0f,
+                            hasMetallicTex ? 1.0f : 0.0f,
                             hasRoughnessTex ? 1.0f : 0.0f
                         );
                         matUniforms.textureFlags2 = Math::Vector4(
@@ -4901,8 +4921,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                         );
                         matUniforms.heightParams = Math::Vector4(
                             batch.material->getHeightScale(),
-                            16.0f,
-                            48.0f,
+                            24.0f,
+                            96.0f,
                             batch.receiveShadows ? 1.0f : 0.0f
                         );
                         Math::Vector3 windDir = batch.material->getWindDirection();
@@ -5058,6 +5078,16 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
 
                         bool hasRoughnessTex = draw.material->getRoughnessTexture() != nullptr;
                         bool hasORMTex = draw.material->getORMTexture() != nullptr;
+                        bool hasMetallicTex = draw.material->getMetallicTexture() != nullptr;
+                        if (hasORMTex) {
+                            const auto& ormTex = draw.material->getORMTexture();
+                            if (draw.material->getMetallicTexture() == ormTex) {
+                                hasMetallicTex = false;
+                            }
+                            if (draw.material->getRoughnessTexture() == ormTex) {
+                                hasRoughnessTex = false;
+                            }
+                        }
                         bool hasTerrainControlTex = draw.material->getTerrainControlTexture() != nullptr;
                         bool hasTerrainLayer0Tex = draw.material->getTerrainLayer0Texture() != nullptr;
                         bool hasTerrainLayer1Tex = draw.material->getTerrainLayer1Texture() != nullptr;
@@ -5065,7 +5095,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                         matUniforms.textureFlags = Math::Vector4(
                             draw.material->getAlbedoTexture() ? 1.0f : 0.0f,
                             draw.material->getNormalTexture() ? 1.0f : 0.0f,
-                            draw.material->getMetallicTexture() ? 1.0f : 0.0f,
+                            hasMetallicTex ? 1.0f : 0.0f,
                             hasRoughnessTex ? 1.0f : 0.0f
                         );
                         matUniforms.textureFlags2 = Math::Vector4(
@@ -5084,8 +5114,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                         );
                         matUniforms.heightParams = Math::Vector4(
                             draw.material->getHeightScale(),
-                            16.0f,
-                            48.0f,
+                            24.0f,
+                            96.0f,
                             draw.receiveShadows ? 1.0f : 0.0f
                         );
                         Math::Vector3 windDir = draw.material->getWindDirection();
@@ -5389,11 +5419,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         velEncoder->setCullMode(MTL::CullModeBack);
         velEncoder->setViewport(viewport);
 
-        bool velocityUseJitter = taaEnabled;
-        Math::Matrix4x4 currViewProjection = velocityUseJitter ? viewProjection : viewProjectionNoJitter;
-        Math::Matrix4x4 prevViewProjection = velocityUseJitter
-            ? (m_motionHistoryValid ? m_prevViewProjection : viewProjection)
-            : (m_motionHistoryValid ? m_prevViewProjectionNoJitter : viewProjectionNoJitter);
+        Math::Matrix4x4 currViewProjection = viewProjectionNoJitter;
+        Math::Matrix4x4 prevViewProjection = m_motionHistoryValid ? m_prevViewProjectionNoJitter : viewProjectionNoJitter;
 
         const auto& velEntities = scene->getAllEntities();
         for (const auto& entityPtr : velEntities) {
@@ -5414,6 +5441,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             if (!mesh) {
                 continue;
             }
+            std::shared_ptr<Material> material = meshRenderer->getMaterial(0);
 
             MTL::Buffer* vertexBuffer = static_cast<MTL::Buffer*>(mesh->getVertexBuffer());
             MTL::Buffer* indexBuffer = static_cast<MTL::Buffer*>(mesh->getIndexBuffer());
@@ -5440,12 +5468,49 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             velocityUniforms.prevModelMatrix = entity->getTransform()->getPreviousWorldMatrix();
             velocityUniforms.currViewProjection = currViewProjection;
             velocityUniforms.prevViewProjection = prevViewProjection;
+            MaterialUniformsGPU materialUniforms{};
+            MeshUniformsGPU meshUniforms{};
+            if (material) {
+                Math::Vector3 windDir = material->getWindDirection();
+                materialUniforms.foliageParams0 = Math::Vector4(
+                    material->getWindStrength(),
+                    material->getWindSpeed(),
+                    material->getWindScale(),
+                    material->getWindGust()
+                );
+                materialUniforms.foliageParams1 = Math::Vector4(
+                    material->getLodFadeStart(),
+                    material->getLodFadeEnd(),
+                    material->getBillboardStart(),
+                    material->getBillboardEnd()
+                );
+                materialUniforms.foliageParams2 = Math::Vector4(
+                    material->getWindEnabled() ? 1.0f : 0.0f,
+                    material->getLodFadeEnabled() ? 1.0f : 0.0f,
+                    material->getBillboardEnabled() ? 1.0f : 0.0f,
+                    material->getDitherEnabled() ? 1.0f : 0.0f
+                );
+                materialUniforms.foliageParams3 = Math::Vector4(windDir.x, windDir.y, windDir.z, 0.0f);
+            }
+            Math::Vector3 boundsCenter = mesh->getBoundsCenter();
+            Math::Vector3 boundsSize = mesh->getBoundsSize();
+            meshUniforms.boundsCenter = Math::Vector4(boundsCenter.x, boundsCenter.y, boundsCenter.z, 0.0f);
+            meshUniforms.boundsSize = Math::Vector4(boundsSize.x, boundsSize.y, boundsSize.z, 0.0f);
+            meshUniforms.flags = Math::Vector4((material && material->getBillboardEnabled()) ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+            meshUniforms.lightmapScaleOffset = Math::Vector4(1.0f, 1.0f, 0.0f, 0.0f);
 
             velEncoder->setVertexBuffer(vertexBuffer, 0, 0);
+            velEncoder->setVertexBuffer(m_cameraUniformBuffer, 0, 2);
             if (isSkinned) {
                 velEncoder->setVertexBuffer(skinBuffer, 0, 4);
             }
             velEncoder->setVertexBytes(&modelUniforms, sizeof(ModelUniforms), 1);
+            if (isSkinned) {
+                velEncoder->setVertexBytes(&materialUniforms, sizeof(MaterialUniformsGPU), 7);
+            } else {
+                velEncoder->setVertexBytes(&materialUniforms, sizeof(MaterialUniformsGPU), 3);
+                velEncoder->setVertexBytes(&meshUniforms, sizeof(MeshUniformsGPU), 4);
+            }
             velEncoder->setVertexBytes(&velocityUniforms, sizeof(VelocityUniformsGPU), 5);
 
             if (isSkinned && skinned) {
@@ -5738,6 +5803,15 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             bool hasEmissionTex = material->getEmissionTexture() != nullptr;
             bool hasHeightTex = material->getHeightTexture() != nullptr;
             bool hasORMTex = material->getORMTexture() != nullptr;
+            if (hasORMTex) {
+                const auto& ormTex = material->getORMTexture();
+                if (material->getMetallicTexture() == ormTex) {
+                    hasMetallicTex = false;
+                }
+                if (material->getRoughnessTexture() == ormTex) {
+                    hasRoughnessTex = false;
+                }
+            }
             bool hasTerrainControlTex = material->getTerrainControlTexture() != nullptr;
             bool hasTerrainLayer0Tex = material->getTerrainLayer0Texture() != nullptr;
             bool hasTerrainLayer1Tex = material->getTerrainLayer1Texture() != nullptr;
@@ -5766,8 +5840,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
             );
             matUniforms.heightParams = Math::Vector4(
                 material->getHeightScale(),
-                16.0f,   // min layers
-                48.0f,  // max layers
+                24.0f,   // min layers
+                96.0f,  // max layers
                 meshRenderer->getReceiveShadows() ? 1.0f : 0.0f
             );
             Math::Vector3 windDir = material->getWindDirection();
@@ -6043,6 +6117,15 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 bool hasEmissionTex = batch.material->getEmissionTexture() != nullptr;
                 bool hasHeightTex = batch.material->getHeightTexture() != nullptr;
                 bool hasORMTex = batch.material->getORMTexture() != nullptr;
+                if (hasORMTex) {
+                    const auto& ormTex = batch.material->getORMTexture();
+                    if (batch.material->getMetallicTexture() == ormTex) {
+                        hasMetallicTex = false;
+                    }
+                    if (batch.material->getRoughnessTexture() == ormTex) {
+                        hasRoughnessTex = false;
+                    }
+                }
                 bool hasTerrainControlTex = batch.material->getTerrainControlTexture() != nullptr;
                 bool hasTerrainLayer0Tex = batch.material->getTerrainLayer0Texture() != nullptr;
                 bool hasTerrainLayer1Tex = batch.material->getTerrainLayer1Texture() != nullptr;
@@ -6071,8 +6154,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 );
                 matUniforms.heightParams = Math::Vector4(
                     batch.material->getHeightScale(),
-                    16.0f,
-                    48.0f,
+                    24.0f,
+                    96.0f,
                     batch.receiveShadows ? 1.0f : 0.0f
                 );
                 Math::Vector3 windDir = batch.material->getWindDirection();
@@ -6303,6 +6386,15 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 bool hasEmissionTex = draw.material->getEmissionTexture() != nullptr;
                 bool hasHeightTex = draw.material->getHeightTexture() != nullptr;
                 bool hasORMTex = draw.material->getORMTexture() != nullptr;
+                if (hasORMTex) {
+                    const auto& ormTex = draw.material->getORMTexture();
+                    if (draw.material->getMetallicTexture() == ormTex) {
+                        hasMetallicTex = false;
+                    }
+                    if (draw.material->getRoughnessTexture() == ormTex) {
+                        hasRoughnessTex = false;
+                    }
+                }
                 bool hasTerrainControlTex = draw.material->getTerrainControlTexture() != nullptr;
                 bool hasTerrainLayer0Tex = draw.material->getTerrainLayer0Texture() != nullptr;
                 bool hasTerrainLayer1Tex = draw.material->getTerrainLayer1Texture() != nullptr;
@@ -6331,8 +6423,8 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
                 );
                 matUniforms.heightParams = Math::Vector4(
                     draw.material->getHeightScale(),
-                    16.0f,
-                    48.0f,
+                    24.0f,
+                    96.0f,
                     draw.receiveShadows ? 1.0f : 0.0f
                 );
                 Math::Vector3 windDir = draw.material->getWindDirection();
@@ -6732,6 +6824,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         }
         if (m_linearClampSampler) {
             fogCompute->setSamplerState(m_linearClampSampler, 0);
+            fogCompute->setSamplerState(m_linearClampSampler, 1);
         }
         MTL::Size threadsPerGroup = MTL::Size::Make(4, 4, 4);
         MTL::Size threadgroups = MTL::Size::Make(
@@ -6778,7 +6871,7 @@ void Renderer::renderScene(Scene* scene, Camera* cameraOverride, const RenderOpt
         && m_taaHistoryTexture && m_taaCurrentTexture && sceneColorForPost;
     if (useTAA) {
         TAAParamsGPU taaParams{};
-        taaParams.prevViewProjection = m_prevViewProjection;
+        taaParams.prevViewProjection = m_prevViewProjectionNoJitter;
         float sharpness = std::max(0.0f, std::min(1.0f, post.taaSharpness));
         float feedback = 0.2f - 0.15f * sharpness;
         taaParams.params0 = Math::Vector4(
@@ -7398,10 +7491,16 @@ void Renderer::updateEnvironmentUniforms() {
         m_environmentSettings.skyboxVisible ? 1.0f : 0.0f,
         m_outputHDR ? 1.0f : 0.0f
     );
+    bool hasRawEnvironment = !m_environmentSettings.sourcePath.empty()
+        && m_environmentSettings.sourcePath != "Builtin Sky"
+        && std::filesystem::path(m_environmentSettings.sourcePath).extension() != ".cenv"
+        && m_environmentTexture
+        && m_environmentTexture != m_defaultEnvironmentTexture
+        && m_environmentTexture != m_defaultWhiteTexture;
     env->skyParams = Math::Vector4(
         static_cast<float>(m_environmentSettings.skyMode),
         static_cast<float>(m_environmentSettings.shadowDebugMode),
-        0.0f,
+        hasRawEnvironment ? 1.0f : 0.0f,
         0.0f
     );
     
